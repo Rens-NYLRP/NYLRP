@@ -2,12 +2,8 @@
   "1379173469132030062": {
     "session": {
       "channel": "1379173470549835787",
-      "pingRoles": [
-        "1379173469358522434"
-      ],
-      "allowedRoles": [
-        "1379173469484224596"
-      ],
+      "pingRoles": ["1379173469358522434"],
+      "allowedRoles": ["1379173469484224596"],
       "joinLink": "roblox://placeId=2534724415&launchData=%7B%22psCode%22%3A%22NYLrp%22%7D",
       "startImage": null,
       "startDescription": "The required votes has been achieved so a session has started up. People who have voted must join. Others may also join for some fun roleplays\n\nServer Code = NYLrp\nServer Name = New York Liberty RP I New I Fun I Realistic",
@@ -17,29 +13,19 @@
       "shutdownDescription": "The session has ended. We hope to see you again soon."
     },
     "ticket": {
-      "pingRoles": [
-        "1379173469484224596"
-      ],
+      "pingRoles": ["1379173469484224596"],
       "transcriptChannel": "1496941902711492830",
       "ticketChannel": "1379173470323085400",
       "ticketCategory": "1478126387188600853",
       "ticketTypes": [
-        {
-          "label": "Support",
-          "value": "support"
-        },
-        {
-          "label": "Ban Appeal",
-          "value": "ban_appeal"
-        },
-        {
-          "label": "Partnership",
-          "value": "partnership"
-        }
+        { "id": "support", "label": "Support", "emoji": null, "color": "blue", "description": null },
+        { "id": "ban_appeal", "label": "Ban Appeal", "emoji": null, "color": "blue", "description": null },
+        { "id": "partnership", "label": "Partnership", "emoji": null, "color": "blue", "description": null }
       ],
       "panelTitle": "Tickets",
       "panelDescription": "Here you can request assistance select the button ' Open Ticket ' For a selection menu.",
       "panelColor": "#5865f2",
+      "panelThumbnail": null,
       "welcomeText": "Welcome {user} in ur ticket. Describe your question already so we can get started as soon as possible. Also DONT PING any staff members."
     },
     "selfroles": {
@@ -54,36 +40,11 @@
           "type": "buttons",
           "max": 0,
           "roles": [
-            {
-              "id": "1379173469320908945",
-              "label": "Session",
-              "emoji": null,
-              "description": null
-            },
-            {
-              "id": "1486071783835701450",
-              "label": "Department",
-              "emoji": null,
-              "description": null
-            },
-            {
-              "id": "1486071746401402950",
-              "label": "Giveaway",
-              "emoji": null,
-              "description": null
-            },
-            {
-              "id": "1486071692215189604",
-              "label": "Partnership",
-              "emoji": null,
-              "description": null
-            },
-            {
-              "id": "1486071918850343073",
-              "label": "Staff",
-              "emoji": null,
-              "description": null
-            }
+            { "id": "1379173469320908945", "label": "Session", "emoji": null, "description": null },
+            { "id": "1486071783835701450", "label": "Department", "emoji": null, "description": null },
+            { "id": "1486071746401402950", "label": "Giveaway", "emoji": null, "description": null },
+            { "id": "1486071692215189604", "label": "Partnership", "emoji": null, "description": null },
+            { "id": "1486071918850343073", "label": "Staff", "emoji": null, "description": null }
           ]
         }
       }
