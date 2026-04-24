@@ -30,14 +30,29 @@ const client = new Client({
 });
 
 // ════════════════════════════════════════════
-// CONFIG HELPERS
+// CONFIG HELPERS — persists to config.json
 // ════════════════════════════════════════════
-const CONFIG_FILE = './config.json';
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+
 function loadConfig() {
-  if (!fs.existsSync(CONFIG_FILE)) return {};
-  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to load config:', e);
+  }
+  return {};
 }
-function saveConfig(cfg) { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
+
+function saveConfig(cfg) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to save config:', e);
+  }
+}
+
 let config = loadConfig();
 
 function getGuildConfig(guildId) {
@@ -57,7 +72,7 @@ function getTicketConfig(guildId) {
     panelColor: '#5865F2',
     panelThumbnail: null,
     welcomeText: 'Hello {user}, thank you for opening a ticket!\nA staff member will be with you shortly.',
-    ticketTypes: [], // each: { id, label, emoji, color, description }
+    ticketTypes: [],
   };
   return gc.ticket;
 }
@@ -99,9 +114,8 @@ function canRunSession(member, guildId) {
   return sc.allowedRoles.some(id => member.roles.cache.has(id));
 }
 
-// Pending state maps
-const openTickets      = new Map(); // userId → channelId
-const srPendingRoleAdd = new Map(); // userId → { panelId, roleId }
+const openTickets      = new Map();
+const srPendingRoleAdd = new Map();
 
 // ════════════════════════════════════════════
 // UTILS
@@ -184,13 +198,16 @@ function buildTicketTypeButtons(ticketTypes) {
   for (let i = 0; i < Math.min(ticketTypes.length, 25); i += 5) {
     const chunk = ticketTypes.slice(i, i + 5);
     rows.push(new ActionRowBuilder().addComponents(
-      chunk.map(t =>
-        new ButtonBuilder()
+      chunk.map(t => {
+        const btn = new ButtonBuilder()
           .setCustomId(`tkt__open__${t.id}`)
           .setLabel(t.label.slice(0, 80))
-          .setStyle(colorToButtonStyle(t.color))
-          .setEmoji(t.emoji || undefined)
-      )
+          .setStyle(colorToButtonStyle(t.color));
+        if (t.emoji) {
+          try { btn.setEmoji(t.emoji); } catch {}
+        }
+        return btn;
+      })
     ));
   }
   return rows;
@@ -271,70 +288,105 @@ function buildSessionSetupPayload(guildId) {
 // SELFROLE SETUP PAYLOAD
 // ════════════════════════════════════════════
 function buildSelfRoleOverview(guildId) {
-  const src    = getSelfRoleConfig(guildId);
+  const src = getSelfRoleConfig(guildId);
   const panels = Object.entries(src.panels);
-  const embed  = new EmbedBuilder()
-    .setTitle('🎨 Self Role Setup').setColor(0xEB459E)
-    .setDescription(panels.length === 0
-      ? '*No panels yet. Click **New Panel** to create one.*'
-      : panels.map(([pid, p]) =>
-          `**${p.title}** \`[${pid}]\` (${p.type || 'buttons'}) — ${p.roles.length} roles | ch: ${p.channel ? `<#${p.channel}>` : '❌'}`
-        ).join('\n')
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎨 Self Role Setup')
+    .setColor(0xEB459E)
+    .setDescription(
+      panels.length === 0
+        ? '*No panels yet. Click **New Panel** to create one.*'
+        : panels
+            .map(([pid, p]) =>
+              `**${p.title}** \`[${pid}]\` (${p.type || 'buttons'}) — ${p.roles.length} roles | ch: ${
+                p.channel ? `<#${p.channel}>` : '❌'
+              }`
+            )
+            .join('\n')
     );
+
   const btns = [
-    new ButtonBuilder().setCustomId('sr_new').setLabel('New Panel').setStyle(ButtonStyle.Success).setEmoji('➕'),
+    new ButtonBuilder()
+      .setCustomId('sr_new')
+      .setLabel('New Panel')
+      .setStyle(ButtonStyle.Success)
+      .setEmoji('➕'),
   ];
+
   if (panels.length) {
     btns.push(
-      new ButtonBuilder().setCustomId('sr_edit').setLabel('Edit Panel').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
-      new ButtonBuilder().setCustomId('sr_delete').setLabel('Delete Panel').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+      new ButtonBuilder()
+        .setCustomId('sr_edit')
+        .setLabel('Edit Panel')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('✏️'),
+      new ButtonBuilder()
+        .setCustomId('sr_delete')
+        .setLabel('Delete Panel')
+        .setStyle(ButtonStyle.Danger)
+        .setEmoji('🗑️')
     );
   }
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
+
+  return {
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(btns)],
+  };
 }
 
+// ════════════════════════════════════════════
+// PANEL EDITOR
+// ════════════════════════════════════════════
 function buildPanelEditor(guildId, panelId) {
-  const src   = getSelfRoleConfig(guildId);
-  const p     = src.panels[panelId];
+  const src = getSelfRoleConfig(guildId);
+  const p = src.panels[panelId];
+
   const embed = new EmbedBuilder()
-    .setTitle(`✏️ Editing — ${p.title}`).setColor(hexToInt(p.color))
+    .setTitle(`✏️ Editing — ${p.title}`)
+    .setColor(hexToInt(p.color))
     .addFields(
-      { name: '📛 Title',       value: p.title,                        inline: true },
-      { name: '🎨 Color',       value: p.color || '#EB459E',           inline: true },
-      { name: '🔀 Type',        value: p.type  || 'buttons',           inline: true },
-      { name: '📢 Channel',     value: p.channel ? `<#${p.channel}>` : '*Not set*', inline: true },
-      { name: '🔢 Max Roles',   value: p.max != null ? (p.max === 0 ? 'Unlimited' : String(p.max)) : 'Unlimited', inline: true },
-      { name: '📝 Description', value: p.description || '*Not set*',   inline: false },
-      { name: '🖼️ Thumbnail',   value: p.thumbnail ? '✅ Set' : '❌ Not set', inline: true },
-      { name: '🎭 Roles',
+      { name: '📛 Title', value: p.title, inline: true },
+      { name: '🎨 Color', value: p.color || '#EB459E', inline: true },
+      { name: '🔀 Type', value: p.type || 'buttons', inline: true },
+      { name: '📢 Channel', value: p.channel ? `<#${p.channel}>` : '*Not set*', inline: true },
+      { name: '🔢 Max Roles', value: p.max != null ? (p.max === 0 ? 'Unlimited' : String(p.max)) : 'Unlimited', inline: true },
+      { name: '📝 Description', value: p.description || '*Not set*', inline: false },
+      { name: '🖼️ Thumbnail', value: p.thumbnail ? '✅ Set' : '❌ Not set', inline: true },
+      {
+        name: '🎭 Roles',
         value: p.roles.length
           ? p.roles.map(r => {
               const indicator = p.type === 'reaction' ? (r.reaction || '•') : (r.emoji || '•');
               return `${indicator} <@&${r.id}> — \`${r.label}\`${r.description ? `\n  ↳ *${r.description}*` : ''}`;
             }).join('\n')
           : '*No roles yet*',
-        inline: false },
+        inline: false,
+      }
     );
+
   if (p.thumbnail) embed.setThumbnail(p.thumbnail);
 
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`sre__embed__${panelId}`).setLabel('Edit Embed').setStyle(ButtonStyle.Primary).setEmoji('🎨'),
     new ButtonBuilder().setCustomId(`sre__channel__${panelId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId(`sre__addrole__${panelId}`).setLabel('Add Role').setStyle(ButtonStyle.Success).setEmoji('➕'),
-    new ButtonBuilder().setCustomId(`sre__removerole__${panelId}`).setLabel('Remove Role').setStyle(ButtonStyle.Danger).setEmoji('➖'),
+    new ButtonBuilder().setCustomId(`sre__removerole__${panelId}`).setLabel('Remove Role').setStyle(ButtonStyle.Danger).setEmoji('➖')
   );
+
   const r2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`sre__deploy__${panelId}`).setLabel('Deploy').setStyle(ButtonStyle.Success).setEmoji('🚀'),
-    new ButtonBuilder().setCustomId('sr__back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('sr__back').setLabel('← Back').setStyle(ButtonStyle.Secondary)
   );
-  return { embeds: [embed], components: [r1, r2], ephemeral: true };
+
+  return { embeds: [embed], components: [r1, r2] };
 }
 
 // ════════════════════════════════════════════
-// DEPLOY SELFROLE PANEL
+// DEPLOY SELFROLE PANEL — FIXED
 // ════════════════════════════════════════════
 async function deploySelfRolePanel(guild, panelId, panel) {
-  const channel = guild.channels.cache.get(panel.channel);
+  const channel = await guild.channels.fetch(panel.channel).catch(() => null);
   if (!channel) throw new Error('Channel not found');
 
   const embed = new EmbedBuilder()
@@ -342,6 +394,7 @@ async function deploySelfRolePanel(guild, panelId, panel) {
     .setDescription(panel.description || 'Select your roles below.')
     .setColor(hexToInt(panel.color))
     .setFooter({ text: panel.type === 'reaction' ? 'React to get a role' : 'Click to toggle your role' });
+
   if (panel.thumbnail) embed.setThumbnail(panel.thumbnail);
 
   // ── Reaction panel ──
@@ -366,7 +419,7 @@ async function deploySelfRolePanel(guild, panelId, panel) {
       return opt;
     });
     const maxVals = panel.max > 0 ? Math.min(panel.max, options.length) : options.length;
-    const select  = new StringSelectMenuBuilder()
+    const select = new StringSelectMenuBuilder()
       .setCustomId(`srp__dd__${panelId}`)
       .setPlaceholder('Choose your roles…')
       .setMinValues(0)
@@ -382,13 +435,16 @@ async function deploySelfRolePanel(guild, panelId, panel) {
   for (let i = 0; i < Math.min(panel.roles.length, 25); i += 5) {
     const chunk = panel.roles.slice(i, i + 5);
     rows.push(new ActionRowBuilder().addComponents(
-      chunk.map(r =>
-        new ButtonBuilder()
+      chunk.map(r => {
+        const btn = new ButtonBuilder()
           .setCustomId(`srp__btn__${panelId}__${r.id}`)
           .setLabel(r.label.slice(0, 80))
-          .setStyle(ButtonStyle.Secondary)
-          .setEmoji(r.emoji || undefined)
-      )
+          .setStyle(ButtonStyle.Secondary);
+        if (r.emoji) {
+          try { btn.setEmoji(r.emoji); } catch {}
+        }
+        return btn;
+      })
     ));
   }
   const msg = await channel.send({ embeds: [embed], components: rows });
@@ -662,7 +718,7 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
         if (sub === 'tickets')   return interaction.reply(buildTicketSetupPayload(guildId));
         if (sub === 'sessions')  return interaction.reply(buildSessionSetupPayload(guildId));
-        if (sub === 'selfroles') return interaction.reply(buildSelfRoleOverview(guildId));
+        if (sub === 'selfroles') return interaction.reply({ ...buildSelfRoleOverview(guildId), ephemeral: true });
       }
       if (cmd === 'players') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
@@ -796,7 +852,11 @@ client.on('interactionCreate', async interaction => {
           const tc = getTicketConfig(guildId);
           if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types to remove.', ephemeral: true });
           const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type to remove...')
-            .addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id, emoji: t.emoji || undefined })));
+            .addOptions(tc.ticketTypes.map(t => {
+              const opt = { label: t.label, value: t.id };
+              if (t.emoji) opt.emoji = t.emoji;
+              return opt;
+            }));
           return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
         }
         if (id === 't_deploy') {
@@ -805,8 +865,14 @@ client.on('interactionCreate', async interaction => {
           if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ Add at least one ticket type first.', ephemeral: true });
           const ch = interaction.guild.channels.cache.get(tc.ticketChannel);
           if (!ch) return interaction.reply({ content: '❌ Panel channel not found.', ephemeral: true });
-          await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
-          return interaction.reply({ content: `✅ Ticket panel deployed in <#${tc.ticketChannel}>!`, ephemeral: true });
+          try {
+            await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
+            saveConfig(config);
+            return interaction.reply({ content: `✅ Ticket panel deployed in <#${tc.ticketChannel}>!`, ephemeral: true });
+          } catch (e) {
+            console.error('Ticket deploy error:', e);
+            return interaction.reply({ content: `❌ Failed to deploy: ${e.message}`, ephemeral: true });
+          }
         }
       }
 
@@ -911,9 +977,15 @@ client.on('interactionCreate', async interaction => {
           if (action === 'deploy') {
             if (!panel.channel)      return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
             if (!panel.roles.length) return interaction.reply({ content: '❌ Add at least one role.', ephemeral: true });
-            await deploySelfRolePanel(interaction.guild, panelId, panel);
-            saveConfig(config);
-            return interaction.reply({ content: `✅ **${panel.title}** deployed in <#${panel.channel}>!`, ephemeral: true });
+            try {
+              await interaction.deferReply({ ephemeral: true });
+              await deploySelfRolePanel(interaction.guild, panelId, panel);
+              saveConfig(config);
+              return interaction.editReply({ content: `✅ **${panel.title}** deployed in <#${panel.channel}>!` });
+            } catch (e) {
+              console.error('SelfRole deploy error:', e);
+              return interaction.editReply({ content: `❌ Failed to deploy: ${e.message}` });
+            }
           }
         }
       }
@@ -1032,8 +1104,8 @@ client.on('interactionCreate', async interaction => {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const ids = interaction.values;
 
-      if (interaction.customId === 'td_ping_roles')    { getTicketConfig(guildId).pingRoles    = ids; saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
-      if (interaction.customId === 'sd_ping_roles')    { getSessionConfig(guildId).pingRoles   = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
+      if (interaction.customId === 'td_ping_roles')    { getTicketConfig(guildId).pingRoles     = ids; saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
+      if (interaction.customId === 'sd_ping_roles')    { getSessionConfig(guildId).pingRoles    = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_allowed_roles') { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
 
       if (interaction.customId.startsWith('srr__add__')) {
@@ -1045,7 +1117,6 @@ client.on('interactionCreate', async interaction => {
         if (panel.roles.some(r => r.id === roleId)) return interaction.reply({ content: '❌ Role already added.', ephemeral: true });
         srPendingRoleAdd.set(interaction.user.id, { panelId, roleId });
 
-        // Modal fields differ for reaction vs button/dropdown panels
         const modal = new ModalBuilder().setCustomId(`modal_sr_rolelabel__${panelId}`).setTitle(
           panel.type === 'reaction' ? 'Configure Role Reaction' : 'Configure Role Button'
         );
@@ -1137,11 +1208,9 @@ client.on('interactionCreate', async interaction => {
         const selectedRoleIds = interaction.values;
         const allPanelRoleIds = panel.roles.map(r => r.id);
 
-        // Remove all current panel roles from member
         const toRemove = interaction.member.roles.cache.filter(r => allPanelRoleIds.includes(r.id));
         if (toRemove.size > 0) await interaction.member.roles.remove(toRemove);
 
-        // Add newly selected roles
         const toAdd = selectedRoleIds.map(rid => interaction.guild.roles.cache.get(rid)).filter(Boolean);
         if (toAdd.length > 0) await interaction.member.roles.add(toAdd);
 
@@ -1247,7 +1316,7 @@ client.on('interactionCreate', async interaction => {
           roles: [],
         };
         saveConfig(config);
-        return interaction.update(buildPanelEditor(guildId, pid));
+        return interaction.reply({ ...buildPanelEditor(guildId, pid), ephemeral: true });
       }
 
       if (mid.startsWith('modal_sr_embed__')) {
