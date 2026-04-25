@@ -1372,4 +1372,4 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.login(process.env.TOKEN);
+const http = require("http"); http.createServer((req, res) => res.end("OK")).listen(process.env.PORT || 3000); client.login(process.env.TOKEN);
