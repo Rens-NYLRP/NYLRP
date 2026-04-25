@@ -1306,4 +1306,4 @@ client.on('interactionCreate', async interaction => {
 client.login(process.env.TOKEN);
 
 const http = require("http");
-http.createServer((req, res) => res.end("Bot is running!")).listen(process.env.PORT || 3000);
+http.createServer((req, res) => res.end("Bot is running!")).listen(process.env.PORT || 10000);
