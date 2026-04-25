@@ -226,7 +226,7 @@ function buildTicketPanelEmbed(tc) {
     .setTitle(tc.panelTitle || '🎫 Support Tickets')
     .setDescription(tc.panelDescription || 'Click a button below to open a ticket.')
     .setColor(hexToInt(tc.panelColor));
-  if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail); // ✅ FIX: setImage instead of setThumbnail
+  if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
   return embed;
 }
 
@@ -346,6 +346,7 @@ function buildAnnouncementOverview(guildId) {
 function buildAnnouncementEditor(guildId, typeId) {
   const ac = getAnnouncementConfig(guildId);
   const t = ac.types[typeId];
+  if (!t) return buildAnnouncementOverview(guildId);
   const embed = new EmbedBuilder()
     .setTitle(`✏️ Editing — ${t.emoji || '📢'} ${t.name}`).setColor(hexToInt(t.color))
     .addFields(
@@ -486,7 +487,6 @@ async function deploySelfRolePanel(guild, panelId, panel) {
 // COMMANDS
 // ════════════════════════════════════════════
 const commands = [
-  // ── NORMAL COMMANDS ──
   { name: 'ping', description: 'Check bot latency' },
   { name: 'avatar', description: 'Show a user\'s avatar', options: [
     { name: 'user', type: 6, description: 'Who?', required: false },
@@ -524,8 +524,6 @@ const commands = [
     { name: 'vote', type: 1, description: 'Start vote' },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
   ]},
-
-  // ── SHR COMMANDS ──
   { name: 'ban', description: '[SHR] Ban user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
@@ -712,7 +710,15 @@ client.on('messageReactionRemove', async (reaction, user) => {
 // INTERACTIONS
 // ════════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
+  // ✅ FIX: Always grab guildId at the top, guard against DMs
   const guildId = interaction.guildId;
+  if (!guildId) {
+    try {
+      if (interaction.isRepliable()) await interaction.reply({ content: '❌ This bot can only be used in a server.', ephemeral: true });
+    } catch {}
+    return;
+  }
+
   try {
 
     // ── SLASH COMMANDS ──
@@ -721,8 +727,6 @@ client.on('interactionCreate', async interaction => {
       const user = interaction.options.getUser('user') ?? null;
       const member = user ? interaction.options.getMember('user') : null;
       const reason = interaction.options.getString('reason') ?? 'No reason provided';
-
-      // ── NORMAL COMMANDS ──
 
       if (cmd === 'ping') {
         const sent = await interaction.reply({ content: '🏓 Pinging...', fetchReply: true });
@@ -757,8 +761,7 @@ client.on('interactionCreate', async interaction => {
             { name: '😀 Emojis', value: `${g.emojis.cache.size}`, inline: true },
             { name: '🔒 Verification', value: g.verificationLevel.toString(), inline: true },
             { name: '🆔 Server ID', value: g.id, inline: true },
-          )
-          .setTimestamp()
+          ).setTimestamp()
         ]});
       }
 
@@ -775,8 +778,7 @@ client.on('interactionCreate', async interaction => {
             { name: '🤖 Managed', value: role.managed ? 'Yes' : 'No', inline: true },
             { name: '💬 Mentionable', value: role.mentionable ? 'Yes' : 'No', inline: true },
             { name: '📅 Created', value: role.createdAt.toDateString(), inline: true },
-          )
-          .setTimestamp()
+          ).setTimestamp()
         ]});
       }
 
@@ -823,8 +825,7 @@ client.on('interactionCreate', async interaction => {
         addWarning(guildId, user.id, warnData);
         const warnCount = getWarnings(guildId, user.id).length;
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('⚠️ Warning Issued')
-          .setColor(0xFEE75C)
+          .setTitle('⚠️ Warning Issued').setColor(0xFEE75C)
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
             { name: 'Moderator', value: interaction.user.tag, inline: true },
@@ -839,8 +840,7 @@ client.on('interactionCreate', async interaction => {
         const mins = interaction.options.getInteger('minutes');
         await member.timeout(mins * 60000, reason);
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🔇 User Muted')
-          .setColor(0xED4245)
+          .setTitle('🔇 User Muted').setColor(0xED4245)
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
             { name: 'Duration', value: `${mins} minutes`, inline: true },
@@ -880,14 +880,11 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Deleted **${del.size}** messages.`, ephemeral: true });
       }
 
-      // ── SHR COMMANDS ──
-
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.guild.members.ban(user, { reason });
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🔨 User Banned')
-          .setColor(0xED4245)
+          .setTitle('🔨 User Banned').setColor(0xED4245)
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
             { name: 'Moderator', value: interaction.user.tag, inline: true },
@@ -908,8 +905,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: 604800 });
         await interaction.guild.members.unban(user.id, 'Softban');
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🪃 User Softbanned')
-          .setColor(0xED4245)
+          .setTitle('🪃 User Softbanned').setColor(0xED4245)
           .setDescription('User was banned and unbanned to clear their messages.')
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
@@ -927,8 +923,7 @@ client.on('interactionCreate', async interaction => {
           await interaction.guild.members.unban(user.id, 'Tempban expired').catch(() => {});
         }, hours * 3600000);
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('⏱️ User Temp Banned')
-          .setColor(0xED4245)
+          .setTitle('⏱️ User Temp Banned').setColor(0xED4245)
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
             { name: 'Duration', value: `${hours} hours`, inline: true },
@@ -942,8 +937,7 @@ client.on('interactionCreate', async interaction => {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await member.kick(reason);
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('👢 User Kicked')
-          .setColor(0xED4245)
+          .setTitle('👢 User Kicked').setColor(0xED4245)
           .addFields(
             { name: 'User', value: `${user.tag}`, inline: true },
             { name: 'Moderator', value: interaction.user.tag, inline: true },
@@ -978,8 +972,7 @@ client.on('interactionCreate', async interaction => {
         const warns = getWarnings(guildId, user.id);
         if (!warns.length) return interaction.reply({ content: `✅ **${user.tag}** has no warnings.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-          .setTitle(`⚠️ Warnings — ${user.tag}`)
-          .setColor(0xFEE75C)
+          .setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C)
           .setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason}\n*by ${w.moderator} — ${w.date}*`).join('\n\n'))
           .setFooter({ text: `Total: ${warns.length} warning(s)` })
         ]});
@@ -1003,8 +996,7 @@ client.on('interactionCreate', async interaction => {
         const notes = getNotes(guildId, user.id);
         if (!notes.length) return interaction.reply({ content: `📝 **${user.tag}** has no notes.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-          .setTitle(`📝 Notes — ${user.tag}`)
-          .setColor(0x5865F2)
+          .setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2)
           .setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text}\n*by ${n.moderator} — ${n.date}*`).join('\n\n'))
           .setFooter({ text: `Total: ${notes.length} note(s)` })
         ]});
@@ -1015,7 +1007,6 @@ client.on('interactionCreate', async interaction => {
         const typeName = interaction.options.getString('type').toLowerCase().trim();
         const extraMsg = interaction.options.getString('message') ?? null;
         const ac = getAnnouncementConfig(guildId);
-        // Find by name (case-insensitive)
         const entry = Object.entries(ac.types).find(([, t]) => t.name.toLowerCase() === typeName);
         if (!entry) return interaction.reply({ content: `❌ No announcement type found with name **${typeName}**. Set one up with \`/setup announcements\`.`, ephemeral: true });
         const [, t] = entry;
@@ -1043,10 +1034,7 @@ client.on('interactionCreate', async interaction => {
         const color = interaction.options.getString('color') ?? '#5865F2';
         const image = interaction.options.getString('image');
         const footer = interaction.options.getString('footer');
-        const embed = new EmbedBuilder()
-          .setTitle(title)
-          .setDescription(description)
-          .setColor(hexToInt(color));
+        const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(hexToInt(color));
         if (image) embed.setImage(image);
         if (footer) embed.setFooter({ text: footer });
         await ch.send({ embeds: [embed] });
@@ -1061,8 +1049,7 @@ client.on('interactionCreate', async interaction => {
         const winners = interaction.options.getInteger('winners');
         const endsAt = new Date(Date.now() + minutes * 60000);
         const embed = new EmbedBuilder()
-          .setTitle('🎉 GIVEAWAY 🎉')
-          .setColor(0xEB459E)
+          .setTitle('🎉 GIVEAWAY 🎉').setColor(0xEB459E)
           .setDescription(`**Prize:** ${prize}\n\nReact with 🎉 to enter!\n\n**Winners:** ${winners}\n**Ends:** <t:${Math.floor(endsAt.getTime() / 1000)}:R>`)
           .setFooter({ text: `Hosted by ${interaction.user.tag}` })
           .setTimestamp(endsAt);
@@ -1076,14 +1063,11 @@ client.on('interactionCreate', async interaction => {
             if (!reaction) return;
             const users = await reaction.users.fetch();
             const entries = users.filter(u => !u.bot);
-            if (!entries.size) {
-              return ch.send('🎉 Giveaway ended — no valid entries!');
-            }
+            if (!entries.size) return ch.send('🎉 Giveaway ended — no valid entries!');
             const picked = entries.random(Math.min(winners, entries.size));
             const winnerMentions = (Array.isArray(picked) ? picked : [picked]).map(u => `<@${u.id}>`).join(', ');
             await ch.send({ embeds: [new EmbedBuilder()
-              .setTitle('🎉 Giveaway Ended!')
-              .setColor(0xEB459E)
+              .setTitle('🎉 Giveaway Ended!').setColor(0xEB459E)
               .setDescription(`**Prize:** ${prize}\n**Winner(s):** ${winnerMentions}\n\nCongratulations! 🎊`)
               .setTimestamp()
             ]});
@@ -1158,7 +1142,6 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'announcements') return interaction.reply(buildAnnouncementOverview(guildId));
       }
 
-      // ── SESSION COMMAND (fixed with deferReply) ──
       if (cmd === 'session') {
         if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
@@ -1166,12 +1149,8 @@ client.on('interactionCreate', async interaction => {
         if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set.', ephemeral: true });
         const sCh = interaction.guild.channels.cache.get(sc.channel);
         if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', ephemeral: true });
-
-        // ✅ FIX: defer immediately to prevent "you ran into a problem"
         await interaction.deferReply({ ephemeral: true });
-
         const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-
         if (sub === 'start') {
           const link = interaction.options.getString('link') ?? sc.joinLink ?? null;
           const desc = replaceVars(sc.startDescription ?? 'A session has started! {hostMention} is hosting.', interaction);
@@ -1255,6 +1234,7 @@ client.on('interactionCreate', async interaction => {
             );
             return interaction.showModal(modal);
           }
+          // ✅ FIX: these now show the selector inline instead of crashing
           if (action === 'channel') return interaction.reply({ content: `### 📢 Channel for **${t.name}**`, components: [channelDropdown(`anch__${typeId}`, 'Select channel...')], ephemeral: true });
           if (action === 'pingrole') return interaction.reply({ content: `### 🔔 Ping role for **${t.name}**`, components: [roleDropdown(`anpr__${typeId}`, 'Select role...', 1, 1)], ephemeral: true });
           if (action === 'clearping') {
@@ -1465,7 +1445,6 @@ client.on('interactionCreate', async interaction => {
           .setTitle(`${type.emoji || '🎫'} Ticket — ${type.label}`)
           .setDescription(`${welcomeText}\n\n**Type:** ${type.label}${type.description ? `\n*${type.description}*` : ''}`)
           .setColor(hexToInt(tc.panelColor)).setTimestamp().setFooter({ text: `Opened by ${interaction.user.tag}` });
-        // ✅ FIX: use setImage for ticket welcome too
         if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
         await ticketCh.send({
           content: `<@${interaction.user.id}>${pingTxt ? ' ' + pingTxt : ''}`,
@@ -1525,6 +1504,17 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'td_ping_roles')    { getTicketConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_ping_roles')    { getSessionConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_allowed_roles') { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
+
+      // ✅ FIX: announcement ping role handler (was completely missing)
+      if (interaction.customId.startsWith('anpr__')) {
+        const typeId = interaction.customId.replace('anpr__', '');
+        const ac = getAnnouncementConfig(guildId);
+        if (!ac.types[typeId]) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
+        ac.types[typeId].pingRole = ids[0];
+        saveConfig(config);
+        return interaction.update(buildAnnouncementEditor(guildId, typeId));
+      }
+
       if (interaction.customId.startsWith('srr__add__')) {
         const panelId = interaction.customId.replace('srr__add__', '');
         const src = getSelfRoleConfig(guildId);
@@ -1559,6 +1549,17 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'td_channel')    { getTicketConfig(guildId).ticketChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'td_category')   { getTicketConfig(guildId).ticketCategory = chId; saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'sd_channel')    { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
+
+      // ✅ FIX: announcement channel handler (was completely missing)
+      if (interaction.customId.startsWith('anch__')) {
+        const typeId = interaction.customId.replace('anch__', '');
+        const ac = getAnnouncementConfig(guildId);
+        if (!ac.types[typeId]) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
+        ac.types[typeId].channel = chId;
+        saveConfig(config);
+        return interaction.update(buildAnnouncementEditor(guildId, typeId));
+      }
+
       if (interaction.customId.startsWith('srch__')) {
         const panelId = interaction.customId.replace('srch__', '');
         const src = getSelfRoleConfig(guildId);
@@ -1574,6 +1575,22 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId;
       const val = interaction.values[0];
+
+      // ✅ FIX: announcement select menus (edit + delete were missing)
+      if (id === 'an_sel_edit') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ac = getAnnouncementConfig(guildId);
+        if (!ac.types[val]) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        return interaction.update(buildAnnouncementEditor(guildId, val));
+      }
+      if (id === 'an_sel_delete') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ac = getAnnouncementConfig(guildId);
+        delete ac.types[val];
+        saveConfig(config);
+        return interaction.update(buildAnnouncementOverview(guildId));
+      }
+
       if (id === 'sr_sel_edit') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const src = getSelfRoleConfig(guildId);
@@ -1622,51 +1639,103 @@ client.on('interactionCreate', async interaction => {
     // ── MODALS ──
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
+
+      // ✅ FIX: New announcement type modal — was crashing due to missing guildId guard (now at top)
+      if (mid === 'modal_an_new') {
+        const ac = getAnnouncementConfig(guildId);
+        const name  = interaction.fields.getTextInputValue('an_name').trim();
+        const emoji = interaction.fields.getTextInputValue('an_emoji').trim();
+        const title = interaction.fields.getTextInputValue('an_title').trim();
+        const desc  = interaction.fields.getTextInputValue('an_desc').trim();
+        const color = interaction.fields.getTextInputValue('an_color').trim();
+        // Guard: duplicate name check
+        const exists = Object.values(ac.types).some(t => t.name.toLowerCase() === name.toLowerCase());
+        if (exists) return interaction.reply({ content: `❌ A type named **${name}** already exists.`, ephemeral: true });
+        const tid = genId();
+        ac.types[tid] = {
+          name,
+          emoji: emoji || null,
+          title,
+          description: desc || null,
+          color: color || '#ED4245',
+          channel: null,
+          pingRole: null,
+          image: null,
+        };
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Announcement type **${name}** created! Use the editor to set a channel.`, ...buildAnnouncementEditor(guildId, tid) });
+      }
+
+      // ✅ FIX: Edit announcement content modal — was missing handler entirely
+      if (mid.startsWith('modal_an_content__')) {
+        const typeId = mid.replace('modal_an_content__', '');
+        const ac = getAnnouncementConfig(guildId);
+        const t = ac.types[typeId];
+        if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        const title = interaction.fields.getTextInputValue('an_c_title').trim();
+        const desc  = interaction.fields.getTextInputValue('an_c_desc').trim();
+        const color = interaction.fields.getTextInputValue('an_c_color').trim();
+        const image = interaction.fields.getTextInputValue('an_c_image').trim();
+        const emoji = interaction.fields.getTextInputValue('an_c_emoji').trim();
+        if (title) t.title = title;
+        if (desc)  t.description = desc;
+        if (color) t.color = color;
+        if (image) t.image = image;
+        if (emoji) t.emoji = emoji;
+        saveConfig(config);
+        return interaction.update(buildAnnouncementEditor(guildId, typeId));
+      }
+
       if (mid === 'modal_t_embed') {
         const tc = getTicketConfig(guildId);
-        const t = interaction.fields.getTextInputValue('t_embed_title').trim();
-        const d = interaction.fields.getTextInputValue('t_embed_desc').trim();
-        const c = interaction.fields.getTextInputValue('t_embed_color').trim();
+        const t  = interaction.fields.getTextInputValue('t_embed_title').trim();
+        const d  = interaction.fields.getTextInputValue('t_embed_desc').trim();
+        const c  = interaction.fields.getTextInputValue('t_embed_color').trim();
         const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim();
-        if (t) tc.panelTitle = t;
-        if (d) tc.panelDescription = d;
-        if (c) tc.panelColor = c;
+        if (t)  tc.panelTitle = t;
+        if (d)  tc.panelDescription = d;
+        if (c)  tc.panelColor = c;
         if (th) tc.panelThumbnail = th;
         saveConfig(config);
         return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
+
       if (mid === 'modal_t_welcome') {
         const tc = getTicketConfig(guildId);
         tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim();
         saveConfig(config);
         return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true });
       }
+
       if (mid === 'modal_t_add_type') {
-        const tc = getTicketConfig(guildId);
+        const tc    = getTicketConfig(guildId);
         const label = interaction.fields.getTextInputValue('tt_label').trim();
         const emoji = interaction.fields.getTextInputValue('tt_emoji').trim();
         const color = interaction.fields.getTextInputValue('tt_color').trim();
-        const desc = interaction.fields.getTextInputValue('tt_description').trim();
+        const desc  = interaction.fields.getTextInputValue('tt_description').trim();
         tc.ticketTypes.push({ id: genId(), label, emoji: emoji || null, color: color || 'blue', description: desc || null });
         saveConfig(config);
         return interaction.reply({ content: `✅ Type **${label}** added!`, ephemeral: true });
       }
+
       if (mid === 'modal_s_joinlink') {
         getSessionConfig(guildId).joinLink = interaction.fields.getTextInputValue('s_link_val').trim();
         saveConfig(config);
         return interaction.reply({ content: '✅ Join link saved!', ephemeral: true });
       }
+
       if (mid === 'modal_s_desc') {
         const sc = getSessionConfig(guildId);
-        const s = interaction.fields.getTextInputValue('s_start_desc').trim();
-        const v = interaction.fields.getTextInputValue('s_vote_desc').trim();
+        const s  = interaction.fields.getTextInputValue('s_start_desc').trim();
+        const v  = interaction.fields.getTextInputValue('s_vote_desc').trim();
         const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim();
-        if (s) sc.startDescription = s;
-        if (v) sc.voteDescription = v;
+        if (s)  sc.startDescription = s;
+        if (v)  sc.voteDescription = v;
         if (sh) sc.shutdownDescription = sh;
         saveConfig(config);
         return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true });
       }
+
       if (mid === 'modal_s_images') {
         const sc = getSessionConfig(guildId);
         const si = interaction.fields.getTextInputValue('s_start_img').trim();
@@ -1678,52 +1747,55 @@ client.on('interactionCreate', async interaction => {
         saveConfig(config);
         return interaction.reply({ content: '✅ Images saved!', ephemeral: true });
       }
+
       if (mid === 'modal_sr_new') {
-        const src = getSelfRoleConfig(guildId);
+        const src   = getSelfRoleConfig(guildId);
         const title = interaction.fields.getTextInputValue('sr_title').trim();
-        const desc = interaction.fields.getTextInputValue('sr_desc').trim();
+        const desc  = interaction.fields.getTextInputValue('sr_desc').trim();
         const color = interaction.fields.getTextInputValue('sr_color').trim();
-        const type = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
+        const type  = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
         const maxIn = interaction.fields.getTextInputValue('sr_max').trim();
-        const max = parseInt(maxIn, 10);
+        const max   = parseInt(maxIn, 10);
         if (!['buttons', 'dropdown', 'reaction'].includes(type)) return interaction.reply({ content: '❌ Type must be `buttons`, `dropdown`, or `reaction`.', ephemeral: true });
         const pid = genId();
         src.panels[pid] = { title, description: desc || null, color: color || null, thumbnail: null, channel: null, messageId: null, type, max: isNaN(max) ? 0 : max, roles: [] };
         saveConfig(config);
         return interaction.reply({ ...buildPanelEditor(guildId, pid), ephemeral: true });
       }
+
       if (mid.startsWith('modal_sr_embed__')) {
         const panelId = mid.replace('modal_sr_embed__', '');
-        const src = getSelfRoleConfig(guildId);
-        const panel = src.panels[panelId];
+        const src     = getSelfRoleConfig(guildId);
+        const panel   = src.panels[panelId];
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        const t = interaction.fields.getTextInputValue('sr_e_title').trim();
-        const d = interaction.fields.getTextInputValue('sr_e_desc').trim();
-        const c = interaction.fields.getTextInputValue('sr_e_color').trim();
+        const t  = interaction.fields.getTextInputValue('sr_e_title').trim();
+        const d  = interaction.fields.getTextInputValue('sr_e_desc').trim();
+        const c  = interaction.fields.getTextInputValue('sr_e_color').trim();
         const th = interaction.fields.getTextInputValue('sr_e_thumbnail').trim();
-        if (t) panel.title = t;
-        if (d) panel.description = d;
-        if (c) panel.color = c;
+        if (t)  panel.title = t;
+        if (d)  panel.description = d;
+        if (c)  panel.color = c;
         if (th) panel.thumbnail = th;
         saveConfig(config);
         return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
+
       if (mid.startsWith('modal_sr_rolelabel__')) {
         const panelId = mid.replace('modal_sr_rolelabel__', '');
-        const src = getSelfRoleConfig(guildId);
-        const panel = src.panels[panelId];
+        const src     = getSelfRoleConfig(guildId);
+        const panel   = src.panels[panelId];
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
         const pending = srPendingRoleAdd.get(interaction.user.id);
         if (!pending || pending.panelId !== panelId) return interaction.reply({ content: '❌ Session expired, try again.', ephemeral: true });
         if (panel.type === 'reaction') {
           const reaction = interaction.fields.getTextInputValue('sr_rl_reaction').trim();
-          const label = interaction.fields.getTextInputValue('sr_rl_label').trim();
-          const desc = interaction.fields.getTextInputValue('sr_rl_desc').trim();
+          const label    = interaction.fields.getTextInputValue('sr_rl_label').trim();
+          const desc     = interaction.fields.getTextInputValue('sr_rl_desc').trim();
           panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), reaction, description: desc || null });
         } else {
           const label = interaction.fields.getTextInputValue('sr_rl_label').trim();
           const emoji = interaction.fields.getTextInputValue('sr_rl_emoji').trim();
-          const desc = interaction.fields.getTextInputValue('sr_rl_desc').trim();
+          const desc  = interaction.fields.getTextInputValue('sr_rl_desc').trim();
           panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), emoji: emoji || null, description: desc || null });
         }
         saveConfig(config);
