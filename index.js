@@ -10,9 +10,7 @@ const fs   = require('fs');
 const path = require('path');
 const http = require('http');
 
-// ── Keep Render alive ──
 http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 10000);
-
 process.chdir(path.dirname(require.main.filename));
 
 // ════════════════════════════════════════════
@@ -35,104 +33,82 @@ const client = new Client({
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
 function loadConfig() {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-  } catch (e) { console.error('Failed to load config:', e); }
+  try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { console.error('Config load error:', e); }
   return {};
 }
-
 function saveConfig(cfg) {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); }
-  catch (e) { console.error('Failed to save config:', e); }
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); } catch (e) { console.error('Config save error:', e); }
 }
 
 let config = loadConfig();
 
-function getGuildConfig(guildId) {
-  if (!config[guildId]) config[guildId] = {};
-  return config[guildId];
-}
+function getGuildConfig(guildId) { if (!config[guildId]) config[guildId] = {}; return config[guildId]; }
 
 function getTicketConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.ticket) gc.ticket = {
-    pingRoles: [], transcriptChannel: null, ticketChannel: null,
-    ticketCategory: null, panelTitle: '🎫 Support Tickets',
-    panelDescription: 'Click a button below to open a support ticket.',
-    panelColor: '#5865F2', panelThumbnail: null,
-    welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [],
-  };
+  if (!gc.ticket) gc.ticket = { pingRoles: [], transcriptChannel: null, ticketChannel: null, ticketCategory: null, panelTitle: '🎫 Support Tickets', panelDescription: 'Click a button below to open a support ticket.', panelColor: '#5865F2', panelThumbnail: null, welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [] };
   return gc.ticket;
 }
-
 function getSessionConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.session) gc.session = {
-    channel: null, pingRoles: [], allowedRoles: [], joinLink: null,
-    startImage: null, startDescription: null, voteImage: null,
-    voteDescription: null, shutdownImage: null, shutdownDescription: null,
-  };
+  if (!gc.session) gc.session = { channel: null, pingRoles: [], allowedRoles: [], joinLink: null, startImage: null, startDescription: null, voteImage: null, voteDescription: null, shutdownImage: null, shutdownDescription: null };
   return gc.session;
 }
+function getSelfRoleConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.selfroles) gc.selfroles = { panels: {} }; return gc.selfroles; }
+function getAnnouncementConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.announcements) gc.announcements = { types: {} }; return gc.announcements; }
 
-function getSelfRoleConfig(guildId) {
+// ── Welcomer ──
+function getWelcomerConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.selfroles) gc.selfroles = { panels: {} };
-  return gc.selfroles;
+  if (!gc.welcomer) gc.welcomer = {
+    enabled: false,
+    channel: null,
+    title: 'Welcome to {server}!',
+    description: 'Hello {userMention}, welcome to **{server}**!\nYou are member **#{memberCount}**.',
+    color: '#2f3136',
+    thumbnail: true,
+    image: null,
+    footer: 'Welcome!',
+    pingUser: true,
+  };
+  return gc.welcomer;
 }
 
-function getAnnouncementConfig(guildId) {
+// ── Autorole ──
+function getAutoroleConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.announcements) gc.announcements = { types: {} };
-  return gc.announcements;
+  if (!gc.autorole) gc.autorole = { enabled: false, roles: [] };
+  return gc.autorole;
 }
 
-// Warnings storage
-function getWarnings(guildId, userId) {
+// ── Verification ──
+function getVerificationConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.warnings) gc.warnings = {};
-  if (!gc.warnings[userId]) gc.warnings[userId] = [];
-  return gc.warnings[userId];
+  if (!gc.verification) gc.verification = {
+    enabled: false,
+    channel: null,
+    verifiedRole: null,
+    panelTitle: '✅ Verify your Roblox account',
+    panelDescription: 'Click **Verify** below, enter your Roblox username, and you\'ll get access to the server!\n\nYour nickname will be set to: `(DiscordName) | RobloxName`',
+    panelColor: '#57F287',
+    panelImage: null,
+  };
+  return gc.verification;
 }
 
-function addWarning(guildId, userId, warn) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.warnings) gc.warnings = {};
-  if (!gc.warnings[userId]) gc.warnings[userId] = [];
-  gc.warnings[userId].push(warn);
-  saveConfig(config);
-}
-
-function clearWarnings(guildId, userId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.warnings) gc.warnings = {};
-  gc.warnings[userId] = [];
-  saveConfig(config);
-}
-
-// Notes storage
-function getNotes(guildId, userId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.notes) gc.notes = {};
-  if (!gc.notes[userId]) gc.notes[userId] = [];
-  return gc.notes[userId];
-}
-
-function addNote(guildId, userId, note) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.notes) gc.notes = {};
-  if (!gc.notes[userId]) gc.notes[userId] = [];
-  gc.notes[userId].push(note);
-  saveConfig(config);
-}
+// Warnings / Notes
+function getWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; return gc.warnings[userId]; }
+function addWarning(guildId, userId, warn) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; gc.warnings[userId].push(warn); saveConfig(config); }
+function clearWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; gc.warnings[userId] = []; saveConfig(config); }
+function getNotes(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; return gc.notes[userId]; }
+function addNote(guildId, userId, note) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; gc.notes[userId].push(note); saveConfig(config); }
 
 // ════════════════════════════════════════════
 // CONSTANTS
 // ════════════════════════════════════════════
-const STAFF_ROLE      = '《 𝑵𝒀𝑳𝑹𝑷 | Staff Team》';
-const SHR_ROLE        = 'SHR';
-const WELCOME_CHANNEL = 'welcome';
-const LOGO_URL        = 'https://cdn.discordapp.com/attachments/1363047391263064166/1484556795321122917/image.png';
+const STAFF_ROLE = '《 𝑵𝒀𝑳𝑹𝑷 | Staff Team》';
+const SHR_ROLE   = 'SHR';
+const LOGO_URL   = 'https://cdn.discordapp.com/attachments/1363047391263064166/1484556795321122917/image.png';
 
 const hasStaff    = m => m.roles.cache.some(r => r.name === STAFF_ROLE);
 const hasSHR      = m => m.roles.cache.some(r => r.name === SHR_ROLE);
@@ -147,57 +123,60 @@ function canRunSession(member, guildId) {
 
 const openTickets      = new Map();
 const srPendingRoleAdd = new Map();
+const activeGiveaways  = new Map();
 
 // ════════════════════════════════════════════
 // UTILS
 // ════════════════════════════════════════════
 function genId() { return Math.random().toString(36).slice(2, 8); }
-
-function hexToInt(hex) {
-  if (!hex) return 0x5865F2;
-  const val = parseInt(hex.replace('#', ''), 16);
-  return isNaN(val) ? 0x5865F2 : val;
-}
-
-function colorToButtonStyle(color) {
-  if (!color) return ButtonStyle.Secondary;
-  const c = color.toLowerCase().trim();
-  if (c === 'green'  || c === 'success') return ButtonStyle.Success;
-  if (c === 'red'    || c === 'danger')  return ButtonStyle.Danger;
-  if (c === 'grey'   || c === 'gray' || c === 'secondary') return ButtonStyle.Secondary;
+function hexToInt(hex) { if (!hex) return 0x5865F2; const v = parseInt(hex.replace('#', ''), 16); return isNaN(v) ? 0x5865F2 : v; }
+function colorToButtonStyle(c) {
+  if (!c) return ButtonStyle.Secondary;
+  const s = c.toLowerCase().trim();
+  if (s === 'green' || s === 'success') return ButtonStyle.Success;
+  if (s === 'red'   || s === 'danger')  return ButtonStyle.Danger;
+  if (s === 'grey'  || s === 'gray' || s === 'secondary') return ButtonStyle.Secondary;
   return ButtonStyle.Primary;
 }
+function safeSetEmoji(btn, emoji) { if (!emoji || emoji === 'null') return btn; try { btn.setEmoji(emoji); } catch {} return btn; }
 
-function replaceVars(text, interaction) {
+function replaceVars(text, opts = {}) {
   if (!text) return text;
   const now = new Date();
   return text
-    .replace(/{user}/g,        `<@${interaction.user.id}>`)
-    .replace(/{host}/g,        interaction.user.username)
-    .replace(/{hostMention}/g, `<@${interaction.user.id}>`)
-    .replace(/{hostTag}/g,     interaction.user.tag)
-    .replace(/{time}/g,        now.toUTCString())
-    .replace(/{date}/g,        now.toDateString())
-    .replace(/{memberCount}/g, interaction.guild?.memberCount?.toString() ?? '')
-    .replace(/{server}/g,      interaction.guild?.name ?? '');
+    .replace(/{user}/g,         opts.userMention  ?? '')
+    .replace(/{userMention}/g,  opts.userMention  ?? '')
+    .replace(/{username}/g,     opts.username     ?? '')
+    .replace(/{host}/g,         opts.username     ?? '')
+    .replace(/{hostMention}/g,  opts.userMention  ?? '')
+    .replace(/{hostTag}/g,      opts.userTag      ?? '')
+    .replace(/{memberCount}/g,  opts.memberCount  ?? '')
+    .replace(/{server}/g,       opts.server       ?? '')
+    .replace(/{time}/g,         now.toUTCString())
+    .replace(/{date}/g,         now.toDateString());
 }
 
-function safeSetEmoji(btn, emoji) {
-  if (!emoji || emoji === 'null' || emoji === 'undefined') return btn;
-  try { btn.setEmoji(emoji); } catch {}
-  return btn;
+// ════════════════════════════════════════════
+// ROBLOX API
+// ════════════════════════════════════════════
+async function getRobloxUser(username) {
+  const res = await fetch('https://users.roblox.com/v1/usernames/users', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }),
+  });
+  if (!res.ok) throw new Error('Roblox API error');
+  const data = await res.json();
+  if (!data.data || data.data.length === 0) return null;
+  return data.data[0]; // { id, name, displayName }
 }
 
 // ════════════════════════════════════════════
 // ERLC API
 // ════════════════════════════════════════════
 const ERLC_BASE = 'https://api.policeroleplay.community/v1';
-
 async function erlcRequest(p, method = 'GET', body = null) {
-  const opts = {
-    method,
-    headers: { 'Server-Key': process.env.ERLC_API_KEY, 'Content-Type': 'application/json' },
-  };
+  const opts = { method, headers: { 'Server-Key': process.env.ERLC_API_KEY, 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${ERLC_BASE}${p}`, opts);
   if (!res.ok) throw new Error(`ERLC ${res.status}: ${res.statusText}`);
@@ -208,65 +187,112 @@ async function erlcRequest(p, method = 'GET', body = null) {
 // DROPDOWN HELPERS
 // ════════════════════════════════════════════
 function roleDropdown(customId, placeholder, min = 1, max = 10) {
-  return new ActionRowBuilder().addComponents(
-    new RoleSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).setMinValues(min).setMaxValues(max)
-  );
+  return new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).setMinValues(min).setMaxValues(max));
 }
 function channelDropdown(customId, placeholder, types = [ChannelType.GuildText]) {
-  return new ActionRowBuilder().addComponents(
-    new ChannelSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).addChannelTypes(...types).setMinValues(1).setMaxValues(1)
-  );
+  return new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).addChannelTypes(...types).setMinValues(1).setMaxValues(1));
 }
 
 // ════════════════════════════════════════════
-// TICKET PANEL BUILDERS
+// SETUP PAYLOAD BUILDERS
 // ════════════════════════════════════════════
-function buildTicketPanelEmbed(tc) {
+
+// ── Welcomer Setup ──
+function buildWelcomerSetupPayload(guildId) {
+  const wc = getWelcomerConfig(guildId);
   const embed = new EmbedBuilder()
-    .setTitle(tc.panelTitle || '🎫 Support Tickets')
-    .setDescription(tc.panelDescription || 'Click a button below to open a ticket.')
-    .setColor(hexToInt(tc.panelColor));
+    .setTitle('👋 Welcomer Setup').setColor(0x5865F2)
+    .setDescription('Configure the welcome message below.\n\n**Variables:** `{userMention}` `{username}` `{memberCount}` `{server}`')
+    .addFields(
+      { name: '✅ Enabled',     value: wc.enabled ? 'Yes' : 'No', inline: true },
+      { name: '📢 Channel',    value: wc.channel ? `<#${wc.channel}>` : '*Not set*', inline: true },
+      { name: '🏷️ Title',      value: wc.title || '*Not set*', inline: false },
+      { name: '📝 Description', value: wc.description ? `\`\`\`${wc.description.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🎨 Color',      value: wc.color || '*Not set*', inline: true },
+      { name: '🖼️ Image',      value: wc.image ? '✅ Set' : '❌ Not set', inline: true },
+      { name: '🖼️ Thumbnail',  value: wc.thumbnail ? '✅ User avatar' : '❌ Off', inline: true },
+      { name: '📌 Footer',     value: wc.footer || '*Not set*', inline: true },
+      { name: '🔔 Ping User',  value: wc.pingUser ? 'Yes' : 'No', inline: true },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('wc_channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('wc_content').setLabel('Edit Content').setStyle(ButtonStyle.Primary).setEmoji('📝'),
+    new ButtonBuilder().setCustomId('wc_toggle').setLabel(wc.enabled ? 'Disable' : 'Enable').setStyle(wc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(wc.enabled ? '🔴' : '🟢'),
+  );
+  return { embeds: [embed], components: [r1], ephemeral: true };
+}
+
+// ── Autorole Setup ──
+function buildAutoroleSetupPayload(guildId) {
+  const ar = getAutoroleConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('🎭 Autorole Setup').setColor(0xEB459E)
+    .setDescription('Roles given automatically when someone joins the server.')
+    .addFields(
+      { name: '✅ Enabled', value: ar.enabled ? 'Yes' : 'No', inline: true },
+      { name: '🎭 Roles',   value: ar.roles.length ? ar.roles.map(id => `<@&${id}>`).join(', ') : '*No roles set*', inline: false },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ar_add').setLabel('Add Role').setStyle(ButtonStyle.Success).setEmoji('➕'),
+    new ButtonBuilder().setCustomId('ar_remove').setLabel('Remove Role').setStyle(ButtonStyle.Danger).setEmoji('➖'),
+    new ButtonBuilder().setCustomId('ar_toggle').setLabel(ar.enabled ? 'Disable' : 'Enable').setStyle(ar.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(ar.enabled ? '🔴' : '🟢'),
+  );
+  return { embeds: [embed], components: [r1], ephemeral: true };
+}
+
+// ── Verification Setup ──
+function buildVerificationSetupPayload(guildId) {
+  const vc = getVerificationConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('🔐 Verification Setup').setColor(0x57F287)
+    .setDescription('Roblox verification — user enters their username → bot checks Roblox API → gives role + sets nickname to `(DiscordName) | RobloxName`')
+    .addFields(
+      { name: '✅ Enabled',      value: vc.enabled ? 'Yes' : 'No', inline: true },
+      { name: '📢 Channel',     value: vc.channel ? `<#${vc.channel}>` : '*Not set*', inline: true },
+      { name: '🎭 Verified Role', value: vc.verifiedRole ? `<@&${vc.verifiedRole}>` : '*Not set*', inline: true },
+      { name: '🏷️ Panel Title',  value: vc.panelTitle || '*Not set*', inline: false },
+      { name: '📝 Description',  value: vc.panelDescription ? `\`\`\`${vc.panelDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🎨 Color',       value: vc.panelColor || '*Not set*', inline: true },
+      { name: '🖼️ Image',       value: vc.panelImage ? '✅ Set' : '❌ Not set', inline: true },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('vc_channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('vc_role').setLabel('Set Verified Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+    new ButtonBuilder().setCustomId('vc_content').setLabel('Edit Panel').setStyle(ButtonStyle.Primary).setEmoji('📝'),
+  );
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('vc_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'),
+    new ButtonBuilder().setCustomId('vc_toggle').setLabel(vc.enabled ? 'Disable' : 'Enable').setStyle(vc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(vc.enabled ? '🔴' : '🟢'),
+  );
+  return { embeds: [embed], components: [r1, r2], ephemeral: true };
+}
+
+// ── Ticket Panel ──
+function buildTicketPanelEmbed(tc) {
+  const embed = new EmbedBuilder().setTitle(tc.panelTitle || '🎫 Support Tickets').setDescription(tc.panelDescription || 'Click a button below to open a ticket.').setColor(hexToInt(tc.panelColor));
   if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
   return embed;
 }
-
 function buildTicketTypeButtons(ticketTypes) {
   const rows = [];
   for (let i = 0; i < Math.min(ticketTypes.length, 25); i += 5) {
     const chunk = ticketTypes.slice(i, i + 5);
-    rows.push(new ActionRowBuilder().addComponents(
-      chunk.map(t => {
-        const btn = new ButtonBuilder()
-          .setCustomId(`tkt__open__${t.id}`)
-          .setLabel(t.label.slice(0, 80))
-          .setStyle(colorToButtonStyle(t.color));
-        return safeSetEmoji(btn, t.emoji);
-      })
-    ));
+    rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`tkt__open__${t.id}`).setLabel(t.label.slice(0, 80)).setStyle(colorToButtonStyle(t.color)), t.emoji))));
   }
   return rows;
 }
-
-// ════════════════════════════════════════════
-// TICKET SETUP PAYLOAD
-// ════════════════════════════════════════════
 function buildTicketSetupPayload(guildId) {
   const tc = getTicketConfig(guildId);
-  const embed = new EmbedBuilder()
-    .setTitle('🎫 Ticket System Setup').setColor(0x5865F2)
-    .setDescription('Configure every aspect of the ticket system below.')
+  const embed = new EmbedBuilder().setTitle('🎫 Ticket System Setup').setColor(0x5865F2).setDescription('Configure the ticket system below.')
     .addFields(
-      { name: '📢 Ping Roles',      value: tc.pingRoles.length ? tc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '📋 Transcript Ch.',  value: tc.transcriptChannel ? `<#${tc.transcriptChannel}>` : '*Not set*', inline: true },
-      { name: '📬 Panel Channel',   value: tc.ticketChannel ? `<#${tc.ticketChannel}>` : '*Not set*', inline: true },
-      { name: '📁 Category',        value: tc.ticketCategory ? `<#${tc.ticketCategory}>` : '*Not set*', inline: true },
-      { name: '🎨 Panel Title',     value: tc.panelTitle || '*Not set*', inline: true },
-      { name: '🖌️ Panel Color',     value: tc.panelColor || '*Not set*', inline: true },
-      { name: '🖼️ Panel Image',     value: tc.panelThumbnail ? '✅ Set' : '❌ Not set', inline: true },
-      { name: '💬 Welcome Text',    value: tc.welcomeText ? `\`\`\`${tc.welcomeText.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🏷️ Ticket Types',    value: tc.ticketTypes.length ? tc.ticketTypes.map(t => `${t.emoji || '•'} \`${t.label}\``).join('\n') : '*No types yet*', inline: false },
+      { name: '📢 Ping Roles',    value: tc.pingRoles.length ? tc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '📋 Transcript Ch.', value: tc.transcriptChannel ? `<#${tc.transcriptChannel}>` : '*Not set*', inline: true },
+      { name: '📬 Panel Channel',  value: tc.ticketChannel ? `<#${tc.ticketChannel}>` : '*Not set*', inline: true },
+      { name: '📁 Category',       value: tc.ticketCategory ? `<#${tc.ticketCategory}>` : '*Not set*', inline: true },
+      { name: '🎨 Panel Title',    value: tc.panelTitle || '*Not set*', inline: true },
+      { name: '💬 Welcome Text',   value: tc.welcomeText ? `\`\`\`${tc.welcomeText.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🏷️ Ticket Types',   value: tc.ticketTypes.length ? tc.ticketTypes.map(t => `${t.emoji || '•'} \`${t.label}\``).join('\n') : '*No types yet*', inline: false },
     );
-
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('t_ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId('t_transcript').setLabel('Transcript Ch.').setStyle(ButtonStyle.Primary).setEmoji('📋'),
@@ -279,29 +305,22 @@ function buildTicketSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('t_add_type').setLabel('Add Type').setStyle(ButtonStyle.Success).setEmoji('➕'),
     new ButtonBuilder().setCustomId('t_remove_type').setLabel('Remove Type').setStyle(ButtonStyle.Danger).setEmoji('➖'),
   );
-  const r3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('t_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'),
-  );
+  const r3 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('t_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'));
   return { embeds: [embed], components: [r1, r2, r3], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// SESSION SETUP PAYLOAD
-// ════════════════════════════════════════════
 function buildSessionSetupPayload(guildId) {
   const sc = getSessionConfig(guildId);
-  const embed = new EmbedBuilder()
-    .setTitle('🎮 Session System Setup').setColor(0x57F287)
+  const embed = new EmbedBuilder().setTitle('🎮 Session System Setup').setColor(0x57F287)
     .setDescription('**Variables:** `{host}` `{hostMention}` `{time}` `{date}` `{memberCount}` `{server}`')
     .addFields(
       { name: '📢 Channel',    value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
       { name: '👥 Ping Roles', value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
       { name: '🔑 Allowed',    value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
       { name: '🔗 Join Link',  value: sc.joinLink ?? '*Not set*', inline: false },
-      { name: '🟢 Start',      value: sc.startDescription ? `\`\`\`${sc.startDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🗳️ Vote',       value: sc.voteDescription ? `\`\`\`${sc.voteDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🔴 Shutdown',   value: sc.shutdownDescription ? `\`\`\`${sc.shutdownDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🖼️ Images',     value: `Start: ${sc.startImage ? '✅' : '❌'} | Vote: ${sc.voteImage ? '✅' : '❌'} | Shutdown: ${sc.shutdownImage ? '✅' : '❌'}`, inline: false },
+      { name: '🟢 Start',      value: sc.startDescription ? `\`\`\`${sc.startDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🗳️ Vote',       value: sc.voteDescription ? `\`\`\`${sc.voteDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🔴 Shutdown',   value: sc.shutdownDescription ? `\`\`\`${sc.shutdownDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('s_channel').setLabel('Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -316,30 +335,13 @@ function buildSessionSetupPayload(guildId) {
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// ANNOUNCEMENT SETUP PAYLOAD
-// ════════════════════════════════════════════
 function buildAnnouncementOverview(guildId) {
   const ac = getAnnouncementConfig(guildId);
   const types = Object.entries(ac.types);
-  const embed = new EmbedBuilder()
-    .setTitle('📣 Announcement System Setup').setColor(0xED4245)
-    .setDescription(types.length === 0
-      ? '*No announcement types yet. Click **New Type** to create one.*'
-      : types.map(([tid, t]) =>
-          `**${t.emoji || '📢'} ${t.name}** \`[${tid}]\`\n` +
-          `Channel: ${t.channel ? `<#${t.channel}>` : '❌'} | Ping: ${t.pingRole ? `<@&${t.pingRole}>` : 'None'} | Color: ${t.color || '#ED4245'}`
-        ).join('\n\n')
-    )
-    .setFooter({ text: 'Use /announce <type> to send an announcement' });
-
+  const embed = new EmbedBuilder().setTitle('📣 Announcement System Setup').setColor(0xED4245)
+    .setDescription(types.length === 0 ? '*No types yet.*' : types.map(([tid, t]) => `**${t.emoji || '📢'} ${t.name}** \`[${tid}]\`\nChannel: ${t.channel ? `<#${t.channel}>` : '❌'} | Ping: ${t.pingRole ? `<@&${t.pingRole}>` : 'None'}`).join('\n\n'));
   const btns = [new ButtonBuilder().setCustomId('an_new').setLabel('New Type').setStyle(ButtonStyle.Success).setEmoji('➕')];
-  if (types.length) {
-    btns.push(
-      new ButtonBuilder().setCustomId('an_edit').setLabel('Edit Type').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
-      new ButtonBuilder().setCustomId('an_delete').setLabel('Delete Type').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-    );
-  }
+  if (types.length) btns.push(new ButtonBuilder().setCustomId('an_edit').setLabel('Edit Type').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('an_delete').setLabel('Delete Type').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
 }
 
@@ -347,73 +349,41 @@ function buildAnnouncementEditor(guildId, typeId) {
   const ac = getAnnouncementConfig(guildId);
   const t = ac.types[typeId];
   if (!t) return buildAnnouncementOverview(guildId);
-  const embed = new EmbedBuilder()
-    .setTitle(`✏️ Editing — ${t.emoji || '📢'} ${t.name}`).setColor(hexToInt(t.color))
+  const embed = new EmbedBuilder().setTitle(`✏️ Editing — ${t.emoji || '📢'} ${t.name}`).setColor(hexToInt(t.color))
     .addFields(
-      { name: '📛 Name', value: t.name, inline: true },
-      { name: '😀 Emoji', value: t.emoji || '*Not set*', inline: true },
-      { name: '🎨 Color', value: t.color || '#ED4245', inline: true },
-      { name: '📢 Channel', value: t.channel ? `<#${t.channel}>` : '*Not set*', inline: true },
+      { name: '📛 Name', value: t.name, inline: true }, { name: '😀 Emoji', value: t.emoji || '*Not set*', inline: true },
+      { name: '🎨 Color', value: t.color || '#ED4245', inline: true }, { name: '📢 Channel', value: t.channel ? `<#${t.channel}>` : '*Not set*', inline: true },
       { name: '🔔 Ping Role', value: t.pingRole ? `<@&${t.pingRole}>` : '*None*', inline: true },
-      { name: '📌 Title', value: t.title || '*Not set*', inline: false },
-      { name: '📝 Description', value: t.description ? `\`\`\`${t.description.slice(0, 200)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🖼️ Image', value: t.image ? '✅ Set' : '❌ Not set', inline: true },
     );
-
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`ane__content__${typeId}`).setLabel('Edit Content').setStyle(ButtonStyle.Primary).setEmoji('📝'),
     new ButtonBuilder().setCustomId(`ane__channel__${typeId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId(`ane__pingrole__${typeId}`).setLabel('Set Ping Role').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
     new ButtonBuilder().setCustomId(`ane__clearping__${typeId}`).setLabel('Clear Ping').setStyle(ButtonStyle.Secondary).setEmoji('🚫'),
   );
-  const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('an__back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
-  );
+  const r2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('an__back').setLabel('← Back').setStyle(ButtonStyle.Secondary));
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// SELFROLE OVERVIEW
-// ════════════════════════════════════════════
 function buildSelfRoleOverview(guildId) {
   const src = getSelfRoleConfig(guildId);
   const panels = Object.entries(src.panels);
-  const embed = new EmbedBuilder()
-    .setTitle('🎨 Self Role Setup').setColor(0xEB459E)
-    .setDescription(panels.length === 0
-      ? '*No panels yet. Click **New Panel** to create one.*'
-      : panels.map(([pid, p]) => `**${p.title}** \`[${pid}]\` (${p.type || 'buttons'}) — ${p.roles.length} roles | ch: ${p.channel ? `<#${p.channel}>` : '❌'}`).join('\n'));
-
+  const embed = new EmbedBuilder().setTitle('🎨 Self Role Setup').setColor(0xEB459E)
+    .setDescription(panels.length === 0 ? '*No panels yet.*' : panels.map(([pid, p]) => `**${p.title}** \`[${pid}]\` — ${p.roles.length} roles | ch: ${p.channel ? `<#${p.channel}>` : '❌'}`).join('\n'));
   const btns = [new ButtonBuilder().setCustomId('sr_new').setLabel('New Panel').setStyle(ButtonStyle.Success).setEmoji('➕')];
-  if (panels.length) {
-    btns.push(
-      new ButtonBuilder().setCustomId('sr_edit').setLabel('Edit Panel').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
-      new ButtonBuilder().setCustomId('sr_delete').setLabel('Delete Panel').setStyle(ButtonStyle.Danger).setEmoji('🗑️')
-    );
-  }
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)] };
+  if (panels.length) btns.push(new ButtonBuilder().setCustomId('sr_edit').setLabel('Edit Panel').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('sr_delete').setLabel('Delete Panel').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// PANEL EDITOR
-// ════════════════════════════════════════════
 function buildPanelEditor(guildId, panelId) {
   const src = getSelfRoleConfig(guildId);
   const p = src.panels[panelId];
-  const embed = new EmbedBuilder()
-    .setTitle(`✏️ Editing — ${p.title}`).setColor(hexToInt(p.color))
+  const embed = new EmbedBuilder().setTitle(`✏️ Editing — ${p.title}`).setColor(hexToInt(p.color))
     .addFields(
-      { name: '📛 Title', value: p.title, inline: true },
-      { name: '🎨 Color', value: p.color || '#EB459E', inline: true },
-      { name: '🔀 Type', value: p.type || 'buttons', inline: true },
+      { name: '📛 Title', value: p.title, inline: true }, { name: '🔀 Type', value: p.type || 'buttons', inline: true },
       { name: '📢 Channel', value: p.channel ? `<#${p.channel}>` : '*Not set*', inline: true },
-      { name: '🔢 Max Roles', value: p.max != null ? (p.max === 0 ? 'Unlimited' : String(p.max)) : 'Unlimited', inline: true },
-      { name: '📝 Description', value: p.description || '*Not set*', inline: false },
-      { name: '🖼️ Thumbnail', value: p.thumbnail ? '✅ Set' : '❌ Not set', inline: true },
       { name: '🎭 Roles', value: p.roles.length ? p.roles.map(r => `${r.emoji || '•'} <@&${r.id}> — \`${r.label}\``).join('\n') : '*No roles yet*', inline: false },
     );
-  if (p.thumbnail) embed.setThumbnail(p.thumbnail);
-
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`sre__embed__${panelId}`).setLabel('Edit Embed').setStyle(ButtonStyle.Primary).setEmoji('🎨'),
     new ButtonBuilder().setCustomId(`sre__channel__${panelId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -424,60 +394,30 @@ function buildPanelEditor(guildId, panelId) {
     new ButtonBuilder().setCustomId(`sre__deploy__${panelId}`).setLabel('Deploy').setStyle(ButtonStyle.Success).setEmoji('🚀'),
     new ButtonBuilder().setCustomId('sr__back').setLabel('← Back').setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], components: [r1, r2] };
+  return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// DEPLOY SELFROLE PANEL
-// ════════════════════════════════════════════
 async function deploySelfRolePanel(guild, panelId, panel) {
   const channel = await guild.channels.fetch(panel.channel).catch(() => null);
   if (!channel) throw new Error('Channel not found');
-
-  const embed = new EmbedBuilder()
-    .setTitle(panel.title)
-    .setDescription(panel.description || 'Select your roles below.')
-    .setColor(hexToInt(panel.color))
-    .setFooter({ text: panel.type === 'reaction' ? 'React to get a role' : 'Click to toggle your role' });
+  const embed = new EmbedBuilder().setTitle(panel.title).setDescription(panel.description || 'Select your roles below.').setColor(hexToInt(panel.color)).setFooter({ text: panel.type === 'reaction' ? 'React to get a role' : 'Click to toggle your role' });
   if (panel.thumbnail) embed.setThumbnail(panel.thumbnail);
-
   if (panel.type === 'reaction') {
     const msg = await channel.send({ embeds: [embed] });
-    for (const role of panel.roles) {
-      if (role.reaction) await msg.react(role.reaction).catch(() => {});
-    }
-    panel.messageId = msg.id;
-    return;
+    for (const role of panel.roles) { if (role.reaction) await msg.react(role.reaction).catch(() => {}); }
+    panel.messageId = msg.id; return;
   }
-
   if (panel.type === 'dropdown') {
-    const options = panel.roles.slice(0, 25).map(r => {
-      const opt = { label: r.label.slice(0, 100), value: r.id, description: `Toggle ${r.label}`.slice(0, 100) };
-      if (r.emoji) opt.emoji = r.emoji;
-      return opt;
-    });
+    const options = panel.roles.slice(0, 25).map(r => { const opt = { label: r.label.slice(0, 100), value: r.id, description: `Toggle ${r.label}`.slice(0, 100) }; if (r.emoji) opt.emoji = r.emoji; return opt; });
     const maxVals = panel.max > 0 ? Math.min(panel.max, options.length) : options.length;
-    const select = new StringSelectMenuBuilder()
-      .setCustomId(`srp__dd__${panelId}`).setPlaceholder('Choose your roles…')
-      .setMinValues(0).setMaxValues(maxVals).addOptions(options);
+    const select = new StringSelectMenuBuilder().setCustomId(`srp__dd__${panelId}`).setPlaceholder('Choose your roles…').setMinValues(0).setMaxValues(maxVals).addOptions(options);
     const msg = await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
-    panel.messageId = msg.id;
-    return;
+    panel.messageId = msg.id; return;
   }
-
-  // Button panel
   const rows = [];
   for (let i = 0; i < Math.min(panel.roles.length, 25); i += 5) {
     const chunk = panel.roles.slice(i, i + 5);
-    rows.push(new ActionRowBuilder().addComponents(
-      chunk.map(r => {
-        const btn = new ButtonBuilder()
-          .setCustomId(`srp__btn__${panelId}__${r.id}`)
-          .setLabel(r.label.slice(0, 80))
-          .setStyle(ButtonStyle.Secondary);
-        return safeSetEmoji(btn, r.emoji);
-      })
-    ));
+    rows.push(new ActionRowBuilder().addComponents(chunk.map(r => safeSetEmoji(new ButtonBuilder().setCustomId(`srp__btn__${panelId}__${r.id}`).setLabel(r.label.slice(0, 80)).setStyle(ButtonStyle.Secondary), r.emoji))));
   }
   const msg = await channel.send({ embeds: [embed], components: rows });
   panel.messageId = msg.id;
@@ -488,13 +428,9 @@ async function deploySelfRolePanel(guild, panelId, panel) {
 // ════════════════════════════════════════════
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
-  { name: 'avatar', description: 'Show a user\'s avatar', options: [
-    { name: 'user', type: 6, description: 'Who?', required: false },
-  ]},
+  { name: 'avatar', description: 'Show a user\'s avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
   { name: 'serverinfo', description: 'Show server information' },
-  { name: 'roleinfo', description: 'Show info about a role', options: [
-    { name: 'role', type: 8, description: 'Which role?', required: true },
-  ]},
+  { name: 'roleinfo', description: 'Show info about a role', options: [{ name: 'role', type: 8, description: 'Which role?', required: true }] },
   { name: 'poll', description: 'Create a poll', options: [
     { name: 'question', type: 3, description: 'Poll question', required: true },
     { name: 'option1', type: 3, description: 'Option 1', required: true },
@@ -502,120 +438,60 @@ const commands = [
     { name: 'option3', type: 3, description: 'Option 3', required: false },
     { name: 'option4', type: 3, description: 'Option 4', required: false },
   ]},
-  { name: 'userinfo', description: 'Show user information', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-  ]},
-  { name: 'warn', description: 'Warn a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: true },
-  ]},
-  { name: 'mute', description: 'Mute a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'minutes', type: 4, description: 'Minutes', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'unmute', description: 'Unmute a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }]},
-  { name: 'slowmode', description: 'Set slowmode', options: [{ name: 'seconds', type: 4, description: 'Seconds (0=off)', required: true }]},
+  { name: 'userinfo', description: 'Show user information', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'warn', description: 'Warn a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true }] },
+  { name: 'mute', description: 'Mute a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'minutes', type: 4, description: 'Minutes', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'unmute', description: 'Unmute a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'slowmode', description: 'Set slowmode', options: [{ name: 'seconds', type: 4, description: 'Seconds (0=off)', required: true }] },
   { name: 'lock', description: 'Lock channel' },
   { name: 'unlock', description: 'Unlock channel' },
-  { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }]},
+  { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
   { name: 'session', description: 'Session commands', options: [
-    { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }]},
+    { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote' },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
   ]},
-  { name: 'ban', description: '[SHR] Ban user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
+  { name: 'ban', description: '[SHR] Ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'unban', description: '[SHR] Unban user by ID', options: [{ name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'softban', description: '[SHR] Softban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'tempban', description: '[SHR] Temp ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'hours', type: 4, description: 'Hours', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'kick', description: '[SHR] Kick user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'addrole', description: '[SHR] Add role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
+  { name: 'removerole', description: '[SHR] Remove role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
+  { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
+  { name: 'warnings', description: '[SHR] View warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
+  { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'announce', description: '[SHR] Send announcement', options: [{ name: 'type', type: 3, description: 'Type name', required: true }, { name: 'message', type: 3, description: 'Extra message', required: false }] },
+  { name: 'embed', description: '[SHR] Send custom embed', options: [
+    { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'title', type: 3, description: 'Title', required: true },
+    { name: 'description', type: 3, description: 'Description', required: true }, { name: 'color', type: 3, description: 'Hex color', required: false },
+    { name: 'image', type: 3, description: 'Image URL', required: false }, { name: 'footer', type: 3, description: 'Footer', required: false },
   ]},
-  { name: 'unban', description: '[SHR] Unban user by ID', options: [
-    { name: 'userid', type: 3, description: 'User ID', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'softban', description: '[SHR] Softban (ban + unban to delete messages)', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'tempban', description: '[SHR] Temporarily ban a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'hours', type: 4, description: 'Duration in hours', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'kick', description: '[SHR] Kick user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'addrole', description: '[SHR] Add role', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'role', type: 8, description: 'Role', required: true },
-  ]},
-  { name: 'removerole', description: '[SHR] Remove role', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'role', type: 8, description: 'Role', required: true },
-  ]},
-  { name: 'nickname', description: '[SHR] Change a user\'s nickname', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'nickname', type: 3, description: 'New nickname (leave empty to reset)', required: false },
-  ]},
-  { name: 'warnings', description: '[SHR] View warnings for a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-  ]},
-  { name: 'clearwarnings', description: '[SHR] Clear all warnings for a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-  ]},
-  { name: 'note', description: '[SHR] Add a note to a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'text', type: 3, description: 'Note text', required: true },
-  ]},
-  { name: 'notes', description: '[SHR] View notes for a user', options: [
-    { name: 'user', type: 6, description: 'Who?', required: true },
-  ]},
-  { name: 'announce', description: '[SHR] Send a saved announcement type', options: [
-    { name: 'type', type: 3, description: 'Announcement type name', required: true },
-    { name: 'message', type: 3, description: 'Optional extra message to add', required: false },
-  ]},
-  { name: 'embed', description: '[SHR] Send a custom embed', options: [
-    { name: 'channel', type: 7, description: 'Channel', required: true },
-    { name: 'title', type: 3, description: 'Title', required: true },
-    { name: 'description', type: 3, description: 'Description', required: true },
-    { name: 'color', type: 3, description: 'Hex color', required: false },
-    { name: 'image', type: 3, description: 'Image URL', required: false },
-    { name: 'footer', type: 3, description: 'Footer text', required: false },
-  ]},
-  { name: 'giveaway', description: '[SHR] Start a giveaway', options: [
-    { name: 'channel', type: 7, description: 'Channel', required: true },
-    { name: 'prize', type: 3, description: 'What are you giving away?', required: true },
-    { name: 'minutes', type: 4, description: 'Duration in minutes', required: true },
-    { name: 'winners', type: 4, description: 'Number of winners', required: true },
+  { name: 'giveaway', description: '[SHR] Start giveaway', options: [
+    { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'prize', type: 3, description: 'Prize', required: true },
+    { name: 'minutes', type: 4, description: 'Duration (minutes)', required: true }, { name: 'winners', type: 4, description: 'Winners', required: true },
   ]},
   { name: 'punish', description: '[SHR] Punish user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
-    { name: 'type', type: 3, description: 'Type', required: true, choices: [
-      { name: 'Warn', value: 'warn' }, { name: 'Mute 10min', value: 'mute' },
-      { name: 'Kick', value: 'kick' }, { name: 'Ban', value: 'ban' },
-    ]},
+    { name: 'type', type: 3, description: 'Type', required: true, choices: [{ name: 'Warn', value: 'warn' }, { name: 'Mute 10min', value: 'mute' }, { name: 'Kick', value: 'kick' }, { name: 'Ban', value: 'ban' }] },
     { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
   { name: 'players', description: '[SHR] ERLC players' },
   { name: 'serverstatus', description: '[SHR] ERLC server status' },
-  { name: 'erlckick', description: '[SHR] Kick ERLC player', options: [
-    { name: 'username', type: 3, description: 'Roblox username', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'erlcban', description: '[SHR] Ban ERLC player', options: [
-    { name: 'username', type: 3, description: 'Roblox username', required: true },
-    { name: 'reason', type: 3, description: 'Reason', required: false },
-  ]},
-  { name: 'setup', description: '[SHR] Setup', options: [
+  { name: 'erlckick', description: '[SHR] Kick ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'erlcban', description: '[SHR] Ban ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'setup', description: '[SHR] Setup bot features', options: [
     { name: 'tickets', type: 1, description: 'Ticket system' },
     { name: 'sessions', type: 1, description: 'Session system' },
     { name: 'selfroles', type: 1, description: 'Self role system' },
     { name: 'announcements', type: 1, description: 'Announcement system' },
+    { name: 'welcomer', type: 1, description: 'Welcome message system' },
+    { name: 'autorole', type: 1, description: 'Auto role system' },
+    { name: 'verification', type: 1, description: 'Roblox verification system' },
   ]},
 ];
-
-// Active giveaways
-const activeGiveaways = new Map();
 
 // ════════════════════════════════════════════
 // READY
@@ -623,27 +499,52 @@ const activeGiveaways = new Map();
 client.once('ready', async () => {
   console.log(`✅ Online as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-  try {
-    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('✅ Commands registered');
-  } catch (e) { console.error('❌ Command registration failed:', e); }
+  try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); console.log('✅ Commands registered'); }
+  catch (e) { console.error('❌ Command registration failed:', e); }
 });
 
 // ════════════════════════════════════════════
-// WELCOME
+// GUILD MEMBER ADD — Welcome + Autorole
 // ════════════════════════════════════════════
 client.on('guildMemberAdd', async member => {
+  const guildId = member.guild.id;
+
+  // ── Autorole ──
   try {
-    const ch = member.guild.channels.cache.find(c => c.name === WELCOME_CHANNEL && c.type === ChannelType.GuildText);
+    const ar = getAutoroleConfig(guildId);
+    if (ar.enabled && ar.roles.length) {
+      const roles = ar.roles.map(id => member.guild.roles.cache.get(id)).filter(Boolean);
+      if (roles.length) await member.roles.add(roles);
+    }
+  } catch (e) { console.error('Autorole error:', e); }
+
+  // ── Welcomer ──
+  try {
+    const wc = getWelcomerConfig(guildId);
+    if (!wc.enabled || !wc.channel) return;
+    const ch = member.guild.channels.cache.get(wc.channel);
     if (!ch) return;
-    await ch.send({
-      content: `👋 Welcome ${member}!`,
-      embeds: [new EmbedBuilder()
-        .setTitle('Welcome to NYLRP!')
-        .setDescription(`Hello, welcome to **NYLRP**! We now have **${member.guild.memberCount}** members.`)
-        .setThumbnail(LOGO_URL).setColor(0x2f3136).setTimestamp()],
-    });
-  } catch (e) { console.error('Welcome error:', e); }
+
+    const vars = {
+      userMention: `<@${member.user.id}>`,
+      username: member.user.username,
+      userTag: member.user.tag,
+      memberCount: member.guild.memberCount.toString(),
+      server: member.guild.name,
+    };
+
+    const embed = new EmbedBuilder()
+      .setTitle(replaceVars(wc.title, vars))
+      .setDescription(replaceVars(wc.description, vars))
+      .setColor(hexToInt(wc.color))
+      .setTimestamp();
+
+    if (wc.thumbnail) embed.setThumbnail(member.user.displayAvatarURL({ dynamic: true }));
+    if (wc.image) embed.setImage(wc.image);
+    if (wc.footer) embed.setFooter({ text: replaceVars(wc.footer, vars) });
+
+    await ch.send({ content: wc.pingUser ? `<@${member.user.id}>` : undefined, embeds: [embed] });
+  } catch (e) { console.error('Welcomer error:', e); }
 });
 
 // ════════════════════════════════════════════
@@ -660,9 +561,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
     let targetPanel = null, targetRole = null;
     for (const [, panel] of Object.entries(src.panels)) {
       if (panel.type === 'reaction' && panel.messageId === reaction.message.id) {
-        for (const role of panel.roles) {
-          if (role.reaction && role.reaction === reaction.emoji.toString()) { targetPanel = panel; targetRole = role; break; }
-        }
+        for (const role of panel.roles) { if (role.reaction && role.reaction === reaction.emoji.toString()) { targetPanel = panel; targetRole = role; break; } }
         if (targetRole) break;
       }
     }
@@ -672,10 +571,7 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (!role) return;
     if (targetPanel.max > 0) {
       const count = targetPanel.roles.filter(r => member.roles.cache.has(r.id)).length;
-      if (count >= targetPanel.max && !member.roles.cache.has(role.id)) {
-        await reaction.users.remove(user.id).catch(() => {});
-        return user.send(`❌ You can only have **${targetPanel.max}** role(s). Remove one first!`).catch(() => {});
-      }
+      if (count >= targetPanel.max && !member.roles.cache.has(role.id)) { await reaction.users.remove(user.id).catch(() => {}); return user.send(`❌ Max ${targetPanel.max} role(s).`).catch(() => {}); }
     }
     await member.roles.add(role).catch(() => {});
   } catch (e) { console.error('Reaction add error:', e); }
@@ -692,9 +588,7 @@ client.on('messageReactionRemove', async (reaction, user) => {
     let targetRole = null;
     for (const [, panel] of Object.entries(src.panels)) {
       if (panel.type === 'reaction' && panel.messageId === reaction.message.id) {
-        for (const role of panel.roles) {
-          if (role.reaction && role.reaction === reaction.emoji.toString()) { targetRole = role; break; }
-        }
+        for (const role of panel.roles) { if (role.reaction && role.reaction === reaction.emoji.toString()) { targetRole = role; break; } }
         if (targetRole) break;
       }
     }
@@ -710,143 +604,65 @@ client.on('messageReactionRemove', async (reaction, user) => {
 // INTERACTIONS
 // ════════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
-  // ✅ FIX: Always grab guildId at the top, guard against DMs
   const guildId = interaction.guildId;
-  if (!guildId) {
-    try {
-      if (interaction.isRepliable()) await interaction.reply({ content: '❌ This bot can only be used in a server.', ephemeral: true });
-    } catch {}
-    return;
-  }
+  if (!guildId) { try { if (interaction.isRepliable()) await interaction.reply({ content: '❌ Server only.', ephemeral: true }); } catch {} return; }
 
   try {
 
-    // ── SLASH COMMANDS ──
+    // ══ SLASH COMMANDS ══
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
       const user = interaction.options.getUser('user') ?? null;
       const member = user ? interaction.options.getMember('user') : null;
       const reason = interaction.options.getString('reason') ?? 'No reason provided';
 
-      if (cmd === 'ping') {
-        const sent = await interaction.reply({ content: '🏓 Pinging...', fetchReply: true });
-        const latency = sent.createdTimestamp - interaction.createdTimestamp;
-        return interaction.editReply(`🏓 Pong!\n**Bot latency:** ${latency}ms\n**API latency:** ${client.ws.ping}ms`);
-      }
+      if (cmd === 'ping') { const sent = await interaction.reply({ content: '🏓 Pinging...', fetchReply: true }); return interaction.editReply(`🏓 Pong! Bot: ${sent.createdTimestamp - interaction.createdTimestamp}ms | API: ${client.ws.ping}ms`); }
 
       if (cmd === 'avatar') {
-        const target = interaction.options.getUser('user') ?? interaction.user;
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle(`🖼️ ${target.username}'s Avatar`)
-          .setImage(target.displayAvatarURL({ size: 1024, dynamic: true }))
-          .setColor(0x5865F2)
-          .addFields({ name: 'Links', value: `[PNG](${target.displayAvatarURL({ format: 'png', size: 1024 })}) | [JPG](${target.displayAvatarURL({ format: 'jpg', size: 1024 })}) | [WEBP](${target.displayAvatarURL({ format: 'webp', size: 1024 })})` })
-        ]});
+        const t = interaction.options.getUser('user') ?? interaction.user;
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🖼️ ${t.username}'s Avatar`).setImage(t.displayAvatarURL({ size: 1024, dynamic: true })).setColor(0x5865F2)] });
       }
 
       if (cmd === 'serverinfo') {
-        const g = interaction.guild;
-        await g.fetch();
+        const g = interaction.guild; await g.fetch();
         const owner = await g.fetchOwner();
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle(`📊 ${g.name}`)
-          .setThumbnail(g.iconURL({ dynamic: true }))
-          .setColor(0x5865F2)
-          .addFields(
-            { name: '👑 Owner', value: `${owner.user.tag}`, inline: true },
-            { name: '👥 Members', value: `${g.memberCount}`, inline: true },
-            { name: '📅 Created', value: g.createdAt.toDateString(), inline: true },
-            { name: '💬 Channels', value: `${g.channels.cache.size}`, inline: true },
-            { name: '🎭 Roles', value: `${g.roles.cache.size}`, inline: true },
-            { name: '😀 Emojis', value: `${g.emojis.cache.size}`, inline: true },
-            { name: '🔒 Verification', value: g.verificationLevel.toString(), inline: true },
-            { name: '🆔 Server ID', value: g.id, inline: true },
-          ).setTimestamp()
-        ]});
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`📊 ${g.name}`).setThumbnail(g.iconURL({ dynamic: true })).setColor(0x5865F2)
+          .addFields({ name: '👑 Owner', value: owner.user.tag, inline: true }, { name: '👥 Members', value: `${g.memberCount}`, inline: true }, { name: '📅 Created', value: g.createdAt.toDateString(), inline: true }, { name: '💬 Channels', value: `${g.channels.cache.size}`, inline: true }, { name: '🎭 Roles', value: `${g.roles.cache.size}`, inline: true }).setTimestamp()] });
       }
 
       if (cmd === 'roleinfo') {
         const role = interaction.options.getRole('role');
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle(`🎭 ${role.name}`)
-          .setColor(role.color || 0x5865F2)
-          .addFields(
-            { name: '🆔 ID', value: role.id, inline: true },
-            { name: '🎨 Color', value: role.hexColor, inline: true },
-            { name: '📌 Position', value: `${role.position}`, inline: true },
-            { name: '👥 Members', value: `${role.members.size}`, inline: true },
-            { name: '🤖 Managed', value: role.managed ? 'Yes' : 'No', inline: true },
-            { name: '💬 Mentionable', value: role.mentionable ? 'Yes' : 'No', inline: true },
-            { name: '📅 Created', value: role.createdAt.toDateString(), inline: true },
-          ).setTimestamp()
-        ]});
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎭 ${role.name}`).setColor(role.color || 0x5865F2)
+          .addFields({ name: '🆔 ID', value: role.id, inline: true }, { name: '🎨 Color', value: role.hexColor, inline: true }, { name: '👥 Members', value: `${role.members.size}`, inline: true }, { name: '📌 Position', value: `${role.position}`, inline: true }).setTimestamp()] });
       }
 
       if (cmd === 'poll') {
         const question = interaction.options.getString('question');
-        const options = [
-          interaction.options.getString('option1'),
-          interaction.options.getString('option2'),
-          interaction.options.getString('option3'),
-          interaction.options.getString('option4'),
-        ].filter(Boolean);
+        const opts = [interaction.options.getString('option1'), interaction.options.getString('option2'), interaction.options.getString('option3'), interaction.options.getString('option4')].filter(Boolean);
         const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
-        const desc = options.map((o, i) => `${emojis[i]} ${o}`).join('\n\n');
-        const embed = new EmbedBuilder()
-          .setTitle(`📊 ${question}`)
-          .setDescription(desc)
-          .setColor(0x5865F2)
-          .setFooter({ text: `Poll by ${interaction.user.tag}` })
-          .setTimestamp();
+        const embed = new EmbedBuilder().setTitle(`📊 ${question}`).setDescription(opts.map((o, i) => `${emojis[i]} ${o}`).join('\n\n')).setColor(0x5865F2).setFooter({ text: `Poll by ${interaction.user.tag}` }).setTimestamp();
         const msg = await interaction.reply({ embeds: [embed], fetchReply: true });
-        for (let i = 0; i < options.length; i++) await msg.react(emojis[i]);
+        for (let i = 0; i < opts.length; i++) await msg.react(emojis[i]);
       }
 
       if (cmd === 'userinfo') {
-        const targetUser = interaction.options.getUser('user');
-        const targetMember = interaction.options.getMember('user');
-        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-          .setTitle(`👤 ${targetUser.tag}`)
-          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-          .setColor(0x5865F2)
-          .addFields(
-            { name: '🆔 ID', value: targetUser.id, inline: true },
-            { name: '🤖 Bot', value: targetUser.bot ? 'Yes' : 'No', inline: true },
-            { name: '📅 Account Created', value: targetUser.createdAt.toDateString(), inline: true },
-            { name: '📥 Joined Server', value: targetMember?.joinedAt?.toDateString() ?? 'Unknown', inline: true },
-            { name: '📛 Nickname', value: targetMember?.nickname ?? 'None', inline: true },
-            { name: '🎭 Roles', value: targetMember?.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None', inline: false },
-          ).setTimestamp()] });
+        const tu = interaction.options.getUser('user');
+        const tm = interaction.options.getMember('user');
+        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`👤 ${tu.tag}`).setThumbnail(tu.displayAvatarURL({ dynamic: true })).setColor(0x5865F2)
+          .addFields({ name: '🆔 ID', value: tu.id, inline: true }, { name: '📅 Created', value: tu.createdAt.toDateString(), inline: true }, { name: '📥 Joined', value: tm?.joinedAt?.toDateString() ?? 'Unknown', inline: true }, { name: '📛 Nickname', value: tm?.nickname ?? 'None', inline: true }, { name: '🎭 Roles', value: tm?.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None', inline: false }).setTimestamp()] });
       }
 
       if (cmd === 'warn') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
-        const warnData = { reason, moderator: interaction.user.tag, date: new Date().toUTCString() };
-        addWarning(guildId, user.id, warnData);
-        const warnCount = getWarnings(guildId, user.id).length;
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('⚠️ Warning Issued').setColor(0xFEE75C)
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Moderator', value: interaction.user.tag, inline: true },
-            { name: 'Total Warnings', value: `${warnCount}`, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        addWarning(guildId, user.id, { reason, moderator: interaction.user.tag, date: new Date().toUTCString() });
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⚠️ Warning Issued').setColor(0xFEE75C).addFields({ name: 'User', value: user.tag, inline: true }, { name: 'Warnings', value: `${getWarnings(guildId, user.id).length}`, inline: true }, { name: 'Reason', value: reason }).setTimestamp()] });
       }
 
       if (cmd === 'mute') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
         const mins = interaction.options.getInteger('minutes');
         await member.timeout(mins * 60000, reason);
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🔇 User Muted').setColor(0xED4245)
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Duration', value: `${mins} minutes`, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        return interaction.reply(`🔇 **${user.tag}** muted for **${mins} minutes**. Reason: ${reason}`);
       }
 
       if (cmd === 'unmute') {
@@ -883,67 +699,35 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.guild.members.ban(user, { reason });
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🔨 User Banned').setColor(0xED4245)
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Moderator', value: interaction.user.tag, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🔨 User Banned').setColor(0xED4245).addFields({ name: 'User', value: user.tag, inline: true }, { name: 'Reason', value: reason }).setTimestamp()] });
       }
 
       if (cmd === 'unban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const userId = interaction.options.getString('userid');
-        await interaction.guild.members.unban(userId, reason).catch(e => { throw new Error(`Could not unban: ${e.message}`); });
-        return interaction.reply(`✅ User **${userId}** unbanned.\n**Reason:** ${reason}`);
+        const uid = interaction.options.getString('userid');
+        await interaction.guild.members.unban(uid, reason);
+        return interaction.reply(`✅ **${uid}** unbanned.`);
       }
 
       if (cmd === 'softban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: 604800 });
         await interaction.guild.members.unban(user.id, 'Softban');
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('🪃 User Softbanned').setColor(0xED4245)
-          .setDescription('User was banned and unbanned to clear their messages.')
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Moderator', value: interaction.user.tag, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        return interaction.reply(`🪃 **${user.tag}** softbanned.`);
       }
 
       if (cmd === 'tempban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const hours = interaction.options.getInteger('hours');
         await interaction.guild.members.ban(user, { reason });
-        setTimeout(async () => {
-          await interaction.guild.members.unban(user.id, 'Tempban expired').catch(() => {});
-        }, hours * 3600000);
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('⏱️ User Temp Banned').setColor(0xED4245)
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Duration', value: `${hours} hours`, inline: true },
-            { name: 'Moderator', value: interaction.user.tag, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        setTimeout(async () => { await interaction.guild.members.unban(user.id, 'Tempban expired').catch(() => {}); }, hours * 3600000);
+        return interaction.reply(`⏱️ **${user.tag}** banned for **${hours} hours**.`);
       }
 
       if (cmd === 'kick') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await member.kick(reason);
-        return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle('👢 User Kicked').setColor(0xED4245)
-          .addFields(
-            { name: 'User', value: `${user.tag}`, inline: true },
-            { name: 'Moderator', value: interaction.user.tag, inline: true },
-            { name: 'Reason', value: reason, inline: false },
-          ).setTimestamp()
-        ]});
+        return interaction.reply(`👢 **${user.tag}** kicked. Reason: ${reason}`);
       }
 
       if (cmd === 'addrole') {
@@ -963,43 +747,34 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'nickname') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const nick = interaction.options.getString('nickname') ?? null;
-        await member.setNickname(nick, `Changed by ${interaction.user.tag}`);
+        await member.setNickname(nick);
         return interaction.reply(nick ? `✅ Nickname of **${user.tag}** set to **${nick}**.` : `✅ Nickname of **${user.tag}** reset.`);
       }
 
       if (cmd === 'warnings') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const warns = getWarnings(guildId, user.id);
-        if (!warns.length) return interaction.reply({ content: `✅ **${user.tag}** has no warnings.`, ephemeral: true });
-        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-          .setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C)
-          .setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason}\n*by ${w.moderator} — ${w.date}*`).join('\n\n'))
-          .setFooter({ text: `Total: ${warns.length} warning(s)` })
-        ]});
+        if (!warns.length) return interaction.reply({ content: `✅ No warnings for **${user.tag}**.`, ephemeral: true });
+        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] });
       }
 
       if (cmd === 'clearwarnings') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         clearWarnings(guildId, user.id);
-        return interaction.reply(`✅ Cleared all warnings for **${user.tag}**.`);
+        return interaction.reply(`✅ Cleared warnings for **${user.tag}**.`);
       }
 
       if (cmd === 'note') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const text = interaction.options.getString('text');
-        addNote(guildId, user.id, { text, moderator: interaction.user.tag, date: new Date().toUTCString() });
+        addNote(guildId, user.id, { text: interaction.options.getString('text'), moderator: interaction.user.tag, date: new Date().toUTCString() });
         return interaction.reply({ content: `✅ Note added for **${user.tag}**.`, ephemeral: true });
       }
 
       if (cmd === 'notes') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const notes = getNotes(guildId, user.id);
-        if (!notes.length) return interaction.reply({ content: `📝 **${user.tag}** has no notes.`, ephemeral: true });
-        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder()
-          .setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2)
-          .setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text}\n*by ${n.moderator} — ${n.date}*`).join('\n\n'))
-          .setFooter({ text: `Total: ${notes.length} note(s)` })
-        ]});
+        if (!notes.length) return interaction.reply({ content: `📝 No notes for **${user.tag}**.`, ephemeral: true });
+        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2).setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text} — *${n.moderator}*`).join('\n'))] });
       }
 
       if (cmd === 'announce') {
@@ -1008,35 +783,24 @@ client.on('interactionCreate', async interaction => {
         const extraMsg = interaction.options.getString('message') ?? null;
         const ac = getAnnouncementConfig(guildId);
         const entry = Object.entries(ac.types).find(([, t]) => t.name.toLowerCase() === typeName);
-        if (!entry) return interaction.reply({ content: `❌ No announcement type found with name **${typeName}**. Set one up with \`/setup announcements\`.`, ephemeral: true });
+        if (!entry) return interaction.reply({ content: `❌ No type **${typeName}** found.`, ephemeral: true });
         const [, t] = entry;
-        if (!t.channel) return interaction.reply({ content: `❌ No channel set for **${t.name}**. Edit it in \`/setup announcements\`.`, ephemeral: true });
+        if (!t.channel) return interaction.reply({ content: '❌ No channel set for this type.', ephemeral: true });
         const ch = interaction.guild.channels.cache.get(t.channel);
-        if (!ch) return interaction.reply({ content: '❌ Announcement channel not found.', ephemeral: true });
+        if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
-        const embed = new EmbedBuilder()
-          .setTitle(`${t.emoji || '📢'} ${t.title || t.name}`)
-          .setDescription(extraMsg ? `${t.description || ''}\n\n${extraMsg}`.trim() : (t.description || '*No description set.*'))
-          .setColor(hexToInt(t.color))
-          .setFooter({ text: `Announced by ${interaction.user.tag}` })
-          .setTimestamp();
+        const embed = new EmbedBuilder().setTitle(`${t.emoji || '📢'} ${t.title || t.name}`).setDescription(extraMsg ? `${t.description || ''}\n\n${extraMsg}`.trim() : (t.description || '*No description*')).setColor(hexToInt(t.color)).setFooter({ text: `By ${interaction.user.tag}` }).setTimestamp();
         if (t.image) embed.setImage(t.image);
-        const pingContent = t.pingRole ? `<@&${t.pingRole}>` : undefined;
-        await ch.send({ content: pingContent, embeds: [embed] });
-        return interaction.editReply({ content: `✅ **${t.name}** announcement sent in <#${t.channel}>!` });
+        await ch.send({ content: t.pingRole ? `<@&${t.pingRole}>` : undefined, embeds: [embed] });
+        return interaction.editReply({ content: `✅ Sent in <#${t.channel}>!` });
       }
 
       if (cmd === 'embed') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ch = interaction.options.getChannel('channel');
-        const title = interaction.options.getString('title');
-        const description = interaction.options.getString('description');
-        const color = interaction.options.getString('color') ?? '#5865F2';
-        const image = interaction.options.getString('image');
-        const footer = interaction.options.getString('footer');
-        const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(hexToInt(color));
-        if (image) embed.setImage(image);
-        if (footer) embed.setFooter({ text: footer });
+        const embed = new EmbedBuilder().setTitle(interaction.options.getString('title')).setDescription(interaction.options.getString('description')).setColor(hexToInt(interaction.options.getString('color') ?? '#5865F2'));
+        const img = interaction.options.getString('image'); const footer = interaction.options.getString('footer');
+        if (img) embed.setImage(img); if (footer) embed.setFooter({ text: footer });
         await ch.send({ embeds: [embed] });
         return interaction.reply({ content: `✅ Embed sent in <#${ch.id}>!`, ephemeral: true });
       }
@@ -1048,14 +812,8 @@ client.on('interactionCreate', async interaction => {
         const minutes = interaction.options.getInteger('minutes');
         const winners = interaction.options.getInteger('winners');
         const endsAt = new Date(Date.now() + minutes * 60000);
-        const embed = new EmbedBuilder()
-          .setTitle('🎉 GIVEAWAY 🎉').setColor(0xEB459E)
-          .setDescription(`**Prize:** ${prize}\n\nReact with 🎉 to enter!\n\n**Winners:** ${winners}\n**Ends:** <t:${Math.floor(endsAt.getTime() / 1000)}:R>`)
-          .setFooter({ text: `Hosted by ${interaction.user.tag}` })
-          .setTimestamp(endsAt);
-        const msg = await ch.send({ embeds: [embed] });
-        await msg.react('🎉');
-        activeGiveaways.set(msg.id, { prize, winners, channelId: ch.id, messageId: msg.id, guildId });
+        const embed = new EmbedBuilder().setTitle('🎉 GIVEAWAY 🎉').setColor(0xEB459E).setDescription(`**Prize:** ${prize}\n\nReact with 🎉 to enter!\n**Winners:** ${winners}\n**Ends:** <t:${Math.floor(endsAt.getTime() / 1000)}:R>`).setFooter({ text: `By ${interaction.user.tag}` }).setTimestamp(endsAt);
+        const msg = await ch.send({ embeds: [embed] }); await msg.react('🎉');
         setTimeout(async () => {
           try {
             const gMsg = await ch.messages.fetch(msg.id);
@@ -1063,15 +821,10 @@ client.on('interactionCreate', async interaction => {
             if (!reaction) return;
             const users = await reaction.users.fetch();
             const entries = users.filter(u => !u.bot);
-            if (!entries.size) return ch.send('🎉 Giveaway ended — no valid entries!');
+            if (!entries.size) return ch.send('🎉 No valid entries!');
             const picked = entries.random(Math.min(winners, entries.size));
             const winnerMentions = (Array.isArray(picked) ? picked : [picked]).map(u => `<@${u.id}>`).join(', ');
-            await ch.send({ embeds: [new EmbedBuilder()
-              .setTitle('🎉 Giveaway Ended!').setColor(0xEB459E)
-              .setDescription(`**Prize:** ${prize}\n**Winner(s):** ${winnerMentions}\n\nCongratulations! 🎊`)
-              .setTimestamp()
-            ]});
-            activeGiveaways.delete(msg.id);
+            await ch.send({ embeds: [new EmbedBuilder().setTitle('🎉 Giveaway Ended!').setColor(0xEB459E).setDescription(`**Prize:** ${prize}\n**Winners:** ${winnerMentions} 🎊`).setTimestamp()] });
           } catch (e) { console.error('Giveaway end error:', e); }
         }, minutes * 60000);
         return interaction.reply({ content: `✅ Giveaway started in <#${ch.id}>!`, ephemeral: true });
@@ -1080,47 +833,31 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'punish') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const t = interaction.options.getString('type');
-        if (t === 'warn') {
-          addWarning(guildId, user.id, { reason, moderator: interaction.user.tag, date: new Date().toUTCString() });
-          return interaction.reply(`⚠️ **${user.tag}** warned.\n**Reason:** ${reason}`);
-        }
-        if (t === 'mute') { await member.timeout(600000, reason); return interaction.reply(`🔇 **${user.tag}** muted 10min.\n**Reason:** ${reason}`); }
-        if (t === 'kick') { await member.kick(reason); return interaction.reply(`👢 **${user.tag}** kicked.\n**Reason:** ${reason}`); }
-        if (t === 'ban') { await interaction.guild.members.ban(user, { reason }); return interaction.reply(`🔨 **${user.tag}** banned.\n**Reason:** ${reason}`); }
+        if (t === 'warn') { addWarning(guildId, user.id, { reason, moderator: interaction.user.tag, date: new Date().toUTCString() }); return interaction.reply(`⚠️ **${user.tag}** warned.`); }
+        if (t === 'mute') { await member.timeout(600000, reason); return interaction.reply(`🔇 **${user.tag}** muted 10min.`); }
+        if (t === 'kick') { await member.kick(reason); return interaction.reply(`👢 **${user.tag}** kicked.`); }
+        if (t === 'ban')  { await interaction.guild.members.ban(user, { reason }); return interaction.reply(`🔨 **${user.tag}** banned.`); }
       }
 
       if (cmd === 'players') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
-        try {
-          const data = await erlcRequest('/server/players');
-          const list = Object.values(data);
-          if (!list.length) return interaction.editReply('No players in server.');
-          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`👥 Players (${list.length})`).setColor(0x5865F2)
-            .setDescription(list.map((p, i) => `${i + 1}. **${p.Player}** — ${p.Team || 'No team'}`).join('\n').slice(0, 4000)).setTimestamp()] });
-        } catch (e) { return interaction.editReply(`❌ ${e.message}`); }
+        try { const data = await erlcRequest('/server/players'); const list = Object.values(data); if (!list.length) return interaction.editReply('No players.'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`👥 Players (${list.length})`).setDescription(list.map((p, i) => `${i + 1}. **${p.Player}** — ${p.Team || 'None'}`).join('\n').slice(0, 4000)).setColor(0x5865F2)] }); }
+        catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
 
       if (cmd === 'serverstatus') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
-        try {
-          const d = await erlcRequest('/server');
-          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🖥️ ERLC Status').setColor(0x57F287)
-            .addFields(
-              { name: 'Name', value: d.Name || 'Unknown', inline: true },
-              { name: 'Players', value: `${d.CurrentPlayers ?? 0}/${d.MaxPlayers ?? 0}`, inline: true },
-              { name: 'Key', value: d.JoinKey || 'N/A', inline: true },
-            ).setTimestamp()] });
-        } catch (e) { return interaction.editReply(`❌ ${e.message}`); }
+        try { const d = await erlcRequest('/server'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🖥️ ERLC Status').setColor(0x57F287).addFields({ name: 'Name', value: d.Name || 'Unknown', inline: true }, { name: 'Players', value: `${d.CurrentPlayers ?? 0}/${d.MaxPlayers ?? 0}`, inline: true }, { name: 'Key', value: d.JoinKey || 'N/A', inline: true }).setTimestamp()] }); }
+        catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
 
       if (cmd === 'erlckick') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        const r = interaction.options.getString('reason') ?? 'No reason';
-        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked.\n**Reason:** ${r}`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked from ERLC.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
 
@@ -1128,18 +865,8 @@ client.on('interactionCreate', async interaction => {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        const r = interaction.options.getString('reason') ?? 'No reason';
-        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned.\n**Reason:** ${r}`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned from ERLC.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
-      }
-
-      if (cmd === 'setup') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const sub = interaction.options.getSubcommand();
-        if (sub === 'tickets')       return interaction.reply(buildTicketSetupPayload(guildId));
-        if (sub === 'sessions')      return interaction.reply(buildSessionSetupPayload(guildId));
-        if (sub === 'selfroles')     return interaction.reply({ ...buildSelfRoleOverview(guildId), ephemeral: true });
-        if (sub === 'announcements') return interaction.reply(buildAnnouncementOverview(guildId));
       }
 
       if (cmd === 'session') {
@@ -1151,101 +878,138 @@ client.on('interactionCreate', async interaction => {
         if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
+        const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag, memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
         if (sub === 'start') {
           const link = interaction.options.getString('link') ?? sc.joinLink ?? null;
-          const desc = replaceVars(sc.startDescription ?? 'A session has started! {hostMention} is hosting.', interaction);
+          const desc = replaceVars(sc.startDescription ?? 'A session has started! {hostMention} is hosting.', vars);
           const embed = new EmbedBuilder().setTitle('🟢 Session Started!').setColor(0x57F287).setDescription(desc).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.startImage) embed.setImage(sc.startImage);
-          const comps = [];
-          if (link) comps.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(link)));
+          const comps = link ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(link))] : [];
           await sCh.send({ content: ping ?? undefined, embeds: [embed], components: comps });
           return interaction.editReply({ content: `✅ Session started in <#${sc.channel}>!` });
         }
         if (sub === 'vote') {
-          const desc = replaceVars(sc.voteDescription ?? 'A session vote has started!', interaction);
-          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(desc).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(replaceVars(sc.voteDescription ?? 'A session vote has started!', vars)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.voteImage) embed.setImage(sc.voteImage);
           const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed] });
           await msg.react('✅'); await msg.react('❌');
           return interaction.editReply({ content: '✅ Vote posted!' });
         }
         if (sub === 'shutdown') {
-          const desc = replaceVars(sc.shutdownDescription ?? 'The session has ended. Thanks for playing!', interaction);
-          const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(desc).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+          const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.shutdownImage) embed.setImage(sc.shutdownImage);
           await sCh.send({ content: ping ?? undefined, embeds: [embed] });
           return interaction.editReply({ content: '✅ Shutdown posted!' });
         }
       }
+
+      if (cmd === 'setup') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const sub = interaction.options.getSubcommand();
+        if (sub === 'tickets')       return interaction.reply(buildTicketSetupPayload(guildId));
+        if (sub === 'sessions')      return interaction.reply(buildSessionSetupPayload(guildId));
+        if (sub === 'selfroles')     return interaction.reply(buildSelfRoleOverview(guildId));
+        if (sub === 'announcements') return interaction.reply(buildAnnouncementOverview(guildId));
+        if (sub === 'welcomer')      return interaction.reply(buildWelcomerSetupPayload(guildId));
+        if (sub === 'autorole')      return interaction.reply(buildAutoroleSetupPayload(guildId));
+        if (sub === 'verification')  return interaction.reply(buildVerificationSetupPayload(guildId));
+      }
     }
 
-    // ── BUTTONS ──
+    // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // ANNOUNCEMENT SETUP
-      if (id.startsWith('an_') || id.startsWith('ane__') || id === 'an__back') {
+      // ── WELCOMER SETUP ──
+      if (id.startsWith('wc_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const ac = getAnnouncementConfig(guildId);
-
-        if (id === 'an__back') return interaction.update(buildAnnouncementOverview(guildId));
-
-        if (id === 'an_new') {
-          const modal = new ModalBuilder().setCustomId('modal_an_new').setTitle('New Announcement Type');
+        const wc = getWelcomerConfig(guildId);
+        if (id === 'wc_channel') return interaction.reply({ content: '### 📢 Select welcome channel', components: [channelDropdown('wcd_channel', 'Select channel...')], ephemeral: true });
+        if (id === 'wc_toggle') {
+          wc.enabled = !wc.enabled;
+          saveConfig(config);
+          return interaction.update(buildWelcomerSetupPayload(guildId));
+        }
+        if (id === 'wc_content') {
+          const modal = new ModalBuilder().setCustomId('modal_wc_content').setTitle('Edit Welcome Message');
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_name').setLabel('Type name (e.g. "maintenance", "update")').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_emoji').setLabel('Emoji (optional, e.g. 🔧)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_desc').setLabel('Description (use {host}, {time}, {server})').setStyle(TextInputStyle.Paragraph).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_color').setLabel('Color hex (e.g. #ED4245)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_title').setLabel('Title (use {server}, {memberCount})').setStyle(TextInputStyle.Short).setValue(wc.title || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_desc').setLabel('Description (use {userMention}, {server})').setStyle(TextInputStyle.Paragraph).setValue(wc.description || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_color').setLabel('Color hex (e.g. #2f3136)').setStyle(TextInputStyle.Short).setValue(wc.color || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_image').setLabel('Banner image URL (optional)').setStyle(TextInputStyle.Short).setValue(wc.image || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_footer').setLabel('Footer text (optional)').setStyle(TextInputStyle.Short).setValue(wc.footer || '').setRequired(false)),
           );
           return interaction.showModal(modal);
         }
+      }
 
-        if (id === 'an_edit') {
-          const types = Object.entries(ac.types);
-          if (!types.length) return interaction.reply({ content: '❌ No types to edit.', ephemeral: true });
-          const sel = new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid })));
-          return interaction.reply({ content: '### ✏️ Select announcement type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+      // ── AUTOROLE SETUP ──
+      if (id.startsWith('ar_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ar = getAutoroleConfig(guildId);
+        if (id === 'ar_add') return interaction.reply({ content: '### ➕ Select roles to add automatically', components: [roleDropdown('ard_add', 'Select roles...')], ephemeral: true });
+        if (id === 'ar_remove') {
+          if (!ar.roles.length) return interaction.reply({ content: '❌ No roles set.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role to remove...').addOptions(
+            ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: id }; })
+          );
+          return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
         }
-
-        if (id === 'an_delete') {
-          const types = Object.entries(ac.types);
-          if (!types.length) return interaction.reply({ content: '❌ No types to delete.', ephemeral: true });
-          const sel = new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid })));
-          return interaction.reply({ content: '### 🗑️ Select announcement type to delete', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
-        }
-
-        if (id.startsWith('ane__')) {
-          const parts = id.split('__');
-          const action = parts[1];
-          const typeId = parts.slice(2).join('__');
-          const t = ac.types[typeId];
-          if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
-
-          if (action === 'content') {
-            const modal = new ModalBuilder().setCustomId(`modal_an_content__${typeId}`).setTitle(`Edit — ${t.name}`);
-            modal.addComponents(
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setValue(t.title || '').setMaxLength(80).setRequired(true)),
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(t.description || '').setRequired(false)),
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_color').setLabel('Color hex (e.g. #ED4245)').setStyle(TextInputStyle.Short).setValue(t.color || '').setRequired(false)),
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(t.image || '').setRequired(false)),
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setValue(t.emoji || '').setRequired(false)),
-            );
-            return interaction.showModal(modal);
-          }
-          // ✅ FIX: these now show the selector inline instead of crashing
-          if (action === 'channel') return interaction.reply({ content: `### 📢 Channel for **${t.name}**`, components: [channelDropdown(`anch__${typeId}`, 'Select channel...')], ephemeral: true });
-          if (action === 'pingrole') return interaction.reply({ content: `### 🔔 Ping role for **${t.name}**`, components: [roleDropdown(`anpr__${typeId}`, 'Select role...', 1, 1)], ephemeral: true });
-          if (action === 'clearping') {
-            t.pingRole = null;
-            saveConfig(config);
-            return interaction.update(buildAnnouncementEditor(guildId, typeId));
-          }
+        if (id === 'ar_toggle') {
+          ar.enabled = !ar.enabled;
+          saveConfig(config);
+          return interaction.update(buildAutoroleSetupPayload(guildId));
         }
       }
 
-      // TICKET SETUP
+      // ── VERIFICATION SETUP ──
+      if (id.startsWith('vc_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const vc = getVerificationConfig(guildId);
+        if (id === 'vc_channel') return interaction.reply({ content: '### 📢 Select verification channel', components: [channelDropdown('vcd_channel', 'Select channel...')], ephemeral: true });
+        if (id === 'vc_role') return interaction.reply({ content: '### 🎭 Select verified role', components: [roleDropdown('vcd_role', 'Select role...', 1, 1)], ephemeral: true });
+        if (id === 'vc_toggle') {
+          vc.enabled = !vc.enabled;
+          saveConfig(config);
+          return interaction.update(buildVerificationSetupPayload(guildId));
+        }
+        if (id === 'vc_content') {
+          const modal = new ModalBuilder().setCustomId('modal_vc_content').setTitle('Edit Verification Panel');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('vc_title').setLabel('Panel title').setStyle(TextInputStyle.Short).setValue(vc.panelTitle || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('vc_desc').setLabel('Panel description').setStyle(TextInputStyle.Paragraph).setValue(vc.panelDescription || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('vc_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(vc.panelColor || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('vc_image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(vc.panelImage || '').setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (id === 'vc_deploy') {
+          if (!vc.channel) return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
+          if (!vc.verifiedRole) return interaction.reply({ content: '❌ Set a verified role first.', ephemeral: true });
+          const ch = interaction.guild.channels.cache.get(vc.channel);
+          if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
+          const embed = new EmbedBuilder().setTitle(vc.panelTitle).setDescription(vc.panelDescription).setColor(hexToInt(vc.panelColor));
+          if (vc.panelImage) embed.setImage(vc.panelImage);
+          const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('verify_start').setLabel('✅ Verify').setStyle(ButtonStyle.Success));
+          await ch.send({ embeds: [embed], components: [row] });
+          return interaction.reply({ content: `✅ Verification panel deployed in <#${vc.channel}>!`, ephemeral: true });
+        }
+      }
+
+      // ── VERIFY BUTTON (user clicks) ──
+      if (id === 'verify_start') {
+        const vc = getVerificationConfig(guildId);
+        if (!vc.enabled) return interaction.reply({ content: '❌ Verification is currently disabled.', ephemeral: true });
+        if (vc.verifiedRole && interaction.member.roles.cache.has(vc.verifiedRole))
+          return interaction.reply({ content: '✅ You are already verified!', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_verify_submit').setTitle('Roblox Verification');
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox username').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true).setMinLength(3).setMaxLength(20)
+        ));
+        return interaction.showModal(modal);
+      }
+
+      // ── TICKET SETUP ──
       if (id.startsWith('t_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         if (id === 't_ping_roles') return interaction.reply({ content: '### 📢 Ping roles', components: [roleDropdown('td_ping_roles', 'Select roles...')], ephemeral: true });
@@ -1256,58 +1020,49 @@ client.on('interactionCreate', async interaction => {
           const tc = getTicketConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_t_embed').setTitle('Ticket Panel Embed');
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(tc.panelTitle || '').setMaxLength(80).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(tc.panelTitle || '').setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(tc.panelDescription || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_color').setLabel('Color (hex, e.g. #5865F2)').setStyle(TextInputStyle.Short).setValue(tc.panelColor || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_thumbnail').setLabel('Image URL (shows below embed)').setStyle(TextInputStyle.Short).setValue(tc.panelThumbnail || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(tc.panelColor || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_thumbnail').setLabel('Image URL').setStyle(TextInputStyle.Short).setValue(tc.panelThumbnail || '').setRequired(false)),
           );
           return interaction.showModal(modal);
         }
         if (id === 't_welcome') {
           const tc = getTicketConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_t_welcome').setTitle('Ticket Welcome Text');
-          modal.addComponents(new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('t_welcome_text').setLabel('Welcome text (use {user} for mention)').setStyle(TextInputStyle.Paragraph).setValue(tc.welcomeText || '').setRequired(true)
-          ));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_welcome_text').setLabel('Welcome text (use {user})').setStyle(TextInputStyle.Paragraph).setValue(tc.welcomeText || '').setRequired(true)));
           return interaction.showModal(modal);
         }
         if (id === 't_add_type') {
           const modal = new ModalBuilder().setCustomId('modal_t_add_type').setTitle('Add Ticket Type');
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_label').setLabel('Button Label').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_emoji').setLabel('Emoji (optional, e.g. 🎫)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_color').setLabel('Color: blue / green / red / grey').setStyle(TextInputStyle.Short).setValue('blue').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_description').setLabel('Short description (optional)').setStyle(TextInputStyle.Short).setMaxLength(100).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tt_description').setLabel('Short description (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
           );
           return interaction.showModal(modal);
         }
         if (id === 't_remove_type') {
           const tc = getTicketConfig(guildId);
           if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types to remove.', ephemeral: true });
-          const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type to remove...')
-            .addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id })));
           return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
         }
         if (id === 't_deploy') {
           const tc = getTicketConfig(guildId);
           if (!tc.ticketChannel) return interaction.reply({ content: '❌ Set a panel channel first.', ephemeral: true });
-          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ Add at least one ticket type first.', ephemeral: true });
+          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ Add at least one ticket type.', ephemeral: true });
           const ch = interaction.guild.channels.cache.get(tc.ticketChannel);
-          if (!ch) return interaction.reply({ content: '❌ Panel channel not found.', ephemeral: true });
-          try {
-            await interaction.deferReply({ ephemeral: true });
-            await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
-            saveConfig(config);
-            return interaction.editReply({ content: `✅ Ticket panel deployed in <#${tc.ticketChannel}>!` });
-          } catch (e) {
-            console.error('Ticket deploy error:', e);
-            if (interaction.deferred) return interaction.editReply({ content: `❌ Failed: ${e.message}` });
-            return interaction.reply({ content: `❌ Failed: ${e.message}`, ephemeral: true });
-          }
+          if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
+          await interaction.deferReply({ ephemeral: true });
+          await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
+          saveConfig(config);
+          return interaction.editReply({ content: `✅ Ticket panel deployed in <#${tc.ticketChannel}>!` });
         }
       }
 
-      // SESSION SETUP
+      // ── SESSION SETUP ──
       if (id.startsWith('s_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         if (id === 's_channel')       return interaction.reply({ content: '### 📢 Session channel', components: [channelDropdown('sd_channel', 'Select channel...')], ephemeral: true });
@@ -1339,50 +1094,92 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
-      // SELFROLE SETUP
-      if (id.startsWith('sr_') || id.startsWith('sre__')) {
+      // ── ANNOUNCEMENT SETUP ──
+      if (id.startsWith('an_') || id.startsWith('ane__') || id === 'an__back') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ac = getAnnouncementConfig(guildId);
+        if (id === 'an__back') return interaction.update(buildAnnouncementOverview(guildId));
+        if (id === 'an_new') {
+          const modal = new ModalBuilder().setCustomId('modal_an_new').setTitle('New Announcement Type');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_name').setLabel('Type name').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (id === 'an_edit') {
+          const types = Object.entries(ac.types);
+          if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid })));
+          return interaction.reply({ content: '### ✏️ Select type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
+        if (id === 'an_delete') {
+          const types = Object.entries(ac.types);
+          if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid })));
+          return interaction.reply({ content: '### 🗑️ Select type to delete', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
+        if (id.startsWith('ane__')) {
+          const parts = id.split('__'); const action = parts[1]; const typeId = parts.slice(2).join('__');
+          const t = ac.types[typeId];
+          if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+          if (action === 'content') {
+            const modal = new ModalBuilder().setCustomId(`modal_an_content__${typeId}`).setTitle(`Edit — ${t.name}`);
+            modal.addComponents(
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(t.title || '').setMaxLength(80).setRequired(true)),
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(t.description || '').setRequired(false)),
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(t.color || '').setRequired(false)),
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_image').setLabel('Image URL').setStyle(TextInputStyle.Short).setValue(t.image || '').setRequired(false)),
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('an_c_emoji').setLabel('Emoji').setStyle(TextInputStyle.Short).setValue(t.emoji || '').setRequired(false)),
+            );
+            return interaction.showModal(modal);
+          }
+          if (action === 'channel') return interaction.reply({ content: `### 📢 Channel for **${t.name}**`, components: [channelDropdown(`anch__${typeId}`, 'Select channel...')], ephemeral: true });
+          if (action === 'pingrole') return interaction.reply({ content: `### 🔔 Ping role for **${t.name}**`, components: [roleDropdown(`anpr__${typeId}`, 'Select role...', 1, 1)], ephemeral: true });
+          if (action === 'clearping') { t.pingRole = null; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+        }
+      }
+
+      // ── SELFROLE SETUP ──
+      if (id.startsWith('sr_') || id.startsWith('sre__') || id === 'sr__back') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const src = getSelfRoleConfig(guildId);
-
+        if (id === 'sr__back') return interaction.update(buildSelfRoleOverview(guildId));
         if (id === 'sr_new') {
           const modal = new ModalBuilder().setCustomId('modal_sr_new').setTitle('Create Panel');
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_title').setLabel('Title').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_desc').setLabel('Description (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_color').setLabel('Color hex (e.g. #EB459E)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_type').setLabel('Type: buttons / dropdown / reaction').setStyle(TextInputStyle.Short).setValue('buttons').setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_max').setLabel('Max roles per user (0 = unlimited)').setStyle(TextInputStyle.Short).setValue('0').setRequired(false)),
           );
           return interaction.showModal(modal);
         }
-        if (id === 'sr__back') return interaction.update(buildSelfRoleOverview(guildId));
         if (id === 'sr_edit') {
           const panels = Object.entries(src.panels);
           if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true });
-          const sel = new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid })));
-          return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+          return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true });
         }
         if (id === 'sr_delete') {
           const panels = Object.entries(src.panels);
           if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true });
-          const sel = new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid })));
-          return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+          return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true });
         }
-
         if (id.startsWith('sre__')) {
-          const parts = id.split('__');
-          const action = parts[1];
-          const panelId = parts.slice(2).join('__');
+          const parts = id.split('__'); const action = parts[1]; const panelId = parts.slice(2).join('__');
           const panel = src.panels[panelId];
           if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-
           if (action === 'embed') {
             const modal = new ModalBuilder().setCustomId(`modal_sr_embed__${panelId}`).setTitle('Edit Panel Embed');
             modal.addComponents(
               new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_e_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(panel.title).setMaxLength(80).setRequired(true)),
               new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_e_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(panel.description || '').setRequired(false)),
               new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_e_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(panel.color || '').setRequired(false)),
-              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_e_thumbnail').setLabel('Thumbnail URL (optional)').setStyle(TextInputStyle.Short).setValue(panel.thumbnail || '').setRequired(false)),
+              new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_e_thumbnail').setLabel('Thumbnail URL').setStyle(TextInputStyle.Short).setValue(panel.thumbnail || '').setRequired(false)),
             );
             return interaction.showModal(modal);
           }
@@ -1390,27 +1187,20 @@ client.on('interactionCreate', async interaction => {
           if (action === 'addrole') return interaction.reply({ content: `### ➕ Add role to **${panel.title}**`, components: [roleDropdown(`srr__add__${panelId}`, 'Select role...', 1, 1)], ephemeral: true });
           if (action === 'removerole') {
             if (!panel.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true });
-            const sel = new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role to remove...').addOptions(panel.roles.map(r => ({ label: r.label, value: r.id })));
-            return interaction.reply({ content: `### ➖ Remove role from **${panel.title}**`, components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+            return interaction.reply({ content: `### ➖ Remove role`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role...').addOptions(panel.roles.map(r => ({ label: r.label, value: r.id }))))], ephemeral: true });
           }
           if (action === 'deploy') {
             if (!panel.channel) return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
             if (!panel.roles.length) return interaction.reply({ content: '❌ Add at least one role.', ephemeral: true });
-            try {
-              await interaction.deferReply({ ephemeral: true });
-              await deploySelfRolePanel(interaction.guild, panelId, panel);
-              saveConfig(config);
-              return interaction.editReply({ content: `✅ **${panel.title}** deployed in <#${panel.channel}>!` });
-            } catch (e) {
-              console.error('SelfRole deploy error:', e);
-              if (interaction.deferred) return interaction.editReply({ content: `❌ Failed: ${e.message}` });
-              return interaction.reply({ content: `❌ Failed: ${e.message}`, ephemeral: true });
-            }
+            await interaction.deferReply({ ephemeral: true });
+            await deploySelfRolePanel(interaction.guild, panelId, panel);
+            saveConfig(config);
+            return interaction.editReply({ content: `✅ **${panel.title}** deployed!` });
           }
         }
       }
 
-      // TICKET OPEN
+      // ── TICKET OPEN ──
       if (id.startsWith('tkt__open__')) {
         const typeId = id.replace('tkt__open__', '');
         const tc = getTicketConfig(guildId);
@@ -1418,43 +1208,24 @@ client.on('interactionCreate', async interaction => {
         if (!type) return interaction.reply({ content: '❌ Ticket type no longer exists.', ephemeral: true });
         if (openTickets.has(interaction.user.id)) {
           const existing = interaction.guild.channels.cache.get(openTickets.get(interaction.user.id));
-          if (existing) return interaction.reply({ content: `❌ You already have an open ticket: <#${existing.id}>`, ephemeral: true });
+          if (existing) return interaction.reply({ content: `❌ You already have a ticket: <#${existing.id}>`, ephemeral: true });
           openTickets.delete(interaction.user.id);
         }
         await interaction.deferReply({ ephemeral: true });
-        const shrRole = interaction.guild.roles.cache.find(r => r.name === SHR_ROLE);
         const category = tc.ticketCategory ? interaction.guild.channels.cache.get(tc.ticketCategory) : null;
-        const perms = [
-          { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-        ];
+        const shrRole = interaction.guild.roles.cache.find(r => r.name === SHR_ROLE);
+        const perms = [{ id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }, { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }];
         if (shrRole) perms.push({ id: shrRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-        for (const rid of tc.pingRoles) {
-          if (shrRole && rid === shrRole.id) continue;
-          perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-        }
-        const ticketCh = await interaction.guild.channels.create({
-          name: `ticket-${type.label.toLowerCase().replace(/\s+/g, '-')}-${interaction.user.username}`,
-          type: ChannelType.GuildText, parent: category ?? null, permissionOverwrites: perms,
-          topic: `Ticket by ${interaction.user.tag} | ${type.label}`,
-        });
+        for (const rid of tc.pingRoles) { if (!shrRole || rid !== shrRole.id) perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }); }
+        const ticketCh = await interaction.guild.channels.create({ name: `ticket-${type.label.toLowerCase().replace(/\s+/g, '-')}-${interaction.user.username}`, type: ChannelType.GuildText, parent: category ?? null, permissionOverwrites: perms, topic: `Ticket by ${interaction.user.tag} | ${type.label}` });
         openTickets.set(interaction.user.id, ticketCh.id);
-        const welcomeText = replaceVars(tc.welcomeText || 'Hello {user}, thank you for opening a ticket!', interaction);
-        const pingTxt = tc.pingRoles.map(id => `<@&${id}>`).join(' ');
-        const embed = new EmbedBuilder()
-          .setTitle(`${type.emoji || '🎫'} Ticket — ${type.label}`)
-          .setDescription(`${welcomeText}\n\n**Type:** ${type.label}${type.description ? `\n*${type.description}*` : ''}`)
-          .setColor(hexToInt(tc.panelColor)).setTimestamp().setFooter({ text: `Opened by ${interaction.user.tag}` });
-        if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
-        await ticketCh.send({
-          content: `<@${interaction.user.id}>${pingTxt ? ' ' + pingTxt : ''}`,
-          embeds: [embed],
-          components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'))],
-        });
+        const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag };
+        const embed = new EmbedBuilder().setTitle(`${type.emoji || '🎫'} Ticket — ${type.label}`).setDescription(`${replaceVars(tc.welcomeText || 'Hello {user}!', vars)}\n\n**Type:** ${type.label}`).setColor(hexToInt(tc.panelColor)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+        await ticketCh.send({ content: `<@${interaction.user.id}>${tc.pingRoles.map(id => ` <@&${id}>`).join('')}`, embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'))] });
         return interaction.editReply({ content: `✅ Ticket created: <#${ticketCh.id}>` });
       }
 
-      // TICKET CLOSE
+      // ── TICKET CLOSE ──
       if (id === 'tkt__close') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const ch = interaction.channel;
@@ -1463,8 +1234,7 @@ client.on('interactionCreate', async interaction => {
           const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
           if (trCh) {
             const msgs = await ch.messages.fetch({ limit: 100 });
-            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp)
-              .map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${m.author.tag}: ${m.content || '[embed]'}`).join('\n');
+            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp).map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${m.author.tag}: ${m.content || '[embed]'}`).join('\n');
             await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] });
           }
         }
@@ -1473,11 +1243,9 @@ client.on('interactionCreate', async interaction => {
         setTimeout(() => ch.delete().catch(() => {}), 3000);
       }
 
-      // SELFROLE BUTTON
+      // ── SELFROLE BUTTON ──
       if (id.startsWith('srp__btn__')) {
-        const parts = id.split('__');
-        const panelId = parts[2];
-        const roleId = parts[3];
+        const parts = id.split('__'); const panelId = parts[2]; const roleId = parts[3];
         const src = getSelfRoleConfig(guildId);
         const panel = src.panels[panelId];
         if (!panel) return interaction.reply({ content: '❌ Panel no longer exists.', ephemeral: true });
@@ -1485,36 +1253,41 @@ client.on('interactionCreate', async interaction => {
         if (!role) return interaction.reply({ content: '❌ Role no longer exists.', ephemeral: true });
         if (panel.max > 0 && !interaction.member.roles.cache.has(roleId)) {
           const count = panel.roles.filter(r => interaction.member.roles.cache.has(r.id)).length;
-          if (count >= panel.max) return interaction.reply({ content: `❌ You can only have **${panel.max}** role(s). Remove one first.`, ephemeral: true });
+          if (count >= panel.max) return interaction.reply({ content: `❌ Max **${panel.max}** role(s).`, ephemeral: true });
         }
-        if (interaction.member.roles.cache.has(roleId)) {
-          await interaction.member.roles.remove(roleId);
-          return interaction.reply({ content: `✅ Removed **${role.name}**.`, ephemeral: true });
-        } else {
-          await interaction.member.roles.add(roleId);
-          return interaction.reply({ content: `✅ Added **${role.name}**.`, ephemeral: true });
-        }
+        if (interaction.member.roles.cache.has(roleId)) { await interaction.member.roles.remove(roleId); return interaction.reply({ content: `✅ Removed **${role.name}**.`, ephemeral: true }); }
+        else { await interaction.member.roles.add(roleId); return interaction.reply({ content: `✅ Added **${role.name}**.`, ephemeral: true }); }
       }
     }
 
-    // ── ROLE SELECT MENUS ──
+    // ══ ROLE SELECT MENUS ══
     if (interaction.isRoleSelectMenu()) {
-      if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      if (!hasSHR(interaction.member) && !['ard_add'].includes(interaction.customId)) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      }
       const ids = interaction.values;
+
+      // Autorole add
+      if (interaction.customId === 'ard_add') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ar = getAutoroleConfig(guildId);
+        for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); }
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Autoroles added: ${ids.map(id => `<@&${id}>`).join(', ')}`, ephemeral: true });
+      }
+
+      // Verification role
+      if (interaction.customId === 'vcd_role') {
+        const vc = getVerificationConfig(guildId);
+        vc.verifiedRole = ids[0];
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Verified role set to <@&${ids[0]}>.`, ephemeral: true });
+      }
+
       if (interaction.customId === 'td_ping_roles')    { getTicketConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_ping_roles')    { getSessionConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_allowed_roles') { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
-
-      // ✅ FIX: announcement ping role handler (was completely missing)
-      if (interaction.customId.startsWith('anpr__')) {
-        const typeId = interaction.customId.replace('anpr__', '');
-        const ac = getAnnouncementConfig(guildId);
-        if (!ac.types[typeId]) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
-        ac.types[typeId].pingRole = ids[0];
-        saveConfig(config);
-        return interaction.update(buildAnnouncementEditor(guildId, typeId));
-      }
-
+      if (interaction.customId.startsWith('anpr__')) { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
       if (interaction.customId.startsWith('srr__add__')) {
         const panelId = interaction.customId.replace('srr__add__', '');
         const src = getSelfRoleConfig(guildId);
@@ -1523,283 +1296,218 @@ client.on('interactionCreate', async interaction => {
         const roleId = ids[0];
         if (panel.roles.some(r => r.id === roleId)) return interaction.reply({ content: '❌ Role already added.', ephemeral: true });
         srPendingRoleAdd.set(interaction.user.id, { panelId, roleId });
-        const modal = new ModalBuilder().setCustomId(`modal_sr_rolelabel__${panelId}`).setTitle(panel.type === 'reaction' ? 'Configure Role Reaction' : 'Configure Role Button');
-        if (panel.type === 'reaction') {
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_reaction').setLabel('Reaction emoji (e.g. ✅)').setStyle(TextInputStyle.Short).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_label').setLabel('Label').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_desc').setLabel('Description (optional)').setStyle(TextInputStyle.Short).setMaxLength(100).setRequired(false)),
-          );
-        } else {
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_label').setLabel('Button label').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_emoji').setLabel('Emoji (optional, e.g. 🔔)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_desc').setLabel('Description (optional)').setStyle(TextInputStyle.Short).setMaxLength(100).setRequired(false)),
-          );
-        }
+        const modal = new ModalBuilder().setCustomId(`modal_sr_rolelabel__${panelId}`).setTitle('Configure Role');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_label').setLabel('Button label').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+          panel.type === 'reaction' ? new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_reaction').setLabel('Reaction emoji (e.g. ✅)').setStyle(TextInputStyle.Short).setRequired(true)) : new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sr_rl_desc').setLabel('Description (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+        );
         return interaction.showModal(modal);
       }
     }
 
-    // ── CHANNEL SELECT MENUS ──
+    // ══ CHANNEL SELECT MENUS ══
     if (interaction.isChannelSelectMenu()) {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const chId = interaction.values[0];
+
+      if (interaction.customId === 'wcd_channel') { getWelcomerConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'vcd_channel') { getVerificationConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'td_transcript') { getTicketConfig(guildId).transcriptChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'td_channel')    { getTicketConfig(guildId).ticketChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'td_category')   { getTicketConfig(guildId).ticketCategory = chId; saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'sd_channel')    { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
-
-      // ✅ FIX: announcement channel handler (was completely missing)
-      if (interaction.customId.startsWith('anch__')) {
-        const typeId = interaction.customId.replace('anch__', '');
-        const ac = getAnnouncementConfig(guildId);
-        if (!ac.types[typeId]) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
-        ac.types[typeId].channel = chId;
-        saveConfig(config);
-        return interaction.update(buildAnnouncementEditor(guildId, typeId));
-      }
-
-      if (interaction.customId.startsWith('srch__')) {
-        const panelId = interaction.customId.replace('srch__', '');
-        const src = getSelfRoleConfig(guildId);
-        const panel = src.panels[panelId];
-        if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        panel.channel = chId;
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Channel set to <#${chId}>.`, ephemeral: true });
-      }
+      if (interaction.customId.startsWith('anch__')) { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+      if (interaction.customId.startsWith('srch__')) { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
     }
 
-    // ── STRING SELECT MENUS ──
+    // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId;
       const val = interaction.values[0];
 
-      // ✅ FIX: announcement select menus (edit + delete were missing)
-      if (id === 'an_sel_edit') {
+      if (id === 'ard_remove') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const ac = getAnnouncementConfig(guildId);
-        if (!ac.types[val]) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
-        return interaction.update(buildAnnouncementEditor(guildId, val));
-      }
-      if (id === 'an_sel_delete') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const ac = getAnnouncementConfig(guildId);
-        delete ac.types[val];
+        const ar = getAutoroleConfig(guildId);
+        ar.roles = ar.roles.filter(r => r !== val);
         saveConfig(config);
-        return interaction.update(buildAnnouncementOverview(guildId));
+        return interaction.reply({ content: `✅ Removed <@&${val}> from autoroles.`, ephemeral: true });
       }
-
-      if (id === 'sr_sel_edit') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const src = getSelfRoleConfig(guildId);
-        if (!src.panels[val]) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        return interaction.update(buildPanelEditor(guildId, val));
-      }
-      if (id === 'sr_sel_delete') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const src = getSelfRoleConfig(guildId);
-        delete src.panels[val];
-        saveConfig(config);
-        return interaction.update(buildSelfRoleOverview(guildId));
-      }
-      if (id.startsWith('sr_sel_rmrole__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const panelId = id.replace('sr_sel_rmrole__', '');
-        const src = getSelfRoleConfig(guildId);
-        const panel = src.panels[panelId];
-        if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        panel.roles = panel.roles.filter(r => r.id !== val);
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Role removed from **${panel.title}**.`, ephemeral: true });
-      }
-      if (id === 'td_remove_type') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const tc = getTicketConfig(guildId);
-        tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val);
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true });
-      }
+      if (id === 'an_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildAnnouncementEditor(guildId, val)); }
+      if (id === 'an_sel_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); delete getAnnouncementConfig(guildId).types[val]; saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
+      if (id === 'sr_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildPanelEditor(guildId, val)); }
+      if (id === 'sr_sel_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); delete getSelfRoleConfig(guildId).panels[val]; saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
+      if (id.startsWith('sr_sel_rmrole__')) { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
+      if (id === 'td_remove_type') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
       if (id.startsWith('srp__dd__')) {
         const panelId = id.replace('srp__dd__', '');
         const src = getSelfRoleConfig(guildId);
         const panel = src.panels[panelId];
-        if (!panel) return interaction.reply({ content: '❌ Panel no longer exists.', ephemeral: true });
-        const selectedRoleIds = interaction.values;
-        const allPanelRoleIds = panel.roles.map(r => r.id);
-        const toRemove = interaction.member.roles.cache.filter(r => allPanelRoleIds.includes(r.id));
-        if (toRemove.size > 0) await interaction.member.roles.remove(toRemove);
-        const toAdd = selectedRoleIds.map(rid => interaction.guild.roles.cache.get(rid)).filter(Boolean);
-        if (toAdd.length > 0) await interaction.member.roles.add(toAdd);
-        return interaction.reply({ content: toAdd.length > 0 ? `✅ Updated your roles: ${toAdd.map(r => `**${r.name}**`).join(', ')}` : '✅ Removed all roles from this panel.', ephemeral: true });
+        if (!panel) return interaction.reply({ content: '❌ Panel gone.', ephemeral: true });
+        const allIds = panel.roles.map(r => r.id);
+        await interaction.member.roles.remove(interaction.member.roles.cache.filter(r => allIds.includes(r.id)));
+        const toAdd = interaction.values.map(rid => interaction.guild.roles.cache.get(rid)).filter(Boolean);
+        if (toAdd.length) await interaction.member.roles.add(toAdd);
+        return interaction.reply({ content: toAdd.length ? `✅ Roles updated: ${toAdd.map(r => `**${r.name}**`).join(', ')}` : '✅ All roles removed.', ephemeral: true });
       }
     }
 
-    // ── MODALS ──
+    // ══ MODALS ══
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
-      // ✅ FIX: New announcement type modal — was crashing due to missing guildId guard (now at top)
-      if (mid === 'modal_an_new') {
-        const ac = getAnnouncementConfig(guildId);
-        const name  = interaction.fields.getTextInputValue('an_name').trim();
-        const emoji = interaction.fields.getTextInputValue('an_emoji').trim();
-        const title = interaction.fields.getTextInputValue('an_title').trim();
-        const desc  = interaction.fields.getTextInputValue('an_desc').trim();
-        const color = interaction.fields.getTextInputValue('an_color').trim();
-        // Guard: duplicate name check
-        const exists = Object.values(ac.types).some(t => t.name.toLowerCase() === name.toLowerCase());
-        if (exists) return interaction.reply({ content: `❌ A type named **${name}** already exists.`, ephemeral: true });
-        const tid = genId();
-        ac.types[tid] = {
-          name,
-          emoji: emoji || null,
-          title,
-          description: desc || null,
-          color: color || '#ED4245',
-          channel: null,
-          pingRole: null,
-          image: null,
-        };
+      // ── Welcomer content ──
+      if (mid === 'modal_wc_content') {
+        const wc = getWelcomerConfig(guildId);
+        const t  = interaction.fields.getTextInputValue('wc_title').trim();
+        const d  = interaction.fields.getTextInputValue('wc_desc').trim();
+        const c  = interaction.fields.getTextInputValue('wc_color').trim();
+        const im = interaction.fields.getTextInputValue('wc_image').trim();
+        const f  = interaction.fields.getTextInputValue('wc_footer').trim();
+        if (t)  wc.title = t;
+        if (d)  wc.description = d;
+        if (c)  wc.color = c;
+        if (im) wc.image = im; else wc.image = null;
+        if (f)  wc.footer = f; else wc.footer = null;
         saveConfig(config);
-        return interaction.reply({ content: `✅ Announcement type **${name}** created! Use the editor to set a channel.`, ...buildAnnouncementEditor(guildId, tid) });
+        return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
       }
 
-      // ✅ FIX: Edit announcement content modal — was missing handler entirely
-      if (mid.startsWith('modal_an_content__')) {
-        const typeId = mid.replace('modal_an_content__', '');
-        const ac = getAnnouncementConfig(guildId);
-        const t = ac.types[typeId];
-        if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
-        const title = interaction.fields.getTextInputValue('an_c_title').trim();
-        const desc  = interaction.fields.getTextInputValue('an_c_desc').trim();
-        const color = interaction.fields.getTextInputValue('an_c_color').trim();
-        const image = interaction.fields.getTextInputValue('an_c_image').trim();
-        const emoji = interaction.fields.getTextInputValue('an_c_emoji').trim();
-        if (title) t.title = title;
-        if (desc)  t.description = desc;
-        if (color) t.color = color;
-        if (image) t.image = image;
-        if (emoji) t.emoji = emoji;
+      // ── Verification content ──
+      if (mid === 'modal_vc_content') {
+        const vc = getVerificationConfig(guildId);
+        const t  = interaction.fields.getTextInputValue('vc_title').trim();
+        const d  = interaction.fields.getTextInputValue('vc_desc').trim();
+        const c  = interaction.fields.getTextInputValue('vc_color').trim();
+        const im = interaction.fields.getTextInputValue('vc_image').trim();
+        if (t)  vc.panelTitle = t;
+        if (d)  vc.panelDescription = d;
+        if (c)  vc.panelColor = c;
+        if (im) vc.panelImage = im; else vc.panelImage = null;
         saveConfig(config);
-        return interaction.update(buildAnnouncementEditor(guildId, typeId));
+        return interaction.reply({ content: '✅ Verification panel updated!', ephemeral: true });
       }
 
+      // ── Verification submit (user verifies) ──
+      if (mid === 'modal_verify_submit') {
+        await interaction.deferReply({ ephemeral: true });
+        const vc = getVerificationConfig(guildId);
+        const robloxUsername = interaction.fields.getTextInputValue('roblox_username').trim();
+
+        try {
+          // Call Roblox API
+          const robloxUser = await getRobloxUser(robloxUsername);
+          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox user **${robloxUsername}** not found. Please check your username and try again.` });
+
+          const nickname = `(${interaction.user.username}) | ${robloxUser.name}`.slice(0, 32); // Discord nickname max 32 chars
+
+          // Set nickname
+          try { await interaction.member.setNickname(nickname, 'Roblox verification'); }
+          catch { /* Bot might not have permission to change nickname */ }
+
+          // Give verified role
+          if (vc.verifiedRole) {
+            const role = interaction.guild.roles.cache.get(vc.verifiedRole);
+            if (role) await interaction.member.roles.add(role);
+          }
+
+          return interaction.editReply({
+            embeds: [new EmbedBuilder()
+              .setTitle('✅ Verified!')
+              .setColor(0x57F287)
+              .setDescription(`You have been successfully verified!`)
+              .addFields(
+                { name: '🎮 Roblox Username', value: robloxUser.name, inline: true },
+                { name: '🆔 Roblox ID', value: `${robloxUser.id}`, inline: true },
+                { name: '📛 Nickname set to', value: `\`${nickname}\``, inline: false },
+              )
+              .setTimestamp()
+            ]
+          });
+        } catch (e) {
+          console.error('Verification error:', e);
+          return interaction.editReply({ content: `❌ Something went wrong while verifying. Please try again later.` });
+        }
+      }
+
+      // ── Ticket modals ──
       if (mid === 'modal_t_embed') {
         const tc = getTicketConfig(guildId);
-        const t  = interaction.fields.getTextInputValue('t_embed_title').trim();
-        const d  = interaction.fields.getTextInputValue('t_embed_desc').trim();
-        const c  = interaction.fields.getTextInputValue('t_embed_color').trim();
-        const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim();
-        if (t)  tc.panelTitle = t;
-        if (d)  tc.panelDescription = d;
-        if (c)  tc.panelColor = c;
-        if (th) tc.panelThumbnail = th;
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
+        const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim();
+        if (t) tc.panelTitle = t; if (d) tc.panelDescription = d; if (c) tc.panelColor = c; if (th) tc.panelThumbnail = th;
+        saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
-
-      if (mid === 'modal_t_welcome') {
-        const tc = getTicketConfig(guildId);
-        tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim();
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true });
-      }
-
+      if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); saveConfig(config); return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true }); }
       if (mid === 'modal_t_add_type') {
-        const tc    = getTicketConfig(guildId);
-        const label = interaction.fields.getTextInputValue('tt_label').trim();
-        const emoji = interaction.fields.getTextInputValue('tt_emoji').trim();
-        const color = interaction.fields.getTextInputValue('tt_color').trim();
-        const desc  = interaction.fields.getTextInputValue('tt_description').trim();
-        tc.ticketTypes.push({ id: genId(), label, emoji: emoji || null, color: color || 'blue', description: desc || null });
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Type **${label}** added!`, ephemeral: true });
+        const tc = getTicketConfig(guildId);
+        tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null });
+        saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true });
       }
 
-      if (mid === 'modal_s_joinlink') {
-        getSessionConfig(guildId).joinLink = interaction.fields.getTextInputValue('s_link_val').trim();
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Join link saved!', ephemeral: true });
-      }
-
+      // ── Session modals ──
+      if (mid === 'modal_s_joinlink') { getSessionConfig(guildId).joinLink = interaction.fields.getTextInputValue('s_link_val').trim(); saveConfig(config); return interaction.reply({ content: '✅ Join link saved!', ephemeral: true }); }
       if (mid === 'modal_s_desc') {
         const sc = getSessionConfig(guildId);
-        const s  = interaction.fields.getTextInputValue('s_start_desc').trim();
-        const v  = interaction.fields.getTextInputValue('s_vote_desc').trim();
-        const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim();
-        if (s)  sc.startDescription = s;
-        if (v)  sc.voteDescription = v;
-        if (sh) sc.shutdownDescription = sh;
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true });
+        const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim();
+        if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh;
+        saveConfig(config); return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true });
       }
-
       if (mid === 'modal_s_images') {
         const sc = getSessionConfig(guildId);
-        const si = interaction.fields.getTextInputValue('s_start_img').trim();
-        const vi = interaction.fields.getTextInputValue('s_vote_img').trim();
-        const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim();
-        if (si) sc.startImage = si;
-        if (vi) sc.voteImage = vi;
-        if (hi) sc.shutdownImage = hi;
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Images saved!', ephemeral: true });
+        const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim();
+        if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi;
+        saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true });
       }
 
+      // ── Announcement modals ──
+      if (mid === 'modal_an_new') {
+        const ac = getAnnouncementConfig(guildId);
+        const name = interaction.fields.getTextInputValue('an_name').trim();
+        if (Object.values(ac.types).some(t => t.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ Type **${name}** already exists.`, ephemeral: true });
+        const tid = genId();
+        ac.types[tid] = { name, emoji: interaction.fields.getTextInputValue('an_emoji').trim() || null, title: interaction.fields.getTextInputValue('an_title').trim(), description: interaction.fields.getTextInputValue('an_desc').trim() || null, color: interaction.fields.getTextInputValue('an_color').trim() || '#ED4245', channel: null, pingRole: null, image: null };
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Type **${name}** created!`, ...buildAnnouncementEditor(guildId, tid) });
+      }
+      if (mid.startsWith('modal_an_content__')) {
+        const typeId = mid.replace('modal_an_content__', '');
+        const t = getAnnouncementConfig(guildId).types[typeId];
+        if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        const title = interaction.fields.getTextInputValue('an_c_title').trim(); const desc = interaction.fields.getTextInputValue('an_c_desc').trim(); const color = interaction.fields.getTextInputValue('an_c_color').trim(); const image = interaction.fields.getTextInputValue('an_c_image').trim(); const emoji = interaction.fields.getTextInputValue('an_c_emoji').trim();
+        if (title) t.title = title; if (desc) t.description = desc; if (color) t.color = color; if (image) t.image = image; if (emoji) t.emoji = emoji;
+        saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
+      }
+
+      // ── Selfrole modals ──
       if (mid === 'modal_sr_new') {
-        const src   = getSelfRoleConfig(guildId);
-        const title = interaction.fields.getTextInputValue('sr_title').trim();
-        const desc  = interaction.fields.getTextInputValue('sr_desc').trim();
-        const color = interaction.fields.getTextInputValue('sr_color').trim();
-        const type  = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
-        const maxIn = interaction.fields.getTextInputValue('sr_max').trim();
-        const max   = parseInt(maxIn, 10);
+        const src = getSelfRoleConfig(guildId);
+        const type = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
         if (!['buttons', 'dropdown', 'reaction'].includes(type)) return interaction.reply({ content: '❌ Type must be `buttons`, `dropdown`, or `reaction`.', ephemeral: true });
         const pid = genId();
-        src.panels[pid] = { title, description: desc || null, color: color || null, thumbnail: null, channel: null, messageId: null, type, max: isNaN(max) ? 0 : max, roles: [] };
-        saveConfig(config);
-        return interaction.reply({ ...buildPanelEditor(guildId, pid), ephemeral: true });
+        src.panels[pid] = { title: interaction.fields.getTextInputValue('sr_title').trim(), description: interaction.fields.getTextInputValue('sr_desc').trim() || null, color: interaction.fields.getTextInputValue('sr_color').trim() || null, thumbnail: null, channel: null, messageId: null, type, max: parseInt(interaction.fields.getTextInputValue('sr_max').trim(), 10) || 0, roles: [] };
+        saveConfig(config); return interaction.reply({ ...buildPanelEditor(guildId, pid), ephemeral: true });
       }
-
       if (mid.startsWith('modal_sr_embed__')) {
         const panelId = mid.replace('modal_sr_embed__', '');
-        const src     = getSelfRoleConfig(guildId);
-        const panel   = src.panels[panelId];
+        const panel = getSelfRoleConfig(guildId).panels[panelId];
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        const t  = interaction.fields.getTextInputValue('sr_e_title').trim();
-        const d  = interaction.fields.getTextInputValue('sr_e_desc').trim();
-        const c  = interaction.fields.getTextInputValue('sr_e_color').trim();
-        const th = interaction.fields.getTextInputValue('sr_e_thumbnail').trim();
-        if (t)  panel.title = t;
-        if (d)  panel.description = d;
-        if (c)  panel.color = c;
-        if (th) panel.thumbnail = th;
-        saveConfig(config);
-        return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
+        const t = interaction.fields.getTextInputValue('sr_e_title').trim(); const d = interaction.fields.getTextInputValue('sr_e_desc').trim(); const c = interaction.fields.getTextInputValue('sr_e_color').trim(); const th = interaction.fields.getTextInputValue('sr_e_thumbnail').trim();
+        if (t) panel.title = t; if (d) panel.description = d; if (c) panel.color = c; if (th) panel.thumbnail = th;
+        saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
-
       if (mid.startsWith('modal_sr_rolelabel__')) {
         const panelId = mid.replace('modal_sr_rolelabel__', '');
-        const src     = getSelfRoleConfig(guildId);
-        const panel   = src.panels[panelId];
+        const src = getSelfRoleConfig(guildId);
+        const panel = src.panels[panelId];
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
         const pending = srPendingRoleAdd.get(interaction.user.id);
         if (!pending || pending.panelId !== panelId) return interaction.reply({ content: '❌ Session expired, try again.', ephemeral: true });
-        if (panel.type === 'reaction') {
-          const reaction = interaction.fields.getTextInputValue('sr_rl_reaction').trim();
-          const label    = interaction.fields.getTextInputValue('sr_rl_label').trim();
-          const desc     = interaction.fields.getTextInputValue('sr_rl_desc').trim();
-          panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), reaction, description: desc || null });
-        } else {
-          const label = interaction.fields.getTextInputValue('sr_rl_label').trim();
-          const emoji = interaction.fields.getTextInputValue('sr_rl_emoji').trim();
-          const desc  = interaction.fields.getTextInputValue('sr_rl_desc').trim();
-          panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), emoji: emoji || null, description: desc || null });
-        }
-        saveConfig(config);
-        srPendingRoleAdd.delete(interaction.user.id);
+        const label = interaction.fields.getTextInputValue('sr_rl_label').trim();
+        const emoji = interaction.fields.getTextInputValue('sr_rl_emoji')?.trim() || null;
+        const reaction = interaction.fields.getTextInputValue('sr_rl_reaction')?.trim() || null;
+        const desc = interaction.fields.getTextInputValue('sr_rl_desc')?.trim() || null;
+        panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), emoji, reaction, description: desc });
+        saveConfig(config); srPendingRoleAdd.delete(interaction.user.id);
         return interaction.reply({ content: `✅ Added <@&${pending.roleId}> to **${panel.title}**!`, ephemeral: true });
       }
     }
