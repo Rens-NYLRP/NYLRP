@@ -1,5 +1,5 @@
 require('dotenv').config();
-const http = require('http'); // ✅ FIX: was missing
+const http = require('http');
 const {
   Client, GatewayIntentBits, Partials, REST, Routes,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
@@ -24,6 +24,9 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
+// ════════════════════════════════════════════
+// CONFIG
+// ════════════════════════════════════════════
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 function loadConfig() {
   try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { console.error('Config load error:', e); }
@@ -35,6 +38,7 @@ function saveConfig(cfg) {
 let config = loadConfig();
 
 function getGuildConfig(guildId) { if (!config[guildId]) config[guildId] = {}; return config[guildId]; }
+
 function getTicketConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.ticket) gc.ticket = { pingRoles: [], transcriptChannel: null, ticketChannel: null, ticketCategory: null, panelTitle: '🎫 Support Tickets', panelDescription: 'Click a button below to open a support ticket.', panelColor: '#5865F2', panelThumbnail: null, welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [] };
@@ -42,19 +46,7 @@ function getTicketConfig(guildId) {
 }
 function getSessionConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.session) gc.session = {
-    channel: null,
-    pingRoles: [],
-    allowedRoles: [],
-    joinLink: null,
-    startImage: null,
-    startDescription: null,
-    voteImage: null,
-    voteDescription: null,
-    shutdownImage: null,
-    shutdownDescription: null,
-    voteThreshold: 5,
-  };
+  if (!gc.session) gc.session = { channel: null, pingRoles: [], allowedRoles: [], joinLink: null, startImage: null, startDescription: null, voteImage: null, voteDescription: null, shutdownImage: null, shutdownDescription: null, voteThreshold: 5 };
   if (gc.session.voteThreshold === undefined) gc.session.voteThreshold = 5;
   return gc.session;
 }
@@ -65,22 +57,42 @@ function getWelcomerConfig(guildId) {
   if (!gc.welcomer) gc.welcomer = { enabled: false, channel: null, title: 'Welcome to {server}!', description: 'Hello {userMention}, welcome to **{server}**!\nYou are member **#{memberCount}**.', color: '#2f3136', thumbnail: true, image: null, footer: 'Welcome!', pingUser: true };
   return gc.welcomer;
 }
-function getAutoroleConfig(guildId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.autorole) gc.autorole = { enabled: false, roles: [] };
-  return gc.autorole;
-}
+function getAutoroleConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.autorole) gc.autorole = { enabled: false, roles: [] }; return gc.autorole; }
 function getVerificationConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.verification) gc.verification = { enabled: false, channel: null, verifiedRole: null, panelTitle: '✅ Verify your Roblox account', panelDescription: 'Click **Verify** below, enter your Roblox username, and you\'ll get access!\n\nNickname will be: `(DiscordName) | RobloxName`', panelColor: '#57F287', panelImage: null };
   return gc.verification;
 }
+
+// ── NEW: Application Config ──
+function getApplicationConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.applications) gc.applications = {
+    reviewChannel: null,
+    logChannel: null,
+    appTypes: [],
+    // appTypes: [{ id, label, emoji, color, description, questions: ['Q1','Q2',...], acceptRole: null }]
+  };
+  return gc.applications;
+}
+
+// ── NEW: Saved Messages Config ──
+function getSavedMessagesConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.savedMessages) gc.savedMessages = { messages: {} };
+  // messages: { id: { name, title, description, color, image, footer, pingRole } }
+  return gc.savedMessages;
+}
+
 function getWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; return gc.warnings[userId]; }
 function addWarning(guildId, userId, warn) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; gc.warnings[userId].push(warn); saveConfig(config); }
 function clearWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; gc.warnings[userId] = []; saveConfig(config); }
 function getNotes(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; return gc.notes[userId]; }
 function addNote(guildId, userId, note) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; gc.notes[userId].push(note); saveConfig(config); }
 
+// ════════════════════════════════════════════
+// CONSTANTS
+// ════════════════════════════════════════════
 const STAFF_ROLE = '《 𝑵𝒀𝑳𝑹𝑷 | Staff Team》';
 const SHR_ROLE   = 'SHR';
 const LOGO_URL   = 'https://cdn.discordapp.com/attachments/1363047391263064166/1484556795321122917/image.png';
@@ -99,7 +111,12 @@ function canRunSession(member, guildId) {
 const openTickets      = new Map();
 const srPendingRoleAdd = new Map();
 const activeVotes      = new Map();
+const pendingCloseReqs = new Map(); // ticketChannelId -> { requesterId, messageId }
+const appPendingType   = new Map(); // userId -> appTypeId
 
+// ════════════════════════════════════════════
+// UTILS
+// ════════════════════════════════════════════
 function genId() { return Math.random().toString(36).slice(2, 8); }
 function hexToInt(hex) { if (!hex) return 0x5865F2; const v = parseInt(hex.replace('#', ''), 16); return isNaN(v) ? 0x5865F2 : v; }
 function colorToButtonStyle(c) {
@@ -111,12 +128,7 @@ function colorToButtonStyle(c) {
   return ButtonStyle.Primary;
 }
 function safeSetEmoji(btn, emoji) { if (!emoji || emoji === 'null') return btn; try { btn.setEmoji(emoji); } catch {} return btn; }
-
-function isValidUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  const trimmed = url.trim();
-  return trimmed.startsWith('https://') || trimmed.startsWith('http://');
-}
+function isValidUrl(url) { if (!url || typeof url !== 'string') return false; const t = url.trim(); return t.startsWith('https://') || t.startsWith('http://'); }
 
 function replaceVars(text, opts = {}) {
   if (!text) return text;
@@ -136,8 +148,7 @@ function replaceVars(text, opts = {}) {
 
 async function getRobloxUser(username) {
   const res = await fetch('https://users.roblox.com/v1/usernames/users', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }),
   });
   if (!res.ok) throw new Error('Roblox API error');
@@ -162,6 +173,59 @@ function channelDropdown(customId, placeholder, types = [ChannelType.GuildText])
   return new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).addChannelTypes(...types).setMinValues(1).setMaxValues(1));
 }
 
+// ════════════════════════════════════════════
+// APPLICATION SETUP PAYLOAD
+// ════════════════════════════════════════════
+function buildApplicationSetupPayload(guildId) {
+  const ac = getApplicationConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Application System Setup').setColor(0x5865F2)
+    .setDescription('Configure application types below. SHR can accept/deny applications.')
+    .addFields(
+      { name: '📢 Review Channel',  value: ac.reviewChannel ? `<#${ac.reviewChannel}>` : '*Not set*', inline: true },
+      { name: '📋 Log Channel',     value: ac.logChannel ? `<#${ac.logChannel}>` : '*Not set*', inline: true },
+      { name: '📝 App Types',       value: ac.appTypes.length ? ac.appTypes.map(t => `${t.emoji || '•'} \`${t.label}\` (${t.questions?.length ?? 0} questions)`).join('\n') : '*No types yet*', inline: false },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ap_review_channel').setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('ap_log_channel').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+    new ButtonBuilder().setCustomId('ap_add_type').setLabel('Add Type').setStyle(ButtonStyle.Success).setEmoji('➕'),
+    new ButtonBuilder().setCustomId('ap_remove_type').setLabel('Remove Type').setStyle(ButtonStyle.Danger).setEmoji('➖'),
+  );
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ap_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'),
+  );
+  return { embeds: [embed], components: [r1, r2], ephemeral: true };
+}
+
+// ════════════════════════════════════════════
+// SAVED MESSAGES SETUP PAYLOAD
+// ════════════════════════════════════════════
+function buildSavedMessagesPayload(guildId) {
+  const sm = getSavedMessagesConfig(guildId);
+  const msgs = Object.entries(sm.messages);
+  const embed = new EmbedBuilder()
+    .setTitle('💾 Saved Messages').setColor(0x57F287)
+    .setDescription([
+      'Save messages you send often. Use `/sendmessage <name>` to send one.',
+      '',
+      msgs.length ? msgs.map(([, m]) => `**${m.emoji || '📨'} ${m.name}**`).join('\n') : '*No saved messages yet.*',
+    ].join('\n'));
+  const btns = [
+    new ButtonBuilder().setCustomId('sm_new').setLabel('New Message').setStyle(ButtonStyle.Success).setEmoji('➕'),
+  ];
+  if (msgs.length) {
+    btns.push(
+      new ButtonBuilder().setCustomId('sm_edit').setLabel('Edit').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
+      new ButtonBuilder().setCustomId('sm_delete').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+    );
+  }
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
+}
+
+// ════════════════════════════════════════════
+// EXISTING SETUP PAYLOADS (unchanged)
+// ════════════════════════════════════════════
 function buildWelcomerSetupPayload(guildId) {
   const wc = getWelcomerConfig(guildId);
   const embed = new EmbedBuilder().setTitle('👋 Welcomer Setup').setColor(0x5865F2)
@@ -183,7 +247,6 @@ function buildWelcomerSetupPayload(guildId) {
   );
   return { embeds: [embed], components: [r1], ephemeral: true };
 }
-
 function buildAutoroleSetupPayload(guildId) {
   const ar = getAutoroleConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🎭 Autorole Setup').setColor(0xEB459E)
@@ -199,19 +262,16 @@ function buildAutoroleSetupPayload(guildId) {
   );
   return { embeds: [embed], components: [r1], ephemeral: true };
 }
-
 function buildVerificationSetupPayload(guildId) {
   const vc = getVerificationConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🔐 Verification Setup').setColor(0x57F287)
-    .setDescription('Roblox verification — user enters username → bot checks Roblox API → gives role + sets nickname.')
+    .setDescription('Roblox verification.')
     .addFields(
       { name: '✅ Enabled',       value: vc.enabled ? 'Yes' : 'No', inline: true },
       { name: '📢 Channel',       value: vc.channel ? `<#${vc.channel}>` : '*Not set*', inline: true },
       { name: '🎭 Verified Role', value: vc.verifiedRole ? `<@&${vc.verifiedRole}>` : '*Not set*', inline: true },
       { name: '🏷️ Panel Title',   value: vc.panelTitle || '*Not set*', inline: false },
       { name: '📝 Description',   value: vc.panelDescription ? `\`\`\`${vc.panelDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🎨 Color',         value: vc.panelColor || '*Not set*', inline: true },
-      { name: '🖼️ Image',         value: vc.panelImage ? '✅ Set' : '❌ Not set', inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('vc_channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -224,7 +284,6 @@ function buildVerificationSetupPayload(guildId) {
   );
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
-
 function buildTicketPanelEmbed(tc) {
   const embed = new EmbedBuilder().setTitle(tc.panelTitle || '🎫 Support Tickets').setDescription(tc.panelDescription || 'Click a button below.').setColor(hexToInt(tc.panelColor));
   if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
@@ -246,8 +305,6 @@ function buildTicketSetupPayload(guildId) {
       { name: '📋 Transcript Ch.', value: tc.transcriptChannel ? `<#${tc.transcriptChannel}>` : '*Not set*', inline: true },
       { name: '📬 Panel Channel',  value: tc.ticketChannel ? `<#${tc.ticketChannel}>` : '*Not set*', inline: true },
       { name: '📁 Category',       value: tc.ticketCategory ? `<#${tc.ticketCategory}>` : '*Not set*', inline: true },
-      { name: '🎨 Panel Title',    value: tc.panelTitle || '*Not set*', inline: true },
-      { name: '💬 Welcome Text',   value: tc.welcomeText ? `\`\`\`${tc.welcomeText.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
       { name: '🏷️ Ticket Types',   value: tc.ticketTypes.length ? tc.ticketTypes.map(t => `${t.emoji || '•'} \`${t.label}\``).join('\n') : '*No types yet*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
@@ -265,20 +322,16 @@ function buildTicketSetupPayload(guildId) {
   const r3 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('t_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'));
   return { embeds: [embed], components: [r1, r2, r3], ephemeral: true };
 }
-
 function buildSessionSetupPayload(guildId) {
   const sc = getSessionConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🎮 Session System Setup').setColor(0x57F287)
     .setDescription('**Variables:** `{host}` `{hostMention}` `{time}` `{date}` `{memberCount}` `{server}`')
     .addFields(
-      { name: '📢 Channel',       value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
-      { name: '👥 Ping Roles',    value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔑 Allowed',       value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔗 Join Link',     value: sc.joinLink ?? '*Not set*', inline: false },
-      { name: '🗳️ Vote Threshold', value: `**${sc.voteThreshold ?? 5}** votes needed to auto-start`, inline: true },
-      { name: '🟢 Start',         value: sc.startDescription ? `\`\`\`${sc.startDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🗳️ Vote',          value: sc.voteDescription ? `\`\`\`${sc.voteDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🔴 Shutdown',      value: sc.shutdownDescription ? `\`\`\`${sc.shutdownDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '📢 Channel',        value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
+      { name: '👥 Ping Roles',     value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔑 Allowed',        value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔗 Join Link',      value: sc.joinLink ?? '*Not set*', inline: false },
+      { name: '🗳️ Vote Threshold', value: `**${sc.voteThreshold ?? 5}** votes needed`, inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('s_channel').setLabel('Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -293,7 +346,6 @@ function buildSessionSetupPayload(guildId) {
   );
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
-
 function buildAnnouncementOverview(guildId) {
   const ac = getAnnouncementConfig(guildId);
   const types = Object.entries(ac.types);
@@ -303,17 +355,12 @@ function buildAnnouncementOverview(guildId) {
   if (types.length) btns.push(new ButtonBuilder().setCustomId('an_edit').setLabel('Edit Type').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('an_delete').setLabel('Delete Type').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
 }
-
 function buildAnnouncementEditor(guildId, typeId) {
   const ac = getAnnouncementConfig(guildId);
   const t = ac.types[typeId];
   if (!t) return buildAnnouncementOverview(guildId);
   const embed = new EmbedBuilder().setTitle(`✏️ Editing — ${t.emoji || '📢'} ${t.name}`).setColor(hexToInt(t.color))
-    .addFields(
-      { name: '📛 Name', value: t.name, inline: true }, { name: '😀 Emoji', value: t.emoji || '*Not set*', inline: true },
-      { name: '🎨 Color', value: t.color || '#ED4245', inline: true }, { name: '📢 Channel', value: t.channel ? `<#${t.channel}>` : '*Not set*', inline: true },
-      { name: '🔔 Ping Role', value: t.pingRole ? `<@&${t.pingRole}>` : '*None*', inline: true },
-    );
+    .addFields({ name: '📛 Name', value: t.name, inline: true }, { name: '📢 Channel', value: t.channel ? `<#${t.channel}>` : '*Not set*', inline: true }, { name: '🔔 Ping', value: t.pingRole ? `<@&${t.pingRole}>` : '*None*', inline: true });
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`ane__content__${typeId}`).setLabel('Edit Content').setStyle(ButtonStyle.Primary).setEmoji('📝'),
     new ButtonBuilder().setCustomId(`ane__channel__${typeId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -323,7 +370,6 @@ function buildAnnouncementEditor(guildId, typeId) {
   const r2 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('an__back').setLabel('← Back').setStyle(ButtonStyle.Secondary));
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
-
 function buildSelfRoleOverview(guildId) {
   const src = getSelfRoleConfig(guildId);
   const panels = Object.entries(src.panels);
@@ -333,16 +379,11 @@ function buildSelfRoleOverview(guildId) {
   if (panels.length) btns.push(new ButtonBuilder().setCustomId('sr_edit').setLabel('Edit Panel').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('sr_delete').setLabel('Delete Panel').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
 }
-
 function buildPanelEditor(guildId, panelId) {
   const src = getSelfRoleConfig(guildId);
   const p = src.panels[panelId];
   const embed = new EmbedBuilder().setTitle(`✏️ Editing — ${p.title}`).setColor(hexToInt(p.color))
-    .addFields(
-      { name: '📛 Title', value: p.title, inline: true }, { name: '🔀 Type', value: p.type || 'buttons', inline: true },
-      { name: '📢 Channel', value: p.channel ? `<#${p.channel}>` : '*Not set*', inline: true },
-      { name: '🎭 Roles', value: p.roles.length ? p.roles.map(r => `${r.emoji || '•'} <@&${r.id}> — \`${r.label}\``).join('\n') : '*No roles yet*', inline: false },
-    );
+    .addFields({ name: '📛 Title', value: p.title, inline: true }, { name: '🔀 Type', value: p.type || 'buttons', inline: true }, { name: '📢 Channel', value: p.channel ? `<#${p.channel}>` : '*Not set*', inline: true }, { name: '🎭 Roles', value: p.roles.length ? p.roles.map(r => `${r.emoji || '•'} <@&${r.id}> — \`${r.label}\``).join('\n') : '*No roles yet*', inline: false });
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`sre__embed__${panelId}`).setLabel('Edit Embed').setStyle(ButtonStyle.Primary).setEmoji('🎨'),
     new ButtonBuilder().setCustomId(`sre__channel__${panelId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -355,56 +396,40 @@ function buildPanelEditor(guildId, panelId) {
   );
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
-
 async function deploySelfRolePanel(guild, panelId, panel) {
   const channel = await guild.channels.fetch(panel.channel).catch(() => null);
   if (!channel) throw new Error('Channel not found');
   const embed = new EmbedBuilder().setTitle(panel.title).setDescription(panel.description || 'Select your roles below.').setColor(hexToInt(panel.color)).setFooter({ text: panel.type === 'reaction' ? 'React to get a role' : 'Click to toggle your role' });
   if (panel.thumbnail) embed.setThumbnail(panel.thumbnail);
-  if (panel.type === 'reaction') {
-    const msg = await channel.send({ embeds: [embed] });
-    for (const role of panel.roles) { if (role.reaction) await msg.react(role.reaction).catch(() => {}); }
-    panel.messageId = msg.id; return;
-  }
+  if (panel.type === 'reaction') { const msg = await channel.send({ embeds: [embed] }); for (const role of panel.roles) { if (role.reaction) await msg.react(role.reaction).catch(() => {}); } panel.messageId = msg.id; return; }
   if (panel.type === 'dropdown') {
     const options = panel.roles.slice(0, 25).map(r => { const opt = { label: r.label.slice(0, 100), value: r.id, description: `Toggle ${r.label}`.slice(0, 100) }; if (r.emoji) opt.emoji = r.emoji; return opt; });
     const maxVals = panel.max > 0 ? Math.min(panel.max, options.length) : options.length;
     const select = new StringSelectMenuBuilder().setCustomId(`srp__dd__${panelId}`).setPlaceholder('Choose your roles…').setMinValues(0).setMaxValues(maxVals).addOptions(options);
-    const msg = await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
-    panel.messageId = msg.id; return;
+    const msg = await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] }); panel.messageId = msg.id; return;
   }
   const rows = [];
   for (let i = 0; i < Math.min(panel.roles.length, 25); i += 5) {
     const chunk = panel.roles.slice(i, i + 5);
     rows.push(new ActionRowBuilder().addComponents(chunk.map(r => safeSetEmoji(new ButtonBuilder().setCustomId(`srp__btn__${panelId}__${r.id}`).setLabel(r.label.slice(0, 80)).setStyle(ButtonStyle.Secondary), r.emoji))));
   }
-  const msg = await channel.send({ embeds: [embed], components: rows });
-  panel.messageId = msg.id;
+  const msg = await channel.send({ embeds: [embed], components: rows }); panel.messageId = msg.id;
 }
-
 async function postSessionStart(guild, sc, hostUser, rawLink, vars) {
   const sCh = guild.channels.cache.get(sc.channel);
   if (!sCh) throw new Error('Session channel not found');
   const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
   const desc = replaceVars(sc.startDescription ?? '{hostMention} has started a session! Join using the button below.', vars);
-  const embed = new EmbedBuilder()
-    .setTitle('🟢 Session Started!')
-    .setColor(0x57F287)
-    .setDescription(desc)
-    .setTimestamp()
-    .setFooter({ text: `By ${hostUser.tag}` });
+  const embed = new EmbedBuilder().setTitle('🟢 Session Started!').setColor(0x57F287).setDescription(desc).setTimestamp().setFooter({ text: `By ${hostUser.tag}` });
   if (sc.startImage) embed.setImage(sc.startImage);
-
   const comps = [];
-  if (isValidUrl(rawLink)) {
-    comps.push(new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())
-    ));
-  }
-
+  if (isValidUrl(rawLink)) comps.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())));
   await sCh.send({ content: ping ?? undefined, embeds: [embed], components: comps });
 }
 
+// ════════════════════════════════════════════
+// COMMANDS
+// ════════════════════════════════════════════
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
   { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
@@ -425,9 +450,23 @@ const commands = [
   { name: 'lock', description: 'Lock channel' },
   { name: 'unlock', description: 'Unlock channel' },
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
+
+  // ── NEW ticket commands ──
+  { name: 'close', description: 'Close the current ticket (staff only)' },
+  { name: 'closerequest', description: 'Request to close this ticket (user sends, staff approves)' },
+
+  // ── NEW application command ──
+  { name: 'apply', description: 'Submit an application', options: [{ name: 'type', type: 3, description: 'Application type', required: true }] },
+
+  // ── NEW saved message command ──
+  { name: 'sendmessage', description: '[SHR] Send a saved message to a channel', options: [
+    { name: 'name', type: 3, description: 'Saved message name', required: true },
+    { name: 'channel', type: 7, description: 'Channel to send to', required: true },
+  ]},
+
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
-    { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed to auto-start (default: server setting)', required: false }] },
+    { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
   ]},
   { name: 'ban', description: '[SHR] Ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
@@ -469,9 +508,14 @@ const commands = [
     { name: 'welcomer', type: 1, description: 'Welcome message system' },
     { name: 'autorole', type: 1, description: 'Auto role system' },
     { name: 'verification', type: 1, description: 'Roblox verification system' },
+    { name: 'applications', type: 1, description: 'Application system' },
+    { name: 'savedmessages', type: 1, description: 'Saved messages system' },
   ]},
 ];
 
+// ════════════════════════════════════════════
+// READY
+// ════════════════════════════════════════════
 client.once('ready', async () => {
   console.log(`✅ Online as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -479,6 +523,9 @@ client.once('ready', async () => {
   catch (e) { console.error('❌ Command registration failed:', e); }
 });
 
+// ════════════════════════════════════════════
+// GUILD MEMBER ADD
+// ════════════════════════════════════════════
 client.on('guildMemberAdd', async member => {
   const guildId = member.guild.id;
   try {
@@ -502,6 +549,9 @@ client.on('guildMemberAdd', async member => {
   } catch (e) { console.error('Welcomer error:', e); }
 });
 
+// ════════════════════════════════════════════
+// REACTION EVENTS
+// ════════════════════════════════════════════
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
   try {
@@ -509,46 +559,25 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (reaction.message?.partial) await reaction.message.fetch();
     const guild = reaction.message.guild;
     if (!guild) return;
-
     const voteData = activeVotes.get(guild.id);
     if (voteData && reaction.message.id === voteData.messageId && reaction.emoji.name === '✅') {
       const freshReaction = reaction.message.reactions.cache.get('✅');
       if (freshReaction) {
         const users = await freshReaction.users.fetch();
         const humanVotes = users.filter(u => !u.bot).size;
-
         if (humanVotes >= voteData.threshold) {
           activeVotes.delete(guild.id);
           try {
             const sc = getSessionConfig(guild.id);
             const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
-            const vars = {
-              userMention: `<@${voteData.hostId}>`,
-              username: hostUser.username ?? 'Unknown',
-              userTag: hostUser.tag ?? 'Unknown',
-              memberCount: guild.memberCount.toString(),
-              server: guild.name,
-            };
-            await reaction.message.edit({
-              embeds: [
-                new EmbedBuilder()
-                  .setTitle('✅ Vote Passed!')
-                  .setColor(0x57F287)
-                  .setDescription(`**${humanVotes}/${voteData.threshold}** votes reached! Starting session…`)
-                  .setTimestamp()
-                  .setFooter({ text: `Hosted by ${hostUser.tag ?? 'Unknown'}` }),
-              ],
-              components: [],
-            }).catch(() => {});
+            const vars = { userMention: `<@${voteData.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: hostUser.tag ?? 'Unknown', memberCount: guild.memberCount.toString(), server: guild.name };
+            await reaction.message.edit({ embeds: [new EmbedBuilder().setTitle('✅ Vote Passed!').setColor(0x57F287).setDescription(`**${humanVotes}/${voteData.threshold}** votes reached! Starting session…`).setTimestamp()], components: [] }).catch(() => {});
             await postSessionStart(guild, sc, hostUser, voteData.joinLink, vars);
-          } catch (e) {
-            console.error('Auto-start after vote error:', e);
-          }
+          } catch (e) { console.error('Auto-start error:', e); }
         }
       }
       return;
     }
-
     const src = getSelfRoleConfig(guild.id);
     let targetPanel = null, targetRole = null;
     for (const [, panel] of Object.entries(src.panels)) {
@@ -592,12 +621,16 @@ client.on('messageReactionRemove', async (reaction, user) => {
   } catch (e) { console.error('Reaction remove error:', e); }
 });
 
+// ════════════════════════════════════════════
+// INTERACTIONS
+// ════════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
   const guildId = interaction.guildId;
   if (!guildId) { try { if (interaction.isRepliable()) await interaction.reply({ content: '❌ Server only.', ephemeral: true }); } catch {} return; }
 
   try {
 
+    // ══ SLASH COMMANDS ══
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
       const user = interaction.options.getUser('user') ?? null;
@@ -607,14 +640,10 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'ping') { const sent = await interaction.reply({ content: '🏓 Pinging...', fetchReply: true }); return interaction.editReply(`🏓 Pong! Bot: ${sent.createdTimestamp - interaction.createdTimestamp}ms | API: ${client.ws.ping}ms`); }
       if (cmd === 'avatar') { const t = interaction.options.getUser('user') ?? interaction.user; return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🖼️ ${t.username}'s Avatar`).setImage(t.displayAvatarURL({ size: 1024, dynamic: true })).setColor(0x5865F2)] }); }
       if (cmd === 'serverinfo') {
-        const g = interaction.guild; await g.fetch();
-        const owner = await g.fetchOwner();
+        const g = interaction.guild; await g.fetch(); const owner = await g.fetchOwner();
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`📊 ${g.name}`).setThumbnail(g.iconURL({ dynamic: true })).setColor(0x5865F2).addFields({ name: '👑 Owner', value: owner.user.tag, inline: true }, { name: '👥 Members', value: `${g.memberCount}`, inline: true }, { name: '📅 Created', value: g.createdAt.toDateString(), inline: true }, { name: '💬 Channels', value: `${g.channels.cache.size}`, inline: true }, { name: '🎭 Roles', value: `${g.roles.cache.size}`, inline: true }).setTimestamp()] });
       }
-      if (cmd === 'roleinfo') {
-        const role = interaction.options.getRole('role');
-        return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎭 ${role.name}`).setColor(role.color || 0x5865F2).addFields({ name: '🆔 ID', value: role.id, inline: true }, { name: '🎨 Color', value: role.hexColor, inline: true }, { name: '👥 Members', value: `${role.members.size}`, inline: true }, { name: '📌 Position', value: `${role.position}`, inline: true }).setTimestamp()] });
-      }
+      if (cmd === 'roleinfo') { const role = interaction.options.getRole('role'); return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎭 ${role.name}`).setColor(role.color || 0x5865F2).addFields({ name: '🆔 ID', value: role.id, inline: true }, { name: '🎨 Color', value: role.hexColor, inline: true }, { name: '👥 Members', value: `${role.members.size}`, inline: true }).setTimestamp()] }); }
       if (cmd === 'poll') {
         const question = interaction.options.getString('question');
         const opts = [interaction.options.getString('option1'), interaction.options.getString('option2'), interaction.options.getString('option3'), interaction.options.getString('option4')].filter(Boolean);
@@ -625,7 +654,7 @@ client.on('interactionCreate', async interaction => {
       }
       if (cmd === 'userinfo') {
         const tu = interaction.options.getUser('user'); const tm = interaction.options.getMember('user');
-        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`👤 ${tu.tag}`).setThumbnail(tu.displayAvatarURL({ dynamic: true })).setColor(0x5865F2).addFields({ name: '🆔 ID', value: tu.id, inline: true }, { name: '📅 Created', value: tu.createdAt.toDateString(), inline: true }, { name: '📥 Joined', value: tm?.joinedAt?.toDateString() ?? 'Unknown', inline: true }, { name: '📛 Nickname', value: tm?.nickname ?? 'None', inline: true }, { name: '🎭 Roles', value: tm?.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None', inline: false }).setTimestamp()] });
+        return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`👤 ${tu.tag}`).setThumbnail(tu.displayAvatarURL({ dynamic: true })).setColor(0x5865F2).addFields({ name: '🆔 ID', value: tu.id, inline: true }, { name: '📅 Created', value: tu.createdAt.toDateString(), inline: true }, { name: '📥 Joined', value: tm?.joinedAt?.toDateString() ?? 'Unknown', inline: true }, { name: '🎭 Roles', value: tm?.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => `<@&${r.id}>`).join(', ') || 'None', inline: false }).setTimestamp()] });
       }
       if (cmd === 'warn') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
@@ -634,9 +663,8 @@ client.on('interactionCreate', async interaction => {
       }
       if (cmd === 'mute') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
-        const mins = interaction.options.getInteger('minutes');
-        await member.timeout(mins * 60000, reason);
-        return interaction.reply(`🔇 **${user.tag}** muted for **${mins} minutes**. Reason: ${reason}`);
+        await member.timeout(interaction.options.getInteger('minutes') * 60000, reason);
+        return interaction.reply(`🔇 **${user.tag}** muted. Reason: ${reason}`);
       }
       if (cmd === 'unmute') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
@@ -654,14 +682,82 @@ client.on('interactionCreate', async interaction => {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
         await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: true }); return interaction.reply('🔓 Channel **unlocked**.');
       }
-
-      // ✅ FIX: clear now uses deferReply to avoid timing issues with bulkDelete
       if (cmd === 'clear') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
-        const amount = Math.min(interaction.options.getInteger('amount'), 100);
-        const del = await interaction.channel.bulkDelete(amount, true);
+        const del = await interaction.channel.bulkDelete(Math.min(interaction.options.getInteger('amount'), 100), true);
         return interaction.editReply({ content: `✅ Deleted **${del.size}** messages.` });
+      }
+
+      // ── /close ──
+      if (cmd === 'close') {
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+        const ch = interaction.channel;
+        const tc = getTicketConfig(guildId);
+        if (tc.transcriptChannel) {
+          const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
+          if (trCh) {
+            const msgs = await ch.messages.fetch({ limit: 100 });
+            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp).map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${m.author.tag}: ${m.content || '[embed]'}`).join('\n');
+            await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] });
+          }
+        }
+        for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
+        pendingCloseReqs.delete(ch.id);
+        await interaction.reply({ content: `🔒 Ticket closed by **${interaction.user.tag}**. Deleting in 3 seconds...` });
+        setTimeout(() => ch.delete().catch(() => {}), 3000);
+      }
+
+      // ── /closerequest ──
+      if (cmd === 'closerequest') {
+        const ch = interaction.channel;
+        if (pendingCloseReqs.has(ch.id)) return interaction.reply({ content: '❌ A close request is already pending in this ticket.', ephemeral: true });
+        const embed = new EmbedBuilder()
+          .setTitle('🔒 Close Request')
+          .setDescription(`**${interaction.user.tag}** has requested to close this ticket.\n\nStaff can accept or deny below.`)
+          .setColor(0xFEE75C)
+          .setTimestamp();
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('closereq__accept').setLabel('Accept & Close').setStyle(ButtonStyle.Danger).setEmoji('✅'),
+          new ButtonBuilder().setCustomId('closereq__deny').setLabel('Deny').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
+        );
+        const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
+        pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, messageId: msg.id });
+      }
+
+      // ── /apply ──
+      if (cmd === 'apply') {
+        const ac = getApplicationConfig(guildId);
+        const typeName = interaction.options.getString('type').toLowerCase().trim();
+        const appType = ac.appTypes.find(t => t.label.toLowerCase() === typeName);
+        if (!appType) return interaction.reply({ content: `❌ No application type **${typeName}** found. Check available types with \`/apply\`.`, ephemeral: true });
+        if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ This application type has no questions configured yet.', ephemeral: true });
+
+        appPendingType.set(interaction.user.id, appType.id);
+
+        // Show modal with up to 5 questions
+        const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
+        for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)
+          ));
+        }
+        return interaction.showModal(modal);
+      }
+
+      // ── /sendmessage ──
+      if (cmd === 'sendmessage') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const sm = getSavedMessagesConfig(guildId);
+        const name = interaction.options.getString('name').toLowerCase().trim();
+        const ch = interaction.options.getChannel('channel');
+        const msg = Object.values(sm.messages).find(m => m.name.toLowerCase() === name);
+        if (!msg) return interaction.reply({ content: `❌ No saved message named **${name}**.`, ephemeral: true });
+        const embed = new EmbedBuilder().setTitle(msg.title).setDescription(msg.description).setColor(hexToInt(msg.color));
+        if (msg.image) embed.setImage(msg.image);
+        if (msg.footer) embed.setFooter({ text: msg.footer });
+        await ch.send({ content: msg.pingRole ? `<@&${msg.pingRole}>` : undefined, embeds: [embed] });
+        return interaction.reply({ content: `✅ Message **${msg.name}** sent in <#${ch.id}>!`, ephemeral: true });
       }
 
       if (cmd === 'ban') {
@@ -683,42 +779,22 @@ client.on('interactionCreate', async interaction => {
         setTimeout(async () => { await interaction.guild.members.unban(user.id, 'Tempban expired').catch(() => {}); }, hours * 3600000);
         return interaction.reply(`⏱️ **${user.tag}** banned for **${hours} hours**.`);
       }
-      if (cmd === 'kick') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        await member.kick(reason); return interaction.reply(`👢 **${user.tag}** kicked. Reason: ${reason}`);
-      }
-      if (cmd === 'addrole') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const role = interaction.options.getRole('role'); await member.roles.add(role); return interaction.reply(`✅ Added **${role.name}** to **${user.tag}**.`);
-      }
-      if (cmd === 'removerole') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const role = interaction.options.getRole('role'); await member.roles.remove(role); return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`);
-      }
-      if (cmd === 'nickname') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const nick = interaction.options.getString('nickname') ?? null; await member.setNickname(nick);
-        return interaction.reply(nick ? `✅ Nickname set to **${nick}**.` : `✅ Nickname reset.`);
-      }
+      if (cmd === 'kick') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); await member.kick(reason); return interaction.reply(`👢 **${user.tag}** kicked.`); }
+      if (cmd === 'addrole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.add(role); return interaction.reply(`✅ Added **${role.name}** to **${user.tag}**.`); }
+      if (cmd === 'removerole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.remove(role); return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`); }
+      if (cmd === 'nickname') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const nick = interaction.options.getString('nickname') ?? null; await member.setNickname(nick); return interaction.reply(nick ? `✅ Nickname set to **${nick}**.` : `✅ Nickname reset.`); }
       if (cmd === 'warnings') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const warns = getWarnings(guildId, user.id);
-        if (!warns.length) return interaction.reply({ content: `✅ No warnings for **${user.tag}**.`, ephemeral: true });
+        if (!warns.length) return interaction.reply({ content: `✅ No warnings.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] });
       }
-      if (cmd === 'clearwarnings') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        clearWarnings(guildId, user.id); return interaction.reply(`✅ Cleared warnings for **${user.tag}**.`);
-      }
-      if (cmd === 'note') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        addNote(guildId, user.id, { text: interaction.options.getString('text'), moderator: interaction.user.tag, date: new Date().toUTCString() });
-        return interaction.reply({ content: `✅ Note added for **${user.tag}**.`, ephemeral: true });
-      }
+      if (cmd === 'clearwarnings') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); clearWarnings(guildId, user.id); return interaction.reply(`✅ Cleared warnings for **${user.tag}**.`); }
+      if (cmd === 'note') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); addNote(guildId, user.id, { text: interaction.options.getString('text'), moderator: interaction.user.tag, date: new Date().toUTCString() }); return interaction.reply({ content: `✅ Note added.`, ephemeral: true }); }
       if (cmd === 'notes') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const notes = getNotes(guildId, user.id);
-        if (!notes.length) return interaction.reply({ content: `📝 No notes for **${user.tag}**.`, ephemeral: true });
+        if (!notes.length) return interaction.reply({ content: `📝 No notes.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2).setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text} — *${n.moderator}*`).join('\n'))] });
       }
       if (cmd === 'announce') {
@@ -729,7 +805,7 @@ client.on('interactionCreate', async interaction => {
         const entry = Object.entries(ac.types).find(([, t]) => t.name.toLowerCase() === typeName);
         if (!entry) return interaction.reply({ content: `❌ No type **${typeName}** found.`, ephemeral: true });
         const [, t] = entry;
-        if (!t.channel) return interaction.reply({ content: '❌ No channel set for this type.', ephemeral: true });
+        if (!t.channel) return interaction.reply({ content: '❌ No channel set.', ephemeral: true });
         const ch = interaction.guild.channels.cache.get(t.channel);
         if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
@@ -744,7 +820,7 @@ client.on('interactionCreate', async interaction => {
         const embed = new EmbedBuilder().setTitle(interaction.options.getString('title')).setDescription(interaction.options.getString('description')).setColor(hexToInt(interaction.options.getString('color') ?? '#5865F2'));
         const img = interaction.options.getString('image'); const footer = interaction.options.getString('footer');
         if (img) embed.setImage(img); if (footer) embed.setFooter({ text: footer });
-        await ch.send({ embeds: [embed] }); return interaction.reply({ content: `✅ Sent in <#${ch.id}>!`, ephemeral: true });
+        await ch.send({ embeds: [embed] }); return interaction.reply({ content: `✅ Sent!`, ephemeral: true });
       }
       if (cmd === 'giveaway') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
@@ -755,18 +831,16 @@ client.on('interactionCreate', async interaction => {
         const msg = await ch.send({ embeds: [embed] }); await msg.react('🎉');
         setTimeout(async () => {
           try {
-            const gMsg = await ch.messages.fetch(msg.id);
-            const reaction = gMsg.reactions.cache.get('🎉');
+            const gMsg = await ch.messages.fetch(msg.id); const reaction = gMsg.reactions.cache.get('🎉');
             if (!reaction) return;
-            const users = await reaction.users.fetch();
-            const entries = users.filter(u => !u.bot);
+            const users = await reaction.users.fetch(); const entries = users.filter(u => !u.bot);
             if (!entries.size) return ch.send('🎉 No valid entries!');
             const picked = entries.random(Math.min(winners, entries.size));
             const winnerMentions = (Array.isArray(picked) ? picked : [picked]).map(u => `<@${u.id}>`).join(', ');
             await ch.send({ embeds: [new EmbedBuilder().setTitle('🎉 Giveaway Ended!').setColor(0xEB459E).setDescription(`**Prize:** ${prize}\n**Winners:** ${winnerMentions} 🎊`).setTimestamp()] });
           } catch (e) { console.error('Giveaway end error:', e); }
         }, minutes * 60000);
-        return interaction.reply({ content: `✅ Giveaway started in <#${ch.id}>!`, ephemeral: true });
+        return interaction.reply({ content: `✅ Giveaway started!`, ephemeral: true });
       }
       if (cmd === 'punish') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
@@ -792,14 +866,14 @@ client.on('interactionCreate', async interaction => {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked from ERLC.`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
       if (cmd === 'erlcban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned from ERLC.`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
 
@@ -807,74 +881,30 @@ client.on('interactionCreate', async interaction => {
         if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
         const sc = getSessionConfig(guildId);
-
-        if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set. Use `/setup sessions`.', ephemeral: true });
+        if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set.', ephemeral: true });
         const sCh = interaction.guild.channels.cache.get(sc.channel);
         if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', ephemeral: true });
-
         await interaction.deferReply({ ephemeral: true });
-
-        const vars = {
-          userMention: `<@${interaction.user.id}>`,
-          username: interaction.user.username,
-          userTag: interaction.user.tag,
-          memberCount: interaction.guild.memberCount.toString(),
-          server: interaction.guild.name,
-        };
-
+        const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag, memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
         if (sub === 'start') {
           const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null;
-          try {
-            await postSessionStart(interaction.guild, sc, interaction.user, rawLink, vars);
-            return interaction.editReply({ content: `✅ Session started in <#${sc.channel}>!` });
-          } catch (e) {
-            return interaction.editReply({ content: `❌ Failed: ${e.message}` });
-          }
+          try { await postSessionStart(interaction.guild, sc, interaction.user, rawLink, vars); return interaction.editReply({ content: `✅ Session started!` }); }
+          catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
         }
-
         if (sub === 'vote') {
           const threshold = interaction.options.getInteger('votes') ?? sc.voteThreshold ?? 5;
-          if (threshold < 1) return interaction.editReply({ content: '❌ Vote threshold must be at least 1.' });
-
           const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-          const desc = replaceVars(
-            sc.voteDescription ?? 'React with ✅ to vote for starting a session!\n\n**{host}** wants to host.',
-            vars,
-          );
-
-          const embed = new EmbedBuilder()
-            .setTitle('🗳️ Session Vote!')
-            .setColor(0xFEE75C)
-            .setDescription(`${desc}\n\n**Votes needed:** ${threshold}`)
-            .setTimestamp()
-            .setFooter({ text: `Hosted by ${interaction.user.tag} • React ✅ to vote` });
+          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(`${replaceVars(sc.voteDescription ?? 'React with ✅ to vote!\n\n**{host}** wants to host.', vars)}\n\n**Votes needed:** ${threshold}`).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.voteImage) embed.setImage(sc.voteImage);
-
           const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed] });
-          await msg.react('✅');
-          await msg.react('❌');
-
-          activeVotes.set(guildId, {
-            messageId: msg.id,
-            channelId: sCh.id,
-            hostId: interaction.user.id,
-            threshold,
-            joinLink: sc.joinLink ?? null,
-          });
-
-          return interaction.editReply({ content: `✅ Vote posted! Auto-starts when **${threshold}** ✅ votes are reached (bot votes excluded).` });
+          await msg.react('✅'); await msg.react('❌');
+          activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null });
+          return interaction.editReply({ content: `✅ Vote posted! Auto-starts at **${threshold}** votes.` });
         }
-
         if (sub === 'shutdown') {
           activeVotes.delete(guildId);
-
           const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-          const embed = new EmbedBuilder()
-            .setTitle('🔴 Session Ended!')
-            .setColor(0xED4245)
-            .setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars))
-            .setTimestamp()
-            .setFooter({ text: `By ${interaction.user.tag}` });
+          const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.shutdownImage) embed.setImage(sc.shutdownImage);
           await sCh.send({ content: ping ?? undefined, embeds: [embed] });
           return interaction.editReply({ content: '✅ Shutdown posted!' });
@@ -891,16 +921,169 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'welcomer')      return interaction.reply(buildWelcomerSetupPayload(guildId));
         if (sub === 'autorole')      return interaction.reply(buildAutoroleSetupPayload(guildId));
         if (sub === 'verification')  return interaction.reply(buildVerificationSetupPayload(guildId));
+        if (sub === 'applications')  return interaction.reply(buildApplicationSetupPayload(guildId));
+        if (sub === 'savedmessages') return interaction.reply(buildSavedMessagesPayload(guildId));
       }
     }
 
+    // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
 
+      // ── Close request accept/deny ──
+      if (id === 'closereq__accept' || id === 'closereq__deny') {
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+        const ch = interaction.channel;
+        const req = pendingCloseReqs.get(ch.id);
+        if (!req) return interaction.reply({ content: '❌ No pending close request found.', ephemeral: true });
+        if (id === 'closereq__deny') {
+          pendingCloseReqs.delete(ch.id);
+          await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Close Request Denied').setColor(0xED4245).setDescription(`**${interaction.user.tag}** denied the close request.`).setTimestamp()], components: [] });
+          return;
+        }
+        // Accept
+        pendingCloseReqs.delete(ch.id);
+        const tc = getTicketConfig(guildId);
+        if (tc.transcriptChannel) {
+          const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
+          if (trCh) {
+            const msgs = await ch.messages.fetch({ limit: 100 });
+            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp).map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${m.author.tag}: ${m.content || '[embed]'}`).join('\n');
+            await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] });
+          }
+        }
+        for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
+        await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Close Request Accepted').setColor(0x57F287).setDescription(`Ticket closed by **${interaction.user.tag}**. Deleting in 3 seconds...`).setTimestamp()], components: [] });
+        setTimeout(() => ch.delete().catch(() => {}), 3000);
+        return;
+      }
+
+      // ── Application setup ──
+      if (id.startsWith('ap_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ac = getApplicationConfig(guildId);
+        if (id === 'ap_review_channel') return interaction.reply({ content: '### 📢 Select review channel', components: [channelDropdown('apd_review_channel', 'Select channel...')], ephemeral: true });
+        if (id === 'ap_log_channel')    return interaction.reply({ content: '### 📋 Select log channel', components: [channelDropdown('apd_log_channel', 'Select channel...')], ephemeral: true });
+        if (id === 'ap_add_type') {
+          const modal = new ModalBuilder().setCustomId('modal_ap_add_type').setTitle('Add Application Type');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name (e.g. Staff Application)').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 5)').setStyle(TextInputStyle.Paragraph).setPlaceholder('Why do you want to join?\nHow old are you?\nWhat is your timezone?').setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_accept_role').setLabel('Role ID to give on accept (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (id === 'ap_remove_type') {
+          if (!ac.appTypes.length) return interaction.reply({ content: '❌ No types to remove.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_remove_type').setPlaceholder('Select type...').addOptions(ac.appTypes.map(t => ({ label: t.label, value: t.id })));
+          return interaction.reply({ content: '### ➖ Remove application type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
+        if (id === 'ap_deploy') {
+          if (!ac.reviewChannel) return interaction.reply({ content: '❌ Set a review channel first.', ephemeral: true });
+          if (!ac.appTypes.length) return interaction.reply({ content: '❌ Add at least one application type.', ephemeral: true });
+          const ch = interaction.guild.channels.cache.get(ac.reviewChannel);
+          if (!ch) return interaction.reply({ content: '❌ Review channel not found.', ephemeral: true });
+          const embed = new EmbedBuilder().setTitle('📋 Applications').setDescription('Click a button below to submit an application!').setColor(0x5865F2).setThumbnail(LOGO_URL);
+          const rows = [];
+          for (let i = 0; i < Math.min(ac.appTypes.length, 25); i += 5) {
+            const chunk = ac.appTypes.slice(i, i + 5);
+            rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`app__open__${t.id}`).setLabel(t.label.slice(0, 80)).setStyle(ButtonStyle.Primary), t.emoji))));
+          }
+          // Deploy in the review channel or a dedicated application channel
+          // For simplicity we send the panel to the review channel
+          await ch.send({ embeds: [embed], components: rows });
+          return interaction.reply({ content: `✅ Application panel deployed in <#${ac.reviewChannel}>!`, ephemeral: true });
+        }
+      }
+
+      // ── Application open button (user clicks panel) ──
+      if (id.startsWith('app__open__')) {
+        const typeId = id.replace('app__open__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Application type no longer exists.', ephemeral: true });
+        if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ No questions configured for this type.', ephemeral: true });
+        appPendingType.set(interaction.user.id, appType.id);
+        const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
+        for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)));
+        }
+        return interaction.showModal(modal);
+      }
+
+      // ── Application accept/deny ──
+      if (id.startsWith('app__accept__') || id.startsWith('app__deny__')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const parts = id.split('__');
+        const action = parts[1]; // 'accept' or 'deny'
+        const applicantId = parts[2];
+        const typeId = parts[3];
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+
+        const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
+
+        if (action === 'accept') {
+          if (appType?.acceptRole && applicant) {
+            const role = interaction.guild.roles.cache.get(appType.acceptRole);
+            if (role) await applicant.roles.add(role).catch(() => {});
+          }
+          await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).setDescription(`**${interaction.user.tag}** accepted this application.`).setTimestamp()], components: [] });
+          if (applicant) {
+            await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287).setDescription(`Your **${appType?.label ?? 'application'}** has been **accepted**!\n\nWelcome to the team! 🎉`).setTimestamp()] }).catch(() => {});
+          }
+          if (ac.logChannel) {
+            const logCh = interaction.guild.channels.cache.get(ac.logChannel);
+            if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: interaction.user.tag, inline: true }).setTimestamp()] });
+          }
+        } else {
+          await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`**${interaction.user.tag}** denied this application.`).setTimestamp()], components: [] });
+          if (applicant) {
+            await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`Your **${appType?.label ?? 'application'}** has been **denied**.\n\nYou may try again in the future.`).setTimestamp()] }).catch(() => {});
+          }
+          if (ac.logChannel) {
+            const logCh = interaction.guild.channels.cache.get(ac.logChannel);
+            if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }).setTimestamp()] });
+          }
+        }
+        return;
+      }
+
+      // ── Saved messages setup ──
+      if (id.startsWith('sm_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const sm = getSavedMessagesConfig(guildId);
+        if (id === 'sm_new') {
+          const modal = new ModalBuilder().setCustomId('modal_sm_new').setTitle('New Saved Message');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_name').setLabel('Name (used in /sendmessage)').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_desc').setLabel('Description (supports {server}, {time})').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_color').setLabel('Color hex (e.g. #5865F2)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (id === 'sm_edit') {
+          const msgs = Object.entries(sm.messages);
+          if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('smd_edit').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: mid })));
+          return interaction.reply({ content: '### ✏️ Select message to edit', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
+        if (id === 'sm_delete') {
+          const msgs = Object.entries(sm.messages);
+          if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('smd_delete').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: mid })));
+          return interaction.reply({ content: '### 🗑️ Select message to delete', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
+      }
+
+      // ── Welcomer ──
       if (id.startsWith('wc_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const wc = getWelcomerConfig(guildId);
-        if (id === 'wc_channel') return interaction.reply({ content: '### 📢 Select welcome channel', components: [channelDropdown('wcd_channel', 'Select channel...')], ephemeral: true });
+        if (id === 'wc_channel') return interaction.reply({ content: '### 📢 Welcome channel', components: [channelDropdown('wcd_channel', 'Select channel...')], ephemeral: true });
         if (id === 'wc_toggle') { wc.enabled = !wc.enabled; saveConfig(config); return interaction.update(buildWelcomerSetupPayload(guildId)); }
         if (id === 'wc_content') {
           const modal = new ModalBuilder().setCustomId('modal_wc_content').setTitle('Edit Welcome Message');
@@ -908,31 +1091,33 @@ client.on('interactionCreate', async interaction => {
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(wc.title || '').setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(wc.description || '').setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(wc.color || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_image').setLabel('Banner image URL (optional)').setStyle(TextInputStyle.Short).setValue(wc.image || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_footer').setLabel('Footer text (optional)').setStyle(TextInputStyle.Short).setValue(wc.footer || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_image').setLabel('Banner image URL').setStyle(TextInputStyle.Short).setValue(wc.image || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('wc_footer').setLabel('Footer text').setStyle(TextInputStyle.Short).setValue(wc.footer || '').setRequired(false)),
           );
           return interaction.showModal(modal);
         }
       }
 
+      // ── Autorole ──
       if (id.startsWith('ar_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ar = getAutoroleConfig(guildId);
         if (id === 'ar_add') return interaction.reply({ content: '### ➕ Select autoroles', components: [roleDropdown('ard_add', 'Select roles...')], ephemeral: true });
         if (id === 'ar_remove') {
-          if (!ar.roles.length) return interaction.reply({ content: '❌ No roles set.', ephemeral: true });
+          if (!ar.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true });
           const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role...').addOptions(ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: id }; }));
           return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
         }
         if (id === 'ar_toggle') { ar.enabled = !ar.enabled; saveConfig(config); return interaction.update(buildAutoroleSetupPayload(guildId)); }
       }
 
+      // ── Verification ──
       if (id.startsWith('vc_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const vc = getVerificationConfig(guildId);
         if (id === 'vc_channel') return interaction.reply({ content: '### 📢 Verification channel', components: [channelDropdown('vcd_channel', 'Select channel...')], ephemeral: true });
-        if (id === 'vc_role') return interaction.reply({ content: '### 🎭 Verified role', components: [roleDropdown('vcd_role', 'Select role...', 1, 1)], ephemeral: true });
-        if (id === 'vc_toggle') { vc.enabled = !vc.enabled; saveConfig(config); return interaction.update(buildVerificationSetupPayload(guildId)); }
+        if (id === 'vc_role')    return interaction.reply({ content: '### 🎭 Verified role', components: [roleDropdown('vcd_role', 'Select role...', 1, 1)], ephemeral: true });
+        if (id === 'vc_toggle')  { vc.enabled = !vc.enabled; saveConfig(config); return interaction.update(buildVerificationSetupPayload(guildId)); }
         if (id === 'vc_content') {
           const modal = new ModalBuilder().setCustomId('modal_vc_content').setTitle('Edit Verification Panel');
           modal.addComponents(
@@ -944,26 +1129,26 @@ client.on('interactionCreate', async interaction => {
           return interaction.showModal(modal);
         }
         if (id === 'vc_deploy') {
-          if (!vc.channel) return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
-          if (!vc.verifiedRole) return interaction.reply({ content: '❌ Set a verified role first.', ephemeral: true });
+          if (!vc.channel || !vc.verifiedRole) return interaction.reply({ content: '❌ Set channel and role first.', ephemeral: true });
           const ch = interaction.guild.channels.cache.get(vc.channel);
           if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
           const embed = new EmbedBuilder().setTitle(vc.panelTitle).setDescription(vc.panelDescription).setColor(hexToInt(vc.panelColor));
           if (vc.panelImage) embed.setImage(vc.panelImage);
           await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('verify_start').setLabel('✅ Verify').setStyle(ButtonStyle.Success))] });
-          return interaction.reply({ content: `✅ Verification panel deployed in <#${vc.channel}>!`, ephemeral: true });
+          return interaction.reply({ content: `✅ Deployed in <#${vc.channel}>!`, ephemeral: true });
         }
       }
 
       if (id === 'verify_start') {
         const vc = getVerificationConfig(guildId);
         if (!vc.enabled) return interaction.reply({ content: '❌ Verification is disabled.', ephemeral: true });
-        if (vc.verifiedRole && interaction.member.roles.cache.has(vc.verifiedRole)) return interaction.reply({ content: '✅ You are already verified!', ephemeral: true });
+        if (vc.verifiedRole && interaction.member.roles.cache.has(vc.verifiedRole)) return interaction.reply({ content: '✅ Already verified!', ephemeral: true });
         const modal = new ModalBuilder().setCustomId('modal_verify_submit').setTitle('Roblox Verification');
         modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox username').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true).setMinLength(3).setMaxLength(20)));
         return interaction.showModal(modal);
       }
 
+      // ── Ticket setup ──
       if (id.startsWith('t_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         if (id === 't_ping_roles') return interaction.reply({ content: '### 📢 Ping roles', components: [roleDropdown('td_ping_roles', 'Select roles...')], ephemeral: true });
@@ -999,23 +1184,23 @@ client.on('interactionCreate', async interaction => {
         }
         if (id === 't_remove_type') {
           const tc = getTicketConfig(guildId);
-          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types to remove.', ephemeral: true });
+          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types.', ephemeral: true });
           const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id })));
           return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
         }
         if (id === 't_deploy') {
           const tc = getTicketConfig(guildId);
-          if (!tc.ticketChannel) return interaction.reply({ content: '❌ Set a panel channel first.', ephemeral: true });
-          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ Add at least one ticket type.', ephemeral: true });
+          if (!tc.ticketChannel || !tc.ticketTypes.length) return interaction.reply({ content: '❌ Set channel and add types first.', ephemeral: true });
           const ch = interaction.guild.channels.cache.get(tc.ticketChannel);
           if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
           await interaction.deferReply({ ephemeral: true });
           await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
           saveConfig(config);
-          return interaction.editReply({ content: `✅ Ticket panel deployed in <#${tc.ticketChannel}>!` });
+          return interaction.editReply({ content: `✅ Ticket panel deployed!` });
         }
       }
 
+      // ── Session setup ──
       if (id.startsWith('s_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         if (id === 's_channel')       return interaction.reply({ content: '### 📢 Session channel', components: [channelDropdown('sd_channel', 'Select channel...')], ephemeral: true });
@@ -1023,7 +1208,7 @@ client.on('interactionCreate', async interaction => {
         if (id === 's_allowed_roles') return interaction.reply({ content: '### 🔑 Allowed roles', components: [roleDropdown('sd_allowed_roles', 'Select roles...')], ephemeral: true });
         if (id === 's_join_link') {
           const modal = new ModalBuilder().setCustomId('modal_s_joinlink').setTitle('Default Join Link');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_link_val').setLabel('Join link URL (must start with https://)').setStyle(TextInputStyle.Short).setPlaceholder('https://policeroleplay.community/join/...').setRequired(true)));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_link_val').setLabel('Join link URL').setStyle(TextInputStyle.Short).setRequired(true)));
           return interaction.showModal(modal);
         }
         if (id === 's_descriptions') {
@@ -1049,11 +1234,12 @@ client.on('interactionCreate', async interaction => {
         if (id === 's_vote_threshold') {
           const sc = getSessionConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_s_threshold').setTitle('Vote Threshold');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_threshold_val').setLabel('Votes needed to auto-start a session').setStyle(TextInputStyle.Short).setValue(String(sc.voteThreshold ?? 5)).setPlaceholder('e.g. 5').setRequired(true).setMinLength(1).setMaxLength(3)));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_threshold_val').setLabel('Votes needed to auto-start').setStyle(TextInputStyle.Short).setValue(String(sc.voteThreshold ?? 5)).setRequired(true)));
           return interaction.showModal(modal);
         }
       }
 
+      // ── Announcement setup ──
       if (id.startsWith('an_') || id.startsWith('ane__') || id === 'an__back') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ac = getAnnouncementConfig(guildId);
@@ -1069,16 +1255,8 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
-        if (id === 'an_edit') {
-          const types = Object.entries(ac.types);
-          if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true });
-          return interaction.reply({ content: '### ✏️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], ephemeral: true });
-        }
-        if (id === 'an_delete') {
-          const types = Object.entries(ac.types);
-          if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true });
-          return interaction.reply({ content: '### 🗑️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], ephemeral: true });
-        }
+        if (id === 'an_edit') { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true }); return interaction.reply({ content: '### ✏️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], ephemeral: true }); }
+        if (id === 'an_delete') { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', ephemeral: true }); return interaction.reply({ content: '### 🗑️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], ephemeral: true }); }
         if (id.startsWith('ane__')) {
           const parts = id.split('__'); const action = parts[1]; const typeId = parts.slice(2).join('__');
           const t = ac.types[typeId];
@@ -1100,6 +1278,7 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
+      // ── Selfrole setup ──
       if (id.startsWith('sr_') || id.startsWith('sre__') || id === 'sr__back') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const src = getSelfRoleConfig(guildId);
@@ -1115,16 +1294,8 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
-        if (id === 'sr_edit') {
-          const panels = Object.entries(src.panels);
-          if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true });
-          return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true });
-        }
-        if (id === 'sr_delete') {
-          const panels = Object.entries(src.panels);
-          if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true });
-          return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true });
-        }
+        if (id === 'sr_edit') { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true }); return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true }); }
+        if (id === 'sr_delete') { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', ephemeral: true }); return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], ephemeral: true }); }
         if (id.startsWith('sre__')) {
           const parts = id.split('__'); const action = parts[1]; const panelId = parts.slice(2).join('__');
           const panel = src.panels[panelId];
@@ -1141,13 +1312,9 @@ client.on('interactionCreate', async interaction => {
           }
           if (action === 'channel')    return interaction.reply({ content: `### 📢 Channel for **${panel.title}**`, components: [channelDropdown(`srch__${panelId}`, 'Select channel...')], ephemeral: true });
           if (action === 'addrole')    return interaction.reply({ content: `### ➕ Add role to **${panel.title}**`, components: [roleDropdown(`srr__add__${panelId}`, 'Select role...', 1, 1)], ephemeral: true });
-          if (action === 'removerole') {
-            if (!panel.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true });
-            return interaction.reply({ content: `### ➖ Remove role`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role...').addOptions(panel.roles.map(r => ({ label: r.label, value: r.id }))))], ephemeral: true });
-          }
+          if (action === 'removerole') { if (!panel.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true }); return interaction.reply({ content: `### ➖ Remove role`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role...').addOptions(panel.roles.map(r => ({ label: r.label, value: r.id }))))], ephemeral: true }); }
           if (action === 'deploy') {
-            if (!panel.channel) return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
-            if (!panel.roles.length) return interaction.reply({ content: '❌ Add at least one role.', ephemeral: true });
+            if (!panel.channel || !panel.roles.length) return interaction.reply({ content: '❌ Set channel and add roles first.', ephemeral: true });
             await interaction.deferReply({ ephemeral: true });
             await deploySelfRolePanel(interaction.guild, panelId, panel);
             saveConfig(config);
@@ -1156,11 +1323,12 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
+      // ── Ticket open ──
       if (id.startsWith('tkt__open__')) {
         const typeId = id.replace('tkt__open__', '');
         const tc = getTicketConfig(guildId);
         const type = tc.ticketTypes.find(t => t.id === typeId);
-        if (!type) return interaction.reply({ content: '❌ Ticket type no longer exists.', ephemeral: true });
+        if (!type) return interaction.reply({ content: '❌ Ticket type gone.', ephemeral: true });
         if (openTickets.has(interaction.user.id)) {
           const existing = interaction.guild.channels.cache.get(openTickets.get(interaction.user.id));
           if (existing) return interaction.reply({ content: `❌ You already have a ticket: <#${existing.id}>`, ephemeral: true });
@@ -1176,10 +1344,12 @@ client.on('interactionCreate', async interaction => {
         openTickets.set(interaction.user.id, ticketCh.id);
         const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag };
         const embed = new EmbedBuilder().setTitle(`${type.emoji || '🎫'} Ticket — ${type.label}`).setDescription(`${replaceVars(tc.welcomeText || 'Hello {user}!', vars)}\n\n**Type:** ${type.label}`).setColor(hexToInt(tc.panelColor)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
-        await ticketCh.send({ content: `<@${interaction.user.id}>${tc.pingRoles.map(id => ` <@&${id}>`).join('')}`, embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'))] });
+        const closeRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'));
+        await ticketCh.send({ content: `<@${interaction.user.id}>${tc.pingRoles.map(id => ` <@&${id}>`).join('')}`, embeds: [embed], components: [closeRow] });
         return interaction.editReply({ content: `✅ Ticket created: <#${ticketCh.id}>` });
       }
 
+      // ── Ticket close button ──
       if (id === 'tkt__close') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const ch = interaction.channel; const tc = getTicketConfig(guildId);
@@ -1192,10 +1362,12 @@ client.on('interactionCreate', async interaction => {
           }
         }
         for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
+        pendingCloseReqs.delete(ch.id);
         await interaction.reply({ content: '🔒 Closing in 3 seconds...' });
         setTimeout(() => ch.delete().catch(() => {}), 3000);
       }
 
+      // ── Selfrole button ──
       if (id.startsWith('srp__btn__')) {
         const parts = id.split('__'); const panelId = parts[2]; const roleId = parts[3];
         const src = getSelfRoleConfig(guildId); const panel = src.panels[panelId];
@@ -1211,6 +1383,7 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ══ ROLE SELECT MENUS ══
     if (interaction.isRoleSelectMenu()) {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const ids = interaction.values;
@@ -1239,22 +1412,42 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ══ CHANNEL SELECT MENUS ══
     if (interaction.isChannelSelectMenu()) {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const chId = interaction.values[0];
-      if (interaction.customId === 'wcd_channel') { getWelcomerConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'vcd_channel') { getVerificationConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_transcript') { getTicketConfig(guildId).transcriptChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_channel')    { getTicketConfig(guildId).ticketChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_category')   { getTicketConfig(guildId).ticketCategory = chId; saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'sd_channel')    { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'wcd_channel')    { getWelcomerConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'vcd_channel')    { getVerificationConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_transcript')  { getTicketConfig(guildId).transcriptChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_channel')     { getTicketConfig(guildId).ticketChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_category')    { getTicketConfig(guildId).ticketCategory = chId; saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'sd_channel')     { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'apd_review_channel') { getApplicationConfig(guildId).reviewChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Review channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'apd_log_channel')    { getApplicationConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId.startsWith('anch__')) { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
       if (interaction.customId.startsWith('srch__')) { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
     }
 
+    // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId; const val = interaction.values[0];
-      if (id === 'ard_remove') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed <@&${val}> from autoroles.`, ephemeral: true }); }
+      if (id === 'ard_remove') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
+      if (id === 'apd_remove_type') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const ac = getApplicationConfig(guildId); ac.appTypes = ac.appTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Application type removed.', ephemeral: true }); }
+      if (id === 'smd_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; saveConfig(config); return interaction.reply({ content: '✅ Saved message deleted.', ephemeral: true }); }
+      if (id === 'smd_edit') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const sm = getSavedMessagesConfig(guildId); const msg = sm.messages[val];
+        if (!msg) return interaction.reply({ content: '❌ Message not found.', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId(`modal_sm_edit__${val}`).setTitle(`Edit — ${msg.name}`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setValue(msg.title || '').setMaxLength(80).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(msg.description || '').setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(msg.color || '').setRequired(false)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_image').setLabel('Image URL').setStyle(TextInputStyle.Short).setValue(msg.image || '').setRequired(false)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_footer').setLabel('Footer').setStyle(TextInputStyle.Short).setValue(msg.footer || '').setRequired(false)),
+        );
+        return interaction.showModal(modal);
+      }
       if (id === 'an_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildAnnouncementEditor(guildId, val)); }
       if (id === 'an_sel_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); delete getAnnouncementConfig(guildId).types[val]; saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
       if (id === 'sr_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildPanelEditor(guildId, val)); }
@@ -1273,15 +1466,102 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ══ MODALS ══
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
+      // ── Application submission ──
+      if (mid.startsWith('modal_apply__')) {
+        await interaction.deferReply({ ephemeral: true });
+        const typeId = mid.replace('modal_apply__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.editReply({ content: '❌ Application type not found.' });
+        if (!ac.reviewChannel) return interaction.editReply({ content: '❌ No review channel set. Contact an admin.' });
+        const reviewCh = interaction.guild.channels.cache.get(ac.reviewChannel);
+        if (!reviewCh) return interaction.editReply({ content: '❌ Review channel not found.' });
+
+        const answers = appType.questions.slice(0, 5).map((q, i) => {
+          const ans = interaction.fields.getTextInputValue(`q${i}`).trim();
+          return { name: `❓ ${q.slice(0, 250)}`, value: ans.slice(0, 1024) || '*No answer*', inline: false };
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
+          .setColor(0x5865F2)
+          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+          .addFields(
+            { name: '👤 Applicant', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true },
+            { name: '🆔 User ID', value: interaction.user.id, inline: true },
+            { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
+            ...answers,
+          )
+          .setTimestamp()
+          .setFooter({ text: `Application ID: ${genId()}` });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`app__accept__${interaction.user.id}__${typeId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`app__deny__${interaction.user.id}__${typeId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
+        );
+
+        await reviewCh.send({ embeds: [embed], components: [row] });
+        return interaction.editReply({ content: `✅ Your **${appType.label}** application has been submitted! You will be notified when it is reviewed.` });
+      }
+
+      // ── Add application type ──
+      if (mid === 'modal_ap_add_type') {
+        const ac = getApplicationConfig(guildId);
+        const label = interaction.fields.getTextInputValue('ap_label').trim();
+        const emoji = interaction.fields.getTextInputValue('ap_emoji').trim() || null;
+        const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
+        const acceptRole = interaction.fields.getTextInputValue('ap_accept_role').trim() || null;
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 5);
+        if (!questions.length) return interaction.reply({ content: '❌ At least one question is required.', ephemeral: true });
+        ac.appTypes.push({ id: genId(), label, emoji, questions, acceptRole });
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Application type **${label}** added with **${questions.length}** question(s)!`, ephemeral: true });
+      }
+
+      // ── New saved message ──
+      if (mid === 'modal_sm_new') {
+        const sm = getSavedMessagesConfig(guildId);
+        const name = interaction.fields.getTextInputValue('sm_name').trim();
+        if (Object.values(sm.messages).some(m => m.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ A message named **${name}** already exists.`, ephemeral: true });
+        const mid2 = genId();
+        sm.messages[mid2] = {
+          name,
+          title: interaction.fields.getTextInputValue('sm_title').trim(),
+          description: interaction.fields.getTextInputValue('sm_desc').trim(),
+          color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2',
+          image: interaction.fields.getTextInputValue('sm_image').trim() || null,
+          footer: null,
+          pingRole: null,
+        };
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Saved message **${name}** created! Use \`/sendmessage ${name} #channel\` to send it.`, ephemeral: true });
+      }
+
+      // ── Edit saved message ──
+      if (mid.startsWith('modal_sm_edit__')) {
+        const msgId = mid.replace('modal_sm_edit__', '');
+        const sm = getSavedMessagesConfig(guildId);
+        const msg = sm.messages[msgId];
+        if (!msg) return interaction.reply({ content: '❌ Message not found.', ephemeral: true });
+        const t = interaction.fields.getTextInputValue('sm_title').trim(); const d = interaction.fields.getTextInputValue('sm_desc').trim(); const c = interaction.fields.getTextInputValue('sm_color').trim(); const im = interaction.fields.getTextInputValue('sm_image').trim(); const f = interaction.fields.getTextInputValue('sm_footer').trim();
+        if (t) msg.title = t; if (d) msg.description = d; if (c) msg.color = c; msg.image = im || null; msg.footer = f || null;
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Saved message **${msg.name}** updated!`, ephemeral: true });
+      }
+
+      // ── Welcomer ──
       if (mid === 'modal_wc_content') {
         const wc = getWelcomerConfig(guildId);
         const t = interaction.fields.getTextInputValue('wc_title').trim(); const d = interaction.fields.getTextInputValue('wc_desc').trim(); const c = interaction.fields.getTextInputValue('wc_color').trim(); const im = interaction.fields.getTextInputValue('wc_image').trim(); const f = interaction.fields.getTextInputValue('wc_footer').trim();
         if (t) wc.title = t; if (d) wc.description = d; if (c) wc.color = c; wc.image = im || null; wc.footer = f || null;
         saveConfig(config); return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
       }
+
+      // ── Verification ──
       if (mid === 'modal_vc_content') {
         const vc = getVerificationConfig(guildId);
         const t = interaction.fields.getTextInputValue('vc_title').trim(); const d = interaction.fields.getTextInputValue('vc_desc').trim(); const c = interaction.fields.getTextInputValue('vc_color').trim(); const im = interaction.fields.getTextInputValue('vc_image').trim();
@@ -1298,9 +1578,11 @@ client.on('interactionCreate', async interaction => {
           const nickname = `(${interaction.user.username}) | ${robloxUser.name}`.slice(0, 32);
           try { await interaction.member.setNickname(nickname, 'Roblox verification'); } catch {}
           if (vc.verifiedRole) { const role = interaction.guild.roles.cache.get(vc.verifiedRole); if (role) await interaction.member.roles.add(role); }
-          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).setDescription('You have been verified!').addFields({ name: '🎮 Roblox', value: robloxUser.name, inline: true }, { name: '🆔 ID', value: `${robloxUser.id}`, inline: true }, { name: '📛 Nickname', value: `\`${nickname}\``, inline: false }).setTimestamp()] });
-        } catch (e) { console.error('Verification error:', e); return interaction.editReply({ content: `❌ Verification failed. Try again later.` }); }
+          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields({ name: '🎮 Roblox', value: robloxUser.name, inline: true }, { name: '🆔 ID', value: `${robloxUser.id}`, inline: true }, { name: '📛 Nickname', value: `\`${nickname}\``, inline: false }).setTimestamp()] });
+        } catch (e) { return interaction.editReply({ content: `❌ Verification failed. Try again later.` }); }
       }
+
+      // ── Ticket ──
       if (mid === 'modal_t_embed') {
         const tc = getTicketConfig(guildId);
         const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim();
@@ -1313,12 +1595,12 @@ client.on('interactionCreate', async interaction => {
         tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null });
         saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true });
       }
+
+      // ── Session ──
       if (mid === 'modal_s_joinlink') {
         const rawLink = interaction.fields.getTextInputValue('s_link_val').trim();
-        if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL. Must start with `https://` or `http://`.', ephemeral: true });
-        getSessionConfig(guildId).joinLink = rawLink;
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Join link saved: ${rawLink}`, ephemeral: true });
+        if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true });
+        getSessionConfig(guildId).joinLink = rawLink; saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, ephemeral: true });
       }
       if (mid === 'modal_s_desc') {
         const sc = getSessionConfig(guildId);
@@ -1333,21 +1615,19 @@ client.on('interactionCreate', async interaction => {
         saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true });
       }
       if (mid === 'modal_s_threshold') {
-        const raw = interaction.fields.getTextInputValue('s_threshold_val').trim();
-        const num = parseInt(raw, 10);
+        const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10);
         if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number between 1 and 999.', ephemeral: true });
-        getSessionConfig(guildId).voteThreshold = num;
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Vote threshold set to **${num}** votes.`, ephemeral: true });
+        getSessionConfig(guildId).voteThreshold = num; saveConfig(config); return interaction.reply({ content: `✅ Vote threshold set to **${num}**.`, ephemeral: true });
       }
+
+      // ── Announcement ──
       if (mid === 'modal_an_new') {
         const ac = getAnnouncementConfig(guildId);
         const name = interaction.fields.getTextInputValue('an_name').trim();
         if (Object.values(ac.types).some(t => t.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ Type **${name}** already exists.`, ephemeral: true });
         const tid = genId();
         ac.types[tid] = { name, emoji: interaction.fields.getTextInputValue('an_emoji').trim() || null, title: interaction.fields.getTextInputValue('an_title').trim(), description: interaction.fields.getTextInputValue('an_desc').trim() || null, color: interaction.fields.getTextInputValue('an_color').trim() || '#ED4245', channel: null, pingRole: null, image: null };
-        saveConfig(config);
-        return interaction.reply({ ...buildAnnouncementEditor(guildId, tid) });
+        saveConfig(config); return interaction.reply({ ...buildAnnouncementEditor(guildId, tid) });
       }
       if (mid.startsWith('modal_an_content__')) {
         const typeId = mid.replace('modal_an_content__', '');
@@ -1357,6 +1637,8 @@ client.on('interactionCreate', async interaction => {
         if (title) t.title = title; if (desc) t.description = desc; if (color) t.color = color; if (image) t.image = image; if (emoji) t.emoji = emoji;
         saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
       }
+
+      // ── Selfrole ──
       if (mid === 'modal_sr_new') {
         const src = getSelfRoleConfig(guildId);
         const type = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
