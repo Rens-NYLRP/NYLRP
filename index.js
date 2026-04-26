@@ -42,7 +42,21 @@ function getTicketConfig(guildId) {
 }
 function getSessionConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.session) gc.session = { channel: null, pingRoles: [], allowedRoles: [], joinLink: null, startImage: null, startDescription: null, voteImage: null, voteDescription: null, shutdownImage: null, shutdownDescription: null };
+  if (!gc.session) gc.session = {
+    channel: null,
+    pingRoles: [],
+    allowedRoles: [],
+    joinLink: null,
+    startImage: null,
+    startDescription: null,
+    voteImage: null,
+    voteDescription: null,
+    shutdownImage: null,
+    shutdownDescription: null,
+    voteThreshold: 5, // default: 5 votes needed to auto-start
+  };
+  // Migrate old configs that don't have voteThreshold
+  if (gc.session.voteThreshold === undefined) gc.session.voteThreshold = 5;
   return gc.session;
 }
 function getSelfRoleConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.selfroles) gc.selfroles = { panels: {} }; return gc.selfroles; }
@@ -86,6 +100,9 @@ function canRunSession(member, guildId) {
 const openTickets      = new Map();
 const srPendingRoleAdd = new Map();
 
+// ── Active vote tracking: guildId -> { messageId, channelId, hostId, threshold, joinLink } ──
+const activeVotes = new Map();
+
 function genId() { return Math.random().toString(36).slice(2, 8); }
 function hexToInt(hex) { if (!hex) return 0x5865F2; const v = parseInt(hex.replace('#', ''), 16); return isNaN(v) ? 0x5865F2 : v; }
 function colorToButtonStyle(c) {
@@ -98,7 +115,6 @@ function colorToButtonStyle(c) {
 }
 function safeSetEmoji(btn, emoji) { if (!emoji || emoji === 'null') return btn; try { btn.setEmoji(emoji); } catch {} return btn; }
 
-// ── FIX: validate URL before using it in a Link button ──
 function isValidUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const trimmed = url.trim();
@@ -258,13 +274,14 @@ function buildSessionSetupPayload(guildId) {
   const embed = new EmbedBuilder().setTitle('🎮 Session System Setup').setColor(0x57F287)
     .setDescription('**Variables:** `{host}` `{hostMention}` `{time}` `{date}` `{memberCount}` `{server}`')
     .addFields(
-      { name: '📢 Channel',    value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
-      { name: '👥 Ping Roles', value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔑 Allowed',    value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔗 Join Link',  value: sc.joinLink ?? '*Not set*', inline: false },
-      { name: '🟢 Start',      value: sc.startDescription ? `\`\`\`${sc.startDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🗳️ Vote',       value: sc.voteDescription ? `\`\`\`${sc.voteDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🔴 Shutdown',   value: sc.shutdownDescription ? `\`\`\`${sc.shutdownDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '📢 Channel',       value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
+      { name: '👥 Ping Roles',    value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔑 Allowed',       value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔗 Join Link',     value: sc.joinLink ?? '*Not set*', inline: false },
+      { name: '🗳️ Vote Threshold', value: `**${sc.voteThreshold ?? 5}** votes needed to auto-start`, inline: true },
+      { name: '🟢 Start',         value: sc.startDescription ? `\`\`\`${sc.startDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🗳️ Vote',          value: sc.voteDescription ? `\`\`\`${sc.voteDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🔴 Shutdown',      value: sc.shutdownDescription ? `\`\`\`${sc.shutdownDescription.slice(0, 100)}\`\`\`` : '*Not set*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('s_channel').setLabel('Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -275,6 +292,7 @@ function buildSessionSetupPayload(guildId) {
   const r2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('s_descriptions').setLabel('Descriptions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
     new ButtonBuilder().setCustomId('s_images').setLabel('Images').setStyle(ButtonStyle.Primary).setEmoji('🖼️'),
+    new ButtonBuilder().setCustomId('s_vote_threshold').setLabel('Vote Threshold').setStyle(ButtonStyle.Primary).setEmoji('🗳️'),
   );
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
@@ -367,6 +385,30 @@ async function deploySelfRolePanel(guild, panelId, panel) {
   panel.messageId = msg.id;
 }
 
+// ── Helper: post the session start embed (reused by both /session start and auto-start after vote) ──
+async function postSessionStart(guild, sc, hostUser, rawLink, vars) {
+  const sCh = guild.channels.cache.get(sc.channel);
+  if (!sCh) throw new Error('Session channel not found');
+  const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
+  const desc = replaceVars(sc.startDescription ?? '{hostMention} has started a session! Join using the button below.', vars);
+  const embed = new EmbedBuilder()
+    .setTitle('🟢 Session Started!')
+    .setColor(0x57F287)
+    .setDescription(desc)
+    .setTimestamp()
+    .setFooter({ text: `By ${hostUser.tag}` });
+  if (sc.startImage) embed.setImage(sc.startImage);
+
+  const comps = [];
+  if (isValidUrl(rawLink)) {
+    comps.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())
+    ));
+  }
+
+  await sCh.send({ content: ping ?? undefined, embeds: [embed], components: comps });
+}
+
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
   { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
@@ -389,7 +431,7 @@ const commands = [
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
-    { name: 'vote', type: 1, description: 'Start vote' },
+    { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed to auto-start (default: server setting)', required: false }] },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
   ]},
   { name: 'ban', description: '[SHR] Ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
@@ -464,13 +506,59 @@ client.on('guildMemberAdd', async member => {
   } catch (e) { console.error('Welcomer error:', e); }
 });
 
+// ── Reaction handler: self roles + vote tracking (bot votes excluded) ──
 client.on('messageReactionAdd', async (reaction, user) => {
-  if (user.bot) return;
+  if (user.bot) return; // ← bot votes never count
   try {
     if (reaction.partial) await reaction.fetch();
     if (reaction.message?.partial) await reaction.message.fetch();
     const guild = reaction.message.guild;
     if (!guild) return;
+
+    // ── Check if this reaction is on an active vote message ──
+    const voteData = activeVotes.get(guild.id);
+    if (voteData && reaction.message.id === voteData.messageId && reaction.emoji.name === '✅') {
+      // Fetch fresh reaction to get accurate count (excluding bots)
+      const freshReaction = reaction.message.reactions.cache.get('✅');
+      if (freshReaction) {
+        const users = await freshReaction.users.fetch();
+        const humanVotes = users.filter(u => !u.bot).size;
+
+        if (humanVotes >= voteData.threshold) {
+          // Threshold reached — auto-start session
+          activeVotes.delete(guild.id);
+          try {
+            const sc = getSessionConfig(guild.id);
+            const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
+            const vars = {
+              userMention: `<@${voteData.hostId}>`,
+              username: hostUser.username ?? 'Unknown',
+              userTag: hostUser.tag ?? 'Unknown',
+              memberCount: guild.memberCount.toString(),
+              server: guild.name,
+            };
+            // Edit the vote message to show it passed
+            await reaction.message.edit({
+              embeds: [
+                new EmbedBuilder()
+                  .setTitle('✅ Vote Passed!')
+                  .setColor(0x57F287)
+                  .setDescription(`**${humanVotes}/${voteData.threshold}** votes reached! Starting session…`)
+                  .setTimestamp()
+                  .setFooter({ text: `Hosted by ${hostUser.tag ?? 'Unknown'}` }),
+              ],
+              components: [],
+            }).catch(() => {});
+            await postSessionStart(guild, sc, hostUser, voteData.joinLink, vars);
+          } catch (e) {
+            console.error('Auto-start after vote error:', e);
+          }
+        }
+      }
+      return; // don't process self-role logic for vote messages
+    }
+
+    // ── Self role reaction handling ──
     const src = getSelfRoleConfig(guild.id);
     let targetPanel = null, targetRole = null;
     for (const [, panel] of Object.entries(src.panels)) {
@@ -720,44 +808,87 @@ client.on('interactionCreate', async interaction => {
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
 
-      // ══ SESSION — FIX: validate URL before building Link button ══
+      // ══════════════════════════════════════════
+      // SESSION COMMANDS — fixed & enhanced
+      // ══════════════════════════════════════════
       if (cmd === 'session') {
         if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
         const sc = getSessionConfig(guildId);
+
         if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set. Use `/setup sessions`.', ephemeral: true });
         const sCh = interaction.guild.channels.cache.get(sc.channel);
         if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
-        const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-        const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag, memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
 
+        await interaction.deferReply({ ephemeral: true });
+
+        const vars = {
+          userMention: `<@${interaction.user.id}>`,
+          username: interaction.user.username,
+          userTag: interaction.user.tag,
+          memberCount: interaction.guild.memberCount.toString(),
+          server: interaction.guild.name,
+        };
+
+        // ── START ──
         if (sub === 'start') {
           const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null;
-          const desc = replaceVars(sc.startDescription ?? '{hostMention} has started a session! Join using the button below.', vars);
-          const embed = new EmbedBuilder().setTitle('🟢 Session Started!').setColor(0x57F287).setDescription(desc).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
-          if (sc.startImage) embed.setImage(sc.startImage);
-
-          // ── FIXED: only add Join button if URL is valid ──
-          const comps = [];
-          if (isValidUrl(rawLink)) {
-            comps.push(new ActionRowBuilder().addComponents(
-              new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())
-            ));
+          try {
+            await postSessionStart(interaction.guild, sc, interaction.user, rawLink, vars);
+            return interaction.editReply({ content: `✅ Session started in <#${sc.channel}>!` });
+          } catch (e) {
+            return interaction.editReply({ content: `❌ Failed: ${e.message}` });
           }
+        }
 
-          await sCh.send({ content: ping ?? undefined, embeds: [embed], components: comps });
-          return interaction.editReply({ content: `✅ Session started in <#${sc.channel}>!` });
-        }
+        // ── VOTE ──
         if (sub === 'vote') {
-          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(replaceVars(sc.voteDescription ?? 'A session vote has started!', vars)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+          // Use per-command override, else fall back to server setting
+          const threshold = interaction.options.getInteger('votes') ?? sc.voteThreshold ?? 5;
+          if (threshold < 1) return interaction.editReply({ content: '❌ Vote threshold must be at least 1.' });
+
+          const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
+          const desc = replaceVars(
+            sc.voteDescription ?? 'React with ✅ to vote for starting a session!\n\n**{host}** wants to host.',
+            vars,
+          );
+
+          const embed = new EmbedBuilder()
+            .setTitle('🗳️ Session Vote!')
+            .setColor(0xFEE75C)
+            .setDescription(`${desc}\n\n**Votes needed:** ${threshold}`)
+            .setTimestamp()
+            .setFooter({ text: `Hosted by ${interaction.user.tag} • React ✅ to vote` });
           if (sc.voteImage) embed.setImage(sc.voteImage);
+
           const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed] });
-          await msg.react('✅'); await msg.react('❌');
-          return interaction.editReply({ content: '✅ Vote posted!' });
+          await msg.react('✅');
+          await msg.react('❌');
+
+          // Store vote data so the reaction handler can track it
+          activeVotes.set(guildId, {
+            messageId: msg.id,
+            channelId: sCh.id,
+            hostId: interaction.user.id,
+            threshold,
+            joinLink: sc.joinLink ?? null,
+          });
+
+          return interaction.editReply({ content: `✅ Vote posted! Auto-starts when **${threshold}** ✅ votes are reached (bot votes excluded).` });
         }
+
+        // ── SHUTDOWN ──
         if (sub === 'shutdown') {
-          const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+          // Cancel any active vote for this guild
+          activeVotes.delete(guildId);
+
+          const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
+          const embed = new EmbedBuilder()
+            .setTitle('🔴 Session Ended!')
+            .setColor(0xED4245)
+            .setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars))
+            .setTimestamp()
+            .setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.shutdownImage) embed.setImage(sc.shutdownImage);
           await sCh.send({ content: ping ?? undefined, embeds: [embed] });
           return interaction.editReply({ content: '✅ Shutdown posted!' });
@@ -920,12 +1051,20 @@ client.on('interactionCreate', async interaction => {
           return interaction.showModal(modal);
         }
         if (id === 's_images') {
+          const sc = getSessionConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_s_images').setTitle('Session Images');
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_start_img').setLabel('Start image URL').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_vote_img').setLabel('Vote image URL').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_shutdown_img').setLabel('Shutdown image URL').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_start_img').setLabel('Start image URL').setStyle(TextInputStyle.Short).setValue(sc.startImage || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_vote_img').setLabel('Vote image URL').setStyle(TextInputStyle.Short).setValue(sc.voteImage || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_shutdown_img').setLabel('Shutdown image URL').setStyle(TextInputStyle.Short).setValue(sc.shutdownImage || '').setRequired(false)),
           );
+          return interaction.showModal(modal);
+        }
+        // ── NEW: Vote Threshold button ──
+        if (id === 's_vote_threshold') {
+          const sc = getSessionConfig(guildId);
+          const modal = new ModalBuilder().setCustomId('modal_s_threshold').setTitle('Vote Threshold');
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_threshold_val').setLabel('Votes needed to auto-start a session').setStyle(TextInputStyle.Short).setValue(String(sc.voteThreshold ?? 5)).setPlaceholder('e.g. 5').setRequired(true).setMinLength(1).setMaxLength(3)));
           return interaction.showModal(modal);
         }
       }
@@ -1189,16 +1328,13 @@ client.on('interactionCreate', async interaction => {
         tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null });
         saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true });
       }
-
-      // ── Session: validate join link on save ──
       if (mid === 'modal_s_joinlink') {
         const rawLink = interaction.fields.getTextInputValue('s_link_val').trim();
-        if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL. It must start with `https://` or `http://`.', ephemeral: true });
+        if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL. Must start with `https://` or `http://`.', ephemeral: true });
         getSessionConfig(guildId).joinLink = rawLink;
         saveConfig(config);
         return interaction.reply({ content: `✅ Join link saved: ${rawLink}`, ephemeral: true });
       }
-
       if (mid === 'modal_s_desc') {
         const sc = getSessionConfig(guildId);
         const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim();
@@ -1210,6 +1346,15 @@ client.on('interactionCreate', async interaction => {
         const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim();
         if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi;
         saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true });
+      }
+      // ── NEW: Vote threshold modal ──
+      if (mid === 'modal_s_threshold') {
+        const raw = interaction.fields.getTextInputValue('s_threshold_val').trim();
+        const num = parseInt(raw, 10);
+        if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number between 1 and 999.', ephemeral: true });
+        getSessionConfig(guildId).voteThreshold = num;
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Vote threshold set to **${num}** votes.`, ephemeral: true });
       }
       if (mid === 'modal_an_new') {
         const ac = getAnnouncementConfig(guildId);
