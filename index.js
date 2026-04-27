@@ -63,25 +63,21 @@ function getVerificationConfig(guildId) {
   if (!gc.verification) gc.verification = { enabled: false, channel: null, verifiedRole: null, panelTitle: '✅ Verify your Roblox account', panelDescription: 'Click **Verify** below, enter your Roblox username, and you\'ll get access!\n\nNickname will be: `(DiscordName) | RobloxName`', panelColor: '#57F287', panelImage: null };
   return gc.verification;
 }
-
-// ── NEW: Application Config ──
 function getApplicationConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.applications) gc.applications = {
-    reviewChannel: null,
-    logChannel: null,
-    appTypes: [],
-    // appTypes: [{ id, label, emoji, color, description, questions: ['Q1','Q2',...], acceptRole: null }]
-  };
+  if (!gc.applications) gc.applications = { reviewChannel: null, logChannel: null, appTypes: [] };
   return gc.applications;
 }
-
-// ── NEW: Saved Messages Config ──
 function getSavedMessagesConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.savedMessages) gc.savedMessages = { messages: {} };
-  // messages: { id: { name, title, description, color, image, footer, pingRole } }
   return gc.savedMessages;
+}
+// ── NEW: Automod config ──
+function getAutomodConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.automod) gc.automod = { enabled: false, keywords: [], logChannel: null, action: 'delete', muteMinutes: 5 };
+  return gc.automod;
 }
 
 function getWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; return gc.warnings[userId]; }
@@ -111,8 +107,8 @@ function canRunSession(member, guildId) {
 const openTickets      = new Map();
 const srPendingRoleAdd = new Map();
 const activeVotes      = new Map();
-const pendingCloseReqs = new Map(); // ticketChannelId -> { requesterId, messageId }
-const appPendingType   = new Map(); // userId -> appTypeId
+const pendingCloseReqs = new Map();
+const appPendingType   = new Map();
 
 // ════════════════════════════════════════════
 // UTILS
@@ -174,17 +170,41 @@ function channelDropdown(customId, placeholder, types = [ChannelType.GuildText])
 }
 
 // ════════════════════════════════════════════
-// APPLICATION SETUP PAYLOAD
+// AUTOMOD SETUP PAYLOAD
+// ════════════════════════════════════════════
+function buildAutomodSetupPayload(guildId) {
+  const am = getAutomodConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('🛡️ Automod Setup').setColor(0xED4245)
+    .setDescription('Configure automatic moderation for keywords.\n\n**Actions:** `delete` | `delete+warn` | `delete+mute`')
+    .addFields(
+      { name: '✅ Enabled',     value: am.enabled ? 'Yes' : 'No', inline: true },
+      { name: '⚙️ Action',      value: am.action || 'delete', inline: true },
+      { name: '⏱️ Mute (min)',  value: `${am.muteMinutes ?? 5}`, inline: true },
+      { name: '📋 Log Channel', value: am.logChannel ? `<#${am.logChannel}>` : '*Not set*', inline: true },
+      { name: '🚫 Keywords',    value: am.keywords.length ? am.keywords.map(k => `\`${k}\``).join(', ') : '*No keywords set*', inline: false },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('am_toggle').setLabel(am.enabled ? 'Disable' : 'Enable').setStyle(am.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(am.enabled ? '🔴' : '🟢'),
+    new ButtonBuilder().setCustomId('am_keywords').setLabel('Edit Keywords').setStyle(ButtonStyle.Primary).setEmoji('🚫'),
+    new ButtonBuilder().setCustomId('am_action').setLabel('Set Action').setStyle(ButtonStyle.Primary).setEmoji('⚙️'),
+    new ButtonBuilder().setCustomId('am_log').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+  );
+  return { embeds: [embed], components: [r1], ephemeral: true };
+}
+
+// ════════════════════════════════════════════
+// SETUP PAYLOADS
 // ════════════════════════════════════════════
 function buildApplicationSetupPayload(guildId) {
   const ac = getApplicationConfig(guildId);
   const embed = new EmbedBuilder()
     .setTitle('📋 Application System Setup').setColor(0x5865F2)
-    .setDescription('Configure application types below. SHR can accept/deny applications.')
+    .setDescription('Configure application types below.')
     .addFields(
-      { name: '📢 Review Channel',  value: ac.reviewChannel ? `<#${ac.reviewChannel}>` : '*Not set*', inline: true },
-      { name: '📋 Log Channel',     value: ac.logChannel ? `<#${ac.logChannel}>` : '*Not set*', inline: true },
-      { name: '📝 App Types',       value: ac.appTypes.length ? ac.appTypes.map(t => `${t.emoji || '•'} \`${t.label}\` (${t.questions?.length ?? 0} questions)`).join('\n') : '*No types yet*', inline: false },
+      { name: '📢 Review Channel', value: ac.reviewChannel ? `<#${ac.reviewChannel}>` : '*Not set*', inline: true },
+      { name: '📋 Log Channel',    value: ac.logChannel ? `<#${ac.logChannel}>` : '*Not set*', inline: true },
+      { name: '📝 App Types',      value: ac.appTypes.length ? ac.appTypes.map(t => `${t.emoji || '•'} \`${t.label}\` (${t.questions?.length ?? 0} questions)`).join('\n') : '*No types yet*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ap_review_channel').setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -198,47 +218,30 @@ function buildApplicationSetupPayload(guildId) {
   return { embeds: [embed], components: [r1, r2], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// SAVED MESSAGES SETUP PAYLOAD
-// ════════════════════════════════════════════
 function buildSavedMessagesPayload(guildId) {
   const sm = getSavedMessagesConfig(guildId);
   const msgs = Object.entries(sm.messages);
   const embed = new EmbedBuilder()
     .setTitle('💾 Saved Messages').setColor(0x57F287)
-    .setDescription([
-      'Save messages you send often. Use `/sendmessage <name>` to send one.',
-      '',
-      msgs.length ? msgs.map(([, m]) => `**${m.emoji || '📨'} ${m.name}**`).join('\n') : '*No saved messages yet.*',
-    ].join('\n'));
-  const btns = [
-    new ButtonBuilder().setCustomId('sm_new').setLabel('New Message').setStyle(ButtonStyle.Success).setEmoji('➕'),
-  ];
-  if (msgs.length) {
-    btns.push(
-      new ButtonBuilder().setCustomId('sm_edit').setLabel('Edit').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
-      new ButtonBuilder().setCustomId('sm_delete').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-    );
-  }
+    .setDescription(['Save messages you send often. Use `/sendmessage <name>` to send one.', '', msgs.length ? msgs.map(([, m]) => `**${m.emoji || '📨'} ${m.name}**`).join('\n') : '*No saved messages yet.*'].join('\n'));
+  const btns = [new ButtonBuilder().setCustomId('sm_new').setLabel('New Message').setStyle(ButtonStyle.Success).setEmoji('➕')];
+  if (msgs.length) { btns.push(new ButtonBuilder().setCustomId('sm_edit').setLabel('Edit').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('sm_delete').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('🗑️')); }
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
 }
 
-// ════════════════════════════════════════════
-// EXISTING SETUP PAYLOADS (unchanged)
-// ════════════════════════════════════════════
 function buildWelcomerSetupPayload(guildId) {
   const wc = getWelcomerConfig(guildId);
   const embed = new EmbedBuilder().setTitle('👋 Welcomer Setup').setColor(0x5865F2)
     .setDescription('Configure the welcome message.\n\n**Variables:** `{userMention}` `{username}` `{memberCount}` `{server}`')
     .addFields(
-      { name: '✅ Enabled',     value: wc.enabled ? 'Yes' : 'No', inline: true },
-      { name: '📢 Channel',    value: wc.channel ? `<#${wc.channel}>` : '*Not set*', inline: true },
-      { name: '🏷️ Title',      value: wc.title || '*Not set*', inline: false },
+      { name: '✅ Enabled', value: wc.enabled ? 'Yes' : 'No', inline: true },
+      { name: '📢 Channel', value: wc.channel ? `<#${wc.channel}>` : '*Not set*', inline: true },
+      { name: '🏷️ Title', value: wc.title || '*Not set*', inline: false },
       { name: '📝 Description', value: wc.description ? `\`\`\`${wc.description.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
-      { name: '🎨 Color',      value: wc.color || '*Not set*', inline: true },
-      { name: '🖼️ Image',      value: wc.image ? '✅ Set' : '❌ Not set', inline: true },
-      { name: '📌 Footer',     value: wc.footer || '*Not set*', inline: true },
-      { name: '🔔 Ping User',  value: wc.pingUser ? 'Yes' : 'No', inline: true },
+      { name: '🎨 Color', value: wc.color || '*Not set*', inline: true },
+      { name: '🖼️ Image', value: wc.image ? '✅ Set' : '❌ Not set', inline: true },
+      { name: '📌 Footer', value: wc.footer || '*Not set*', inline: true },
+      { name: '🔔 Ping User', value: wc.pingUser ? 'Yes' : 'No', inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('wc_channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -251,10 +254,7 @@ function buildAutoroleSetupPayload(guildId) {
   const ar = getAutoroleConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🎭 Autorole Setup').setColor(0xEB459E)
     .setDescription('Roles given automatically when someone joins.')
-    .addFields(
-      { name: '✅ Enabled', value: ar.enabled ? 'Yes' : 'No', inline: true },
-      { name: '🎭 Roles',   value: ar.roles.length ? ar.roles.map(id => `<@&${id}>`).join(', ') : '*No roles set*', inline: false },
-    );
+    .addFields({ name: '✅ Enabled', value: ar.enabled ? 'Yes' : 'No', inline: true }, { name: '🎭 Roles', value: ar.roles.length ? ar.roles.map(id => `<@&${id}>`).join(', ') : '*No roles set*', inline: false });
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ar_add').setLabel('Add Role').setStyle(ButtonStyle.Success).setEmoji('➕'),
     new ButtonBuilder().setCustomId('ar_remove').setLabel('Remove Role').setStyle(ButtonStyle.Danger).setEmoji('➖'),
@@ -267,11 +267,11 @@ function buildVerificationSetupPayload(guildId) {
   const embed = new EmbedBuilder().setTitle('🔐 Verification Setup').setColor(0x57F287)
     .setDescription('Roblox verification.')
     .addFields(
-      { name: '✅ Enabled',       value: vc.enabled ? 'Yes' : 'No', inline: true },
-      { name: '📢 Channel',       value: vc.channel ? `<#${vc.channel}>` : '*Not set*', inline: true },
+      { name: '✅ Enabled', value: vc.enabled ? 'Yes' : 'No', inline: true },
+      { name: '📢 Channel', value: vc.channel ? `<#${vc.channel}>` : '*Not set*', inline: true },
       { name: '🎭 Verified Role', value: vc.verifiedRole ? `<@&${vc.verifiedRole}>` : '*Not set*', inline: true },
-      { name: '🏷️ Panel Title',   value: vc.panelTitle || '*Not set*', inline: false },
-      { name: '📝 Description',   value: vc.panelDescription ? `\`\`\`${vc.panelDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
+      { name: '🏷️ Panel Title', value: vc.panelTitle || '*Not set*', inline: false },
+      { name: '📝 Description', value: vc.panelDescription ? `\`\`\`${vc.panelDescription.slice(0, 150)}\`\`\`` : '*Not set*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('vc_channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -301,11 +301,11 @@ function buildTicketSetupPayload(guildId) {
   const tc = getTicketConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🎫 Ticket System Setup').setColor(0x5865F2).setDescription('Configure the ticket system below.')
     .addFields(
-      { name: '📢 Ping Roles',     value: tc.pingRoles.length ? tc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '📢 Ping Roles', value: tc.pingRoles.length ? tc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
       { name: '📋 Transcript Ch.', value: tc.transcriptChannel ? `<#${tc.transcriptChannel}>` : '*Not set*', inline: true },
-      { name: '📬 Panel Channel',  value: tc.ticketChannel ? `<#${tc.ticketChannel}>` : '*Not set*', inline: true },
-      { name: '📁 Category',       value: tc.ticketCategory ? `<#${tc.ticketCategory}>` : '*Not set*', inline: true },
-      { name: '🏷️ Ticket Types',   value: tc.ticketTypes.length ? tc.ticketTypes.map(t => `${t.emoji || '•'} \`${t.label}\``).join('\n') : '*No types yet*', inline: false },
+      { name: '📬 Panel Channel', value: tc.ticketChannel ? `<#${tc.ticketChannel}>` : '*Not set*', inline: true },
+      { name: '📁 Category', value: tc.ticketCategory ? `<#${tc.ticketCategory}>` : '*Not set*', inline: true },
+      { name: '🏷️ Ticket Types', value: tc.ticketTypes.length ? tc.ticketTypes.map(t => `${t.emoji || '•'} \`${t.label}\``).join('\n') : '*No types yet*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('t_ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -327,10 +327,10 @@ function buildSessionSetupPayload(guildId) {
   const embed = new EmbedBuilder().setTitle('🎮 Session System Setup').setColor(0x57F287)
     .setDescription('**Variables:** `{host}` `{hostMention}` `{time}` `{date}` `{memberCount}` `{server}`')
     .addFields(
-      { name: '📢 Channel',        value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
-      { name: '👥 Ping Roles',     value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔑 Allowed',        value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔗 Join Link',      value: sc.joinLink ?? '*Not set*', inline: false },
+      { name: '📢 Channel', value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
+      { name: '👥 Ping Roles', value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔑 Allowed', value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
+      { name: '🔗 Join Link', value: sc.joinLink ?? '*Not set*', inline: false },
       { name: '🗳️ Vote Threshold', value: `**${sc.voteThreshold ?? 5}** votes needed`, inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
@@ -450,26 +450,19 @@ const commands = [
   { name: 'lock', description: 'Lock channel' },
   { name: 'unlock', description: 'Unlock channel' },
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
-
-  // ── NEW ticket commands ──
   { name: 'close', description: 'Close the current ticket (staff only)' },
-  { name: 'closerequest', description: 'Request to close this ticket (user sends, staff approves)' },
-
-  // ── NEW application command ──
+  { name: 'closerequest', description: 'Request to close this ticket' },
   { name: 'apply', description: 'Submit an application', options: [{ name: 'type', type: 3, description: 'Application type', required: true }] },
-
-  // ── NEW saved message command ──
   { name: 'sendmessage', description: '[SHR] Send a saved message to a channel', options: [
     { name: 'name', type: 3, description: 'Saved message name', required: true },
     { name: 'channel', type: 7, description: 'Channel to send to', required: true },
   ]},
-
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
   ]},
-  { name: 'ban', description: '[SHR] Ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'ban', description: '[SHR] Ban user + delete all messages/threads', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'unban', description: '[SHR] Unban by ID', options: [{ name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'softban', description: '[SHR] Softban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'tempban', description: '[SHR] Temp ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'hours', type: 4, description: 'Hours', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
@@ -477,6 +470,17 @@ const commands = [
   { name: 'addrole', description: '[SHR] Add role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'removerole', description: '[SHR] Remove role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
+  // ── NEW: Promote & Demote ──
+  { name: 'promote', description: '[SHR] Promote a user to a role', options: [
+    { name: 'user', type: 6, description: 'Who?', required: true },
+    { name: 'role', type: 8, description: 'Role to promote to', required: true },
+    { name: 'reason', type: 3, description: 'Reason', required: false },
+  ]},
+  { name: 'demote', description: '[SHR] Demote a user from a role', options: [
+    { name: 'user', type: 6, description: 'Who?', required: true },
+    { name: 'role', type: 8, description: 'Role to demote from', required: true },
+    { name: 'reason', type: 3, description: 'Reason', required: false },
+  ]},
   { name: 'warnings', description: '[SHR] View warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
@@ -510,17 +514,69 @@ const commands = [
     { name: 'verification', type: 1, description: 'Roblox verification system' },
     { name: 'applications', type: 1, description: 'Application system' },
     { name: 'savedmessages', type: 1, description: 'Saved messages system' },
+    { name: 'automod', type: 1, description: 'Automod keyword filter' },
   ]},
 ];
 
 // ════════════════════════════════════════════
 // READY
 // ════════════════════════════════════════════
-client.once('ready', async () => {
-  console.log(`✅ Online as ${client.user.tag}`);
+client.once('clientReady', async () => {
+  console.log(`✅ Pennsylvania State I Utility online as ${client.user.tag}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); console.log('✅ Commands registered'); }
   catch (e) { console.error('❌ Command registration failed:', e); }
+});
+
+// ════════════════════════════════════════════
+// AUTOMOD — MESSAGE CREATE
+// ════════════════════════════════════════════
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
+  const guildId = message.guild.id;
+  const am = getAutomodConfig(guildId);
+  if (!am.enabled || !am.keywords.length) return;
+
+  // Staff bypass automod
+  const member = message.member;
+  if (!member) return;
+  if (hasAnyStaff(member) || member.permissions.has(PermissionFlagsBits.Administrator)) return;
+
+  const content = message.content.toLowerCase();
+  const triggered = am.keywords.find(kw => content.includes(kw.toLowerCase()));
+  if (!triggered) return;
+
+  try {
+    await message.delete().catch(() => {});
+
+    const logEmbed = new EmbedBuilder()
+      .setTitle('🛡️ Automod Triggered')
+      .setColor(0xED4245)
+      .addFields(
+        { name: '👤 User', value: `${message.author.tag} (<@${message.author.id}>)`, inline: true },
+        { name: '📢 Channel', value: `<#${message.channel.id}>`, inline: true },
+        { name: '🚫 Keyword', value: `\`${triggered}\``, inline: true },
+        { name: '💬 Message', value: message.content.slice(0, 1024) || '*empty*', inline: false },
+        { name: '⚙️ Action', value: am.action || 'delete', inline: true },
+      )
+      .setTimestamp();
+
+    if (am.action === 'delete+warn') {
+      addWarning(guildId, message.author.id, { reason: `Automod: used keyword "${triggered}"`, moderator: 'Automod', date: new Date().toUTCString() });
+      logEmbed.addFields({ name: '⚠️ Warning', value: `Total warnings: ${getWarnings(guildId, message.author.id).length}`, inline: true });
+      await message.author.send(`⚠️ You received a warning in **${message.guild.name}** for using a forbidden word.`).catch(() => {});
+    } else if (am.action === 'delete+mute') {
+      const mins = am.muteMinutes ?? 5;
+      await member.timeout(mins * 60000, `Automod: keyword "${triggered}"`).catch(() => {});
+      logEmbed.addFields({ name: '🔇 Muted', value: `${mins} minutes`, inline: true });
+      await message.author.send(`🔇 You were muted for **${mins} minutes** in **${message.guild.name}** for using a forbidden word.`).catch(() => {});
+    }
+
+    if (am.logChannel) {
+      const logCh = message.guild.channels.cache.get(am.logChannel);
+      if (logCh) await logCh.send({ embeds: [logEmbed] });
+    }
+  } catch (e) { console.error('Automod error:', e); }
 });
 
 // ════════════════════════════════════════════
@@ -688,8 +744,6 @@ client.on('interactionCreate', async interaction => {
         const del = await interaction.channel.bulkDelete(Math.min(interaction.options.getInteger('amount'), 100), true);
         return interaction.editReply({ content: `✅ Deleted **${del.size}** messages.` });
       }
-
-      // ── /close ──
       if (cmd === 'close') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const ch = interaction.channel;
@@ -707,16 +761,10 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `🔒 Ticket closed by **${interaction.user.tag}**. Deleting in 3 seconds...` });
         setTimeout(() => ch.delete().catch(() => {}), 3000);
       }
-
-      // ── /closerequest ──
       if (cmd === 'closerequest') {
         const ch = interaction.channel;
-        if (pendingCloseReqs.has(ch.id)) return interaction.reply({ content: '❌ A close request is already pending in this ticket.', ephemeral: true });
-        const embed = new EmbedBuilder()
-          .setTitle('🔒 Close Request')
-          .setDescription(`**${interaction.user.tag}** has requested to close this ticket.\n\nStaff can accept or deny below.`)
-          .setColor(0xFEE75C)
-          .setTimestamp();
+        if (pendingCloseReqs.has(ch.id)) return interaction.reply({ content: '❌ A close request is already pending.', ephemeral: true });
+        const embed = new EmbedBuilder().setTitle('🔒 Close Request').setDescription(`**${interaction.user.tag}** has requested to close this ticket.\n\nStaff can accept or deny below.`).setColor(0xFEE75C).setTimestamp();
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('closereq__accept').setLabel('Accept & Close').setStyle(ButtonStyle.Danger).setEmoji('✅'),
           new ButtonBuilder().setCustomId('closereq__deny').setLabel('Deny').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
@@ -724,28 +772,19 @@ client.on('interactionCreate', async interaction => {
         const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
         pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, messageId: msg.id });
       }
-
-      // ── /apply ──
       if (cmd === 'apply') {
         const ac = getApplicationConfig(guildId);
         const typeName = interaction.options.getString('type').toLowerCase().trim();
         const appType = ac.appTypes.find(t => t.label.toLowerCase() === typeName);
-        if (!appType) return interaction.reply({ content: `❌ No application type **${typeName}** found. Check available types with \`/apply\`.`, ephemeral: true });
+        if (!appType) return interaction.reply({ content: `❌ No application type **${typeName}** found.`, ephemeral: true });
         if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ This application type has no questions configured yet.', ephemeral: true });
-
         appPendingType.set(interaction.user.id, appType.id);
-
-        // Show modal with up to 5 questions
         const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
         for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
-          modal.addComponents(new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)
-          ));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)));
         }
         return interaction.showModal(modal);
       }
-
-      // ── /sendmessage ──
       if (cmd === 'sendmessage') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
@@ -760,11 +799,50 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Message **${msg.name}** sent in <#${ch.id}>!`, ephemeral: true });
       }
 
+      // ── /ban — deletes all messages and threads ──
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        await interaction.guild.members.ban(user, { reason });
-        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🔨 User Banned').setColor(0xED4245).addFields({ name: 'User', value: user.tag, inline: true }, { name: 'Reason', value: reason }).setTimestamp()] });
+        await interaction.deferReply();
+        let deletedMessages = 0;
+        let deletedThreads = 0;
+        try {
+          // Delete messages in all text channels
+          const channels = interaction.guild.channels.cache.filter(c => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement);
+          for (const [, ch] of channels) {
+            try {
+              const msgs = await ch.messages.fetch({ limit: 100 });
+              const userMsgs = msgs.filter(m => m.author.id === user.id);
+              if (userMsgs.size > 0) {
+                await ch.bulkDelete(userMsgs, true).catch(async () => {
+                  for (const [, m] of userMsgs) await m.delete().catch(() => {});
+                });
+                deletedMessages += userMsgs.size;
+              }
+            } catch {}
+          }
+          // Delete threads started by the user
+          const threads = interaction.guild.channels.cache.filter(c =>
+            c.type === ChannelType.PublicThread || c.type === ChannelType.PrivateThread || c.type === ChannelType.AnnouncementThread
+          );
+          for (const [, thread] of threads) {
+            try {
+              if (thread.ownerId === user.id) {
+                await thread.delete().catch(() => {});
+                deletedThreads++;
+              }
+            } catch {}
+          }
+        } catch (e) { console.error('Ban cleanup error:', e); }
+
+        await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: 604800 });
+        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🔨 User Banned').setColor(0xED4245).addFields(
+          { name: 'User', value: `${user.tag}`, inline: true },
+          { name: 'Reason', value: reason, inline: true },
+          { name: '🗑️ Messages deleted', value: `${deletedMessages}`, inline: true },
+          { name: '🧵 Threads deleted', value: `${deletedThreads}`, inline: true },
+        ).setTimestamp()] });
       }
+
       if (cmd === 'unban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const uid = interaction.options.getString('userid'); await interaction.guild.members.unban(uid, reason); return interaction.reply(`✅ **${uid}** unbanned.`);
@@ -783,8 +861,37 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'addrole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.add(role); return interaction.reply(`✅ Added **${role.name}** to **${user.tag}**.`); }
       if (cmd === 'removerole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.remove(role); return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`); }
       if (cmd === 'nickname') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const nick = interaction.options.getString('nickname') ?? null; await member.setNickname(nick); return interaction.reply(nick ? `✅ Nickname set to **${nick}**.` : `✅ Nickname reset.`); }
-      if (cmd === 'warnings') {
+
+      // ── /promote ──
+      if (cmd === 'promote') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const role = interaction.options.getRole('role');
+        if (member.roles.cache.has(role.id)) return interaction.reply({ content: `❌ **${user.tag}** already has **${role.name}**.`, ephemeral: true });
+        await member.roles.add(role, reason);
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬆️ User Promoted').setColor(0x57F287).addFields(
+          { name: '👤 User', value: `${user.tag}`, inline: true },
+          { name: '🎭 Role', value: role.name, inline: true },
+          { name: '📝 Reason', value: reason, inline: false },
+          { name: '👮 Promoted by', value: interaction.user.tag, inline: true },
+        ).setTimestamp()] });
+      }
+
+      // ── /demote ──
+      if (cmd === 'demote') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const role = interaction.options.getRole('role');
+        if (!member.roles.cache.has(role.id)) return interaction.reply({ content: `❌ **${user.tag}** does not have **${role.name}**.`, ephemeral: true });
+        await member.roles.remove(role, reason);
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬇️ User Demoted').setColor(0xED4245).addFields(
+          { name: '👤 User', value: `${user.tag}`, inline: true },
+          { name: '🎭 Role', value: role.name, inline: true },
+          { name: '📝 Reason', value: reason, inline: false },
+          { name: '👮 Demoted by', value: interaction.user.tag, inline: true },
+        ).setTimestamp()] });
+      }
+
+      if (cmd === 'warnings') {
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const warns = getWarnings(guildId, user.id);
         if (!warns.length) return interaction.reply({ content: `✅ No warnings.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] });
@@ -866,22 +973,21 @@ client.on('interactionCreate', async interaction => {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked.`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked from ERLC.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
       if (cmd === 'erlcban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
         const u = interaction.options.getString('username');
-        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned.`); }
+        try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned from ERLC.`); }
         catch (e) { return interaction.editReply(`❌ ${e.message}`); }
       }
-
       if (cmd === 'session') {
         if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
         const sc = getSessionConfig(guildId);
-        if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set.', ephemeral: true });
+        if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set. Use `/setup sessions`.', ephemeral: true });
         const sCh = interaction.guild.channels.cache.get(sc.channel);
         if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', ephemeral: true });
         await interaction.deferReply({ ephemeral: true });
@@ -910,7 +1016,6 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ content: '✅ Shutdown posted!' });
         }
       }
-
       if (cmd === 'setup') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
@@ -923,6 +1028,7 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'verification')  return interaction.reply(buildVerificationSetupPayload(guildId));
         if (sub === 'applications')  return interaction.reply(buildApplicationSetupPayload(guildId));
         if (sub === 'savedmessages') return interaction.reply(buildSavedMessagesPayload(guildId));
+        if (sub === 'automod')       return interaction.reply(buildAutomodSetupPayload(guildId));
       }
     }
 
@@ -930,7 +1036,30 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      // ── Close request accept/deny ──
+      // ── Automod setup ──
+      if (id.startsWith('am_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const am = getAutomodConfig(guildId);
+        if (id === 'am_toggle') { am.enabled = !am.enabled; saveConfig(config); return interaction.update(buildAutomodSetupPayload(guildId)); }
+        if (id === 'am_log') return interaction.reply({ content: '### 📋 Automod log channel', components: [channelDropdown('amd_log', 'Select channel...')], ephemeral: true });
+        if (id === 'am_keywords') {
+          const modal = new ModalBuilder().setCustomId('modal_am_keywords').setTitle('Edit Automod Keywords');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('am_kw').setLabel('Keywords (comma separated)').setStyle(TextInputStyle.Paragraph).setValue(am.keywords.join(', ')).setPlaceholder('badword1, badword2, badword3').setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (id === 'am_action') {
+          const modal = new ModalBuilder().setCustomId('modal_am_action').setTitle('Automod Action');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('am_act').setLabel('Action: delete / delete+warn / delete+mute').setStyle(TextInputStyle.Short).setValue(am.action || 'delete').setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('am_mute_mins').setLabel('Mute duration (minutes, for delete+mute)').setStyle(TextInputStyle.Short).setValue(String(am.muteMinutes ?? 5)).setRequired(false)),
+          );
+          return interaction.showModal(modal);
+        }
+      }
+
+      // ── Close request ──
       if (id === 'closereq__accept' || id === 'closereq__deny') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const ch = interaction.channel;
@@ -941,7 +1070,6 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Close Request Denied').setColor(0xED4245).setDescription(`**${interaction.user.tag}** denied the close request.`).setTimestamp()], components: [] });
           return;
         }
-        // Accept
         pendingCloseReqs.delete(ch.id);
         const tc = getTicketConfig(guildId);
         if (tc.transcriptChannel) {
@@ -967,9 +1095,9 @@ client.on('interactionCreate', async interaction => {
         if (id === 'ap_add_type') {
           const modal = new ModalBuilder().setCustomId('modal_ap_add_type').setTitle('Add Application Type');
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name (e.g. Staff Application)').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 5)').setStyle(TextInputStyle.Paragraph).setPlaceholder('Why do you want to join?\nHow old are you?\nWhat is your timezone?').setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 5)').setStyle(TextInputStyle.Paragraph).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_accept_role').setLabel('Role ID to give on accept (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
           );
           return interaction.showModal(modal);
@@ -990,20 +1118,18 @@ client.on('interactionCreate', async interaction => {
             const chunk = ac.appTypes.slice(i, i + 5);
             rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`app__open__${t.id}`).setLabel(t.label.slice(0, 80)).setStyle(ButtonStyle.Primary), t.emoji))));
           }
-          // Deploy in the review channel or a dedicated application channel
-          // For simplicity we send the panel to the review channel
           await ch.send({ embeds: [embed], components: rows });
           return interaction.reply({ content: `✅ Application panel deployed in <#${ac.reviewChannel}>!`, ephemeral: true });
         }
       }
 
-      // ── Application open button (user clicks panel) ──
+      // ── Application open ──
       if (id.startsWith('app__open__')) {
         const typeId = id.replace('app__open__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Application type no longer exists.', ephemeral: true });
-        if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ No questions configured for this type.', ephemeral: true });
+        if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ No questions configured.', ephemeral: true });
         appPendingType.set(interaction.user.id, appType.id);
         const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
         for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
@@ -1015,52 +1141,34 @@ client.on('interactionCreate', async interaction => {
       // ── Application accept/deny ──
       if (id.startsWith('app__accept__') || id.startsWith('app__deny__')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const parts = id.split('__');
-        const action = parts[1]; // 'accept' or 'deny'
-        const applicantId = parts[2];
-        const typeId = parts[3];
+        const parts = id.split('__'); const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
-
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
-
         if (action === 'accept') {
-          if (appType?.acceptRole && applicant) {
-            const role = interaction.guild.roles.cache.get(appType.acceptRole);
-            if (role) await applicant.roles.add(role).catch(() => {});
-          }
+          if (appType?.acceptRole && applicant) { const role = interaction.guild.roles.cache.get(appType.acceptRole); if (role) await applicant.roles.add(role).catch(() => {}); }
           await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).setDescription(`**${interaction.user.tag}** accepted this application.`).setTimestamp()], components: [] });
-          if (applicant) {
-            await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287).setDescription(`Your **${appType?.label ?? 'application'}** has been **accepted**!\n\nWelcome to the team! 🎉`).setTimestamp()] }).catch(() => {});
-          }
-          if (ac.logChannel) {
-            const logCh = interaction.guild.channels.cache.get(ac.logChannel);
-            if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: interaction.user.tag, inline: true }).setTimestamp()] });
-          }
+          if (applicant) await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287).setDescription(`Your **${appType?.label ?? 'application'}** has been **accepted**!\n\nWelcome to the team! 🎉`).setTimestamp()] }).catch(() => {});
+          if (ac.logChannel) { const logCh = interaction.guild.channels.cache.get(ac.logChannel); if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: interaction.user.tag, inline: true }).setTimestamp()] }); }
         } else {
           await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`**${interaction.user.tag}** denied this application.`).setTimestamp()], components: [] });
-          if (applicant) {
-            await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`Your **${appType?.label ?? 'application'}** has been **denied**.\n\nYou may try again in the future.`).setTimestamp()] }).catch(() => {});
-          }
-          if (ac.logChannel) {
-            const logCh = interaction.guild.channels.cache.get(ac.logChannel);
-            if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }).setTimestamp()] });
-          }
+          if (applicant) await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`Your **${appType?.label ?? 'application'}** has been **denied**.\n\nYou may try again in the future.`).setTimestamp()] }).catch(() => {});
+          if (ac.logChannel) { const logCh = interaction.guild.channels.cache.get(ac.logChannel); if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }).setTimestamp()] }); }
         }
         return;
       }
 
-      // ── Saved messages setup ──
+      // ── Saved messages ──
       if (id.startsWith('sm_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
         if (id === 'sm_new') {
           const modal = new ModalBuilder().setCustomId('modal_sm_new').setTitle('New Saved Message');
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_name').setLabel('Name (used in /sendmessage)').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_name').setLabel('Name').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_desc').setLabel('Description (supports {server}, {time})').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_color').setLabel('Color hex (e.g. #5865F2)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sm_image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
           );
           return interaction.showModal(modal);
@@ -1328,7 +1436,7 @@ client.on('interactionCreate', async interaction => {
         const typeId = id.replace('tkt__open__', '');
         const tc = getTicketConfig(guildId);
         const type = tc.ticketTypes.find(t => t.id === typeId);
-        if (!type) return interaction.reply({ content: '❌ Ticket type gone.', ephemeral: true });
+        if (!type) return interaction.reply({ content: '❌ Ticket type not found.', ephemeral: true });
         if (openTickets.has(interaction.user.id)) {
           const existing = interaction.guild.channels.cache.get(openTickets.get(interaction.user.id));
           if (existing) return interaction.reply({ content: `❌ You already have a ticket: <#${existing.id}>`, ephemeral: true });
@@ -1336,10 +1444,11 @@ client.on('interactionCreate', async interaction => {
         }
         await interaction.deferReply({ ephemeral: true });
         const category = tc.ticketCategory ? interaction.guild.channels.cache.get(tc.ticketCategory) : null;
-        const shrRole = interaction.guild.roles.cache.find(r => r.name === SHR_ROLE);
-        const perms = [{ id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] }, { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }];
-        if (shrRole) perms.push({ id: shrRole.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-        for (const rid of tc.pingRoles) { if (!shrRole || rid !== shrRole.id) perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }); }
+        const perms = [
+          { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
+          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+        ];
+        for (const rid of tc.pingRoles) { perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }); }
         const ticketCh = await interaction.guild.channels.create({ name: `ticket-${type.label.toLowerCase().replace(/\s+/g, '-')}-${interaction.user.username}`, type: ChannelType.GuildText, parent: category ?? null, permissionOverwrites: perms, topic: `Ticket by ${interaction.user.tag} | ${type.label}` });
         openTickets.set(interaction.user.id, ticketCh.id);
         const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag };
@@ -1424,6 +1533,7 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'sd_channel')     { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'apd_review_channel') { getApplicationConfig(guildId).reviewChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Review channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'apd_log_channel')    { getApplicationConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'amd_log')        { getAutomodConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Automod log: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId.startsWith('anch__')) { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
       if (interaction.customId.startsWith('srch__')) { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
     }
@@ -1431,11 +1541,11 @@ client.on('interactionCreate', async interaction => {
     // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId; const val = interaction.values[0];
-      if (id === 'ard_remove') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
-      if (id === 'apd_remove_type') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const ac = getApplicationConfig(guildId); ac.appTypes = ac.appTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Application type removed.', ephemeral: true }); }
-      if (id === 'smd_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; saveConfig(config); return interaction.reply({ content: '✅ Saved message deleted.', ephemeral: true }); }
+      if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      if (id === 'ard_remove') { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
+      if (id === 'apd_remove_type') { const ac = getApplicationConfig(guildId); ac.appTypes = ac.appTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Application type removed.', ephemeral: true }); }
+      if (id === 'smd_delete') { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; saveConfig(config); return interaction.reply({ content: '✅ Saved message deleted.', ephemeral: true }); }
       if (id === 'smd_edit') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId); const msg = sm.messages[val];
         if (!msg) return interaction.reply({ content: '❌ Message not found.', ephemeral: true });
         const modal = new ModalBuilder().setCustomId(`modal_sm_edit__${val}`).setTitle(`Edit — ${msg.name}`);
@@ -1448,12 +1558,12 @@ client.on('interactionCreate', async interaction => {
         );
         return interaction.showModal(modal);
       }
-      if (id === 'an_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildAnnouncementEditor(guildId, val)); }
-      if (id === 'an_sel_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); delete getAnnouncementConfig(guildId).types[val]; saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
-      if (id === 'sr_sel_edit')   { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); return interaction.update(buildPanelEditor(guildId, val)); }
-      if (id === 'sr_sel_delete') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); delete getSelfRoleConfig(guildId).panels[val]; saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
-      if (id.startsWith('sr_sel_rmrole__')) { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
-      if (id === 'td_remove_type') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
+      if (id === 'an_sel_edit')   { return interaction.update(buildAnnouncementEditor(guildId, val)); }
+      if (id === 'an_sel_delete') { delete getAnnouncementConfig(guildId).types[val]; saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
+      if (id === 'sr_sel_edit')   { return interaction.update(buildPanelEditor(guildId, val)); }
+      if (id === 'sr_sel_delete') { delete getSelfRoleConfig(guildId).panels[val]; saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
+      if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
+      if (id === 'td_remove_type') { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
       if (id.startsWith('srp__dd__')) {
         const panelId = id.replace('srp__dd__', '');
         const src = getSelfRoleConfig(guildId); const panel = src.panels[panelId];
@@ -1470,45 +1580,40 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
-      // ── Application submission ──
+      // ── Automod modals ──
+      if (mid === 'modal_am_keywords') {
+        const am = getAutomodConfig(guildId);
+        const raw = interaction.fields.getTextInputValue('am_kw').trim();
+        am.keywords = raw ? raw.split(',').map(k => k.trim().toLowerCase()).filter(Boolean) : [];
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Keywords updated! **${am.keywords.length}** keyword(s) set.`, ephemeral: true });
+      }
+      if (mid === 'modal_am_action') {
+        const am = getAutomodConfig(guildId);
+        const act = interaction.fields.getTextInputValue('am_act').trim().toLowerCase();
+        const mins = parseInt(interaction.fields.getTextInputValue('am_mute_mins').trim(), 10);
+        if (!['delete', 'delete+warn', 'delete+mute'].includes(act)) return interaction.reply({ content: '❌ Invalid action. Use: `delete`, `delete+warn`, or `delete+mute`.', ephemeral: true });
+        am.action = act;
+        if (!isNaN(mins) && mins > 0) am.muteMinutes = mins;
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Action set to **${act}**${act === 'delete+mute' ? ` (${am.muteMinutes} minutes)` : ''}.`, ephemeral: true });
+      }
+
       if (mid.startsWith('modal_apply__')) {
         await interaction.deferReply({ ephemeral: true });
         const typeId = mid.replace('modal_apply__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.editReply({ content: '❌ Application type not found.' });
-        if (!ac.reviewChannel) return interaction.editReply({ content: '❌ No review channel set. Contact an admin.' });
+        if (!ac.reviewChannel) return interaction.editReply({ content: '❌ No review channel set.' });
         const reviewCh = interaction.guild.channels.cache.get(ac.reviewChannel);
         if (!reviewCh) return interaction.editReply({ content: '❌ Review channel not found.' });
-
-        const answers = appType.questions.slice(0, 5).map((q, i) => {
-          const ans = interaction.fields.getTextInputValue(`q${i}`).trim();
-          return { name: `❓ ${q.slice(0, 250)}`, value: ans.slice(0, 1024) || '*No answer*', inline: false };
-        });
-
-        const embed = new EmbedBuilder()
-          .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
-          .setColor(0x5865F2)
-          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
-          .addFields(
-            { name: '👤 Applicant', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true },
-            { name: '🆔 User ID', value: interaction.user.id, inline: true },
-            { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
-            ...answers,
-          )
-          .setTimestamp()
-          .setFooter({ text: `Application ID: ${genId()}` });
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`app__accept__${interaction.user.id}__${typeId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`app__deny__${interaction.user.id}__${typeId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
-        );
-
+        const answers = appType.questions.slice(0, 5).map((q, i) => { const ans = interaction.fields.getTextInputValue(`q${i}`).trim(); return { name: `❓ ${q.slice(0, 250)}`, value: ans.slice(0, 1024) || '*No answer*', inline: false }; });
+        const embed = new EmbedBuilder().setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`).setColor(0x5865F2).setThumbnail(interaction.user.displayAvatarURL({ dynamic: true })).addFields({ name: '👤 Applicant', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true }, { name: '🆔 User ID', value: interaction.user.id, inline: true }, { name: '📅 Submitted', value: new Date().toUTCString(), inline: false }, ...answers).setTimestamp().setFooter({ text: `Application ID: ${genId()}` });
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`app__accept__${interaction.user.id}__${typeId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`app__deny__${interaction.user.id}__${typeId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger));
         await reviewCh.send({ embeds: [embed], components: [row] });
-        return interaction.editReply({ content: `✅ Your **${appType.label}** application has been submitted! You will be notified when it is reviewed.` });
+        return interaction.editReply({ content: `✅ Your **${appType.label}** application has been submitted!` });
       }
-
-      // ── Add application type ──
       if (mid === 'modal_ap_add_type') {
         const ac = getApplicationConfig(guildId);
         const label = interaction.fields.getTextInputValue('ap_label').trim();
@@ -1516,52 +1621,34 @@ client.on('interactionCreate', async interaction => {
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
         const acceptRole = interaction.fields.getTextInputValue('ap_accept_role').trim() || null;
         const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 5);
-        if (!questions.length) return interaction.reply({ content: '❌ At least one question is required.', ephemeral: true });
+        if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         ac.appTypes.push({ id: genId(), label, emoji, questions, acceptRole });
         saveConfig(config);
-        return interaction.reply({ content: `✅ Application type **${label}** added with **${questions.length}** question(s)!`, ephemeral: true });
+        return interaction.reply({ content: `✅ Application type **${label}** added!`, ephemeral: true });
       }
-
-      // ── New saved message ──
       if (mid === 'modal_sm_new') {
         const sm = getSavedMessagesConfig(guildId);
         const name = interaction.fields.getTextInputValue('sm_name').trim();
         if (Object.values(sm.messages).some(m => m.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ A message named **${name}** already exists.`, ephemeral: true });
         const mid2 = genId();
-        sm.messages[mid2] = {
-          name,
-          title: interaction.fields.getTextInputValue('sm_title').trim(),
-          description: interaction.fields.getTextInputValue('sm_desc').trim(),
-          color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2',
-          image: interaction.fields.getTextInputValue('sm_image').trim() || null,
-          footer: null,
-          pingRole: null,
-        };
+        sm.messages[mid2] = { name, title: interaction.fields.getTextInputValue('sm_title').trim(), description: interaction.fields.getTextInputValue('sm_desc').trim(), color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2', image: interaction.fields.getTextInputValue('sm_image').trim() || null, footer: null, pingRole: null };
         saveConfig(config);
-        return interaction.reply({ content: `✅ Saved message **${name}** created! Use \`/sendmessage ${name} #channel\` to send it.`, ephemeral: true });
+        return interaction.reply({ content: `✅ Saved message **${name}** created!`, ephemeral: true });
       }
-
-      // ── Edit saved message ──
       if (mid.startsWith('modal_sm_edit__')) {
         const msgId = mid.replace('modal_sm_edit__', '');
-        const sm = getSavedMessagesConfig(guildId);
-        const msg = sm.messages[msgId];
+        const sm = getSavedMessagesConfig(guildId); const msg = sm.messages[msgId];
         if (!msg) return interaction.reply({ content: '❌ Message not found.', ephemeral: true });
         const t = interaction.fields.getTextInputValue('sm_title').trim(); const d = interaction.fields.getTextInputValue('sm_desc').trim(); const c = interaction.fields.getTextInputValue('sm_color').trim(); const im = interaction.fields.getTextInputValue('sm_image').trim(); const f = interaction.fields.getTextInputValue('sm_footer').trim();
         if (t) msg.title = t; if (d) msg.description = d; if (c) msg.color = c; msg.image = im || null; msg.footer = f || null;
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Saved message **${msg.name}** updated!`, ephemeral: true });
+        saveConfig(config); return interaction.reply({ content: `✅ Saved message updated!`, ephemeral: true });
       }
-
-      // ── Welcomer ──
       if (mid === 'modal_wc_content') {
         const wc = getWelcomerConfig(guildId);
         const t = interaction.fields.getTextInputValue('wc_title').trim(); const d = interaction.fields.getTextInputValue('wc_desc').trim(); const c = interaction.fields.getTextInputValue('wc_color').trim(); const im = interaction.fields.getTextInputValue('wc_image').trim(); const f = interaction.fields.getTextInputValue('wc_footer').trim();
         if (t) wc.title = t; if (d) wc.description = d; if (c) wc.color = c; wc.image = im || null; wc.footer = f || null;
         saveConfig(config); return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
       }
-
-      // ── Verification ──
       if (mid === 'modal_vc_content') {
         const vc = getVerificationConfig(guildId);
         const t = interaction.fields.getTextInputValue('vc_title').trim(); const d = interaction.fields.getTextInputValue('vc_desc').trim(); const c = interaction.fields.getTextInputValue('vc_color').trim(); const im = interaction.fields.getTextInputValue('vc_image').trim();
@@ -1581,8 +1668,6 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields({ name: '🎮 Roblox', value: robloxUser.name, inline: true }, { name: '🆔 ID', value: `${robloxUser.id}`, inline: true }, { name: '📛 Nickname', value: `\`${nickname}\``, inline: false }).setTimestamp()] });
         } catch (e) { return interaction.editReply({ content: `❌ Verification failed. Try again later.` }); }
       }
-
-      // ── Ticket ──
       if (mid === 'modal_t_embed') {
         const tc = getTicketConfig(guildId);
         const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim();
@@ -1595,8 +1680,6 @@ client.on('interactionCreate', async interaction => {
         tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null });
         saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true });
       }
-
-      // ── Session ──
       if (mid === 'modal_s_joinlink') {
         const rawLink = interaction.fields.getTextInputValue('s_link_val').trim();
         if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true });
@@ -1619,8 +1702,6 @@ client.on('interactionCreate', async interaction => {
         if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number between 1 and 999.', ephemeral: true });
         getSessionConfig(guildId).voteThreshold = num; saveConfig(config); return interaction.reply({ content: `✅ Vote threshold set to **${num}**.`, ephemeral: true });
       }
-
-      // ── Announcement ──
       if (mid === 'modal_an_new') {
         const ac = getAnnouncementConfig(guildId);
         const name = interaction.fields.getTextInputValue('an_name').trim();
@@ -1637,8 +1718,6 @@ client.on('interactionCreate', async interaction => {
         if (title) t.title = title; if (desc) t.description = desc; if (color) t.color = color; if (image) t.image = image; if (emoji) t.emoji = emoji;
         saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
       }
-
-      // ── Selfrole ──
       if (mid === 'modal_sr_new') {
         const src = getSelfRoleConfig(guildId);
         const type = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
