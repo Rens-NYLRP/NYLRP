@@ -73,7 +73,6 @@ function getSavedMessagesConfig(guildId) {
   if (!gc.savedMessages) gc.savedMessages = { messages: {} };
   return gc.savedMessages;
 }
-// ── NEW: Automod config ──
 function getAutomodConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.automod) gc.automod = { enabled: false, keywords: [], logChannel: null, action: 'delete', muteMinutes: 5 };
@@ -109,6 +108,10 @@ const srPendingRoleAdd = new Map();
 const activeVotes      = new Map();
 const pendingCloseReqs = new Map();
 const appPendingType   = new Map();
+
+// ─── Stores the target channel for deferred /announce and /sendmessage selections ───
+const pendingAnnounceChannel = new Map(); // userId -> channelId
+const pendingSendMsgChannel  = new Map(); // userId -> channelId
 
 // ════════════════════════════════════════════
 // UTILS
@@ -223,7 +226,7 @@ function buildSavedMessagesPayload(guildId) {
   const msgs = Object.entries(sm.messages);
   const embed = new EmbedBuilder()
     .setTitle('💾 Saved Messages').setColor(0x57F287)
-    .setDescription(['Save messages you send often. Use `/sendmessage <name>` to send one.', '', msgs.length ? msgs.map(([, m]) => `**${m.emoji || '📨'} ${m.name}**`).join('\n') : '*No saved messages yet.*'].join('\n'));
+    .setDescription(['Save messages you send often. Use `/sendmessage` to send one.', '', msgs.length ? msgs.map(([, m]) => `**${m.emoji || '📨'} ${m.name}**`).join('\n') : '*No saved messages yet.*'].join('\n'));
   const btns = [new ButtonBuilder().setCustomId('sm_new').setLabel('New Message').setStyle(ButtonStyle.Success).setEmoji('➕')];
   if (msgs.length) { btns.push(new ButtonBuilder().setCustomId('sm_edit').setLabel('Edit').setStyle(ButtonStyle.Primary).setEmoji('✏️'), new ButtonBuilder().setCustomId('sm_delete').setLabel('Delete').setStyle(ButtonStyle.Danger).setEmoji('🗑️')); }
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], ephemeral: true };
@@ -453,10 +456,8 @@ const commands = [
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
   { name: 'apply', description: 'Submit an application', options: [{ name: 'type', type: 3, description: 'Application type', required: true }] },
-  { name: 'sendmessage', description: '[SHR] Send a saved message to a channel', options: [
-    { name: 'name', type: 3, description: 'Saved message name', required: true },
-    { name: 'channel', type: 7, description: 'Channel to send to', required: true },
-  ]},
+  // /sendmessage — no longer takes name/channel args; uses a selection menu instead
+  { name: 'sendmessage', description: '[SHR] Send a saved message to this channel' },
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
@@ -470,7 +471,6 @@ const commands = [
   { name: 'addrole', description: '[SHR] Add role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'removerole', description: '[SHR] Remove role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
-  // ── NEW: Promote & Demote ──
   { name: 'promote', description: '[SHR] Promote a user to a role', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'role', type: 8, description: 'Role to promote to', required: true },
@@ -485,7 +485,8 @@ const commands = [
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
   { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'announce', description: '[SHR] Send announcement', options: [{ name: 'type', type: 3, description: 'Type name', required: true }, { name: 'message', type: 3, description: 'Extra message', required: false }] },
+  // /announce — no args; uses a selection menu in the current channel
+  { name: 'announce', description: '[SHR] Send an announcement to this channel' },
   { name: 'embed', description: '[SHR] Send custom embed', options: [
     { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'title', type: 3, description: 'Title', required: true },
     { name: 'description', type: 3, description: 'Description', required: true }, { name: 'color', type: 3, description: 'Hex color', required: false },
@@ -537,7 +538,6 @@ client.on('messageCreate', async message => {
   const am = getAutomodConfig(guildId);
   if (!am.enabled || !am.keywords.length) return;
 
-  // Staff bypass automod
   const member = message.member;
   if (!member) return;
   if (hasAnyStaff(member) || member.permissions.has(PermissionFlagsBits.Administrator)) return;
@@ -785,18 +785,30 @@ client.on('interactionCreate', async interaction => {
         }
         return interaction.showModal(modal);
       }
+
+      // ── /sendmessage — show selection menu, send to current channel ──
       if (cmd === 'sendmessage') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
-        const name = interaction.options.getString('name').toLowerCase().trim();
-        const ch = interaction.options.getChannel('channel');
-        const msg = Object.values(sm.messages).find(m => m.name.toLowerCase() === name);
-        if (!msg) return interaction.reply({ content: `❌ No saved message named **${name}**.`, ephemeral: true });
-        const embed = new EmbedBuilder().setTitle(msg.title).setDescription(msg.description).setColor(hexToInt(msg.color));
-        if (msg.image) embed.setImage(msg.image);
-        if (msg.footer) embed.setFooter({ text: msg.footer });
-        await ch.send({ content: msg.pingRole ? `<@&${msg.pingRole}>` : undefined, embeds: [embed] });
-        return interaction.reply({ content: `✅ Message **${msg.name}** sent in <#${ch.id}>!`, ephemeral: true });
+        const msgs = Object.entries(sm.messages);
+        if (!msgs.length) return interaction.reply({ content: '❌ No saved messages yet. Use `/setup savedmessages` to create some.', ephemeral: true });
+        // Store the current channel so we know where to send after selection
+        pendingSendMsgChannel.set(interaction.user.id, interaction.channel.id);
+        const options = msgs.slice(0, 25).map(([mid, m]) => ({
+          label: m.name.slice(0, 100),
+          value: mid,
+          description: (m.title || '').slice(0, 100) || undefined,
+          emoji: m.emoji || undefined,
+        }));
+        const sel = new StringSelectMenuBuilder()
+          .setCustomId('sendmsg_pick')
+          .setPlaceholder('Select a saved message to send...')
+          .addOptions(options);
+        return interaction.reply({
+          content: `### 📨 Select a message to send in <#${interaction.channel.id}>`,
+          components: [new ActionRowBuilder().addComponents(sel)],
+          ephemeral: true,
+        });
       }
 
       // ── /ban — deletes all messages and threads ──
@@ -806,7 +818,6 @@ client.on('interactionCreate', async interaction => {
         let deletedMessages = 0;
         let deletedThreads = 0;
         try {
-          // Delete messages in all text channels
           const channels = interaction.guild.channels.cache.filter(c => c.type === ChannelType.GuildText || c.type === ChannelType.GuildAnnouncement);
           for (const [, ch] of channels) {
             try {
@@ -820,7 +831,6 @@ client.on('interactionCreate', async interaction => {
               }
             } catch {}
           }
-          // Delete threads started by the user
           const threads = interaction.guild.channels.cache.filter(c =>
             c.type === ChannelType.PublicThread || c.type === ChannelType.PrivateThread || c.type === ChannelType.AnnouncementThread
           );
@@ -862,7 +872,6 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'removerole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.remove(role); return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`); }
       if (cmd === 'nickname') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const nick = interaction.options.getString('nickname') ?? null; await member.setNickname(nick); return interaction.reply(nick ? `✅ Nickname set to **${nick}**.` : `✅ Nickname reset.`); }
 
-      // ── /promote ──
       if (cmd === 'promote') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const role = interaction.options.getRole('role');
@@ -876,7 +885,6 @@ client.on('interactionCreate', async interaction => {
         ).setTimestamp()] });
       }
 
-      // ── /demote ──
       if (cmd === 'demote') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const role = interaction.options.getRole('role');
@@ -904,23 +912,31 @@ client.on('interactionCreate', async interaction => {
         if (!notes.length) return interaction.reply({ content: `📝 No notes.`, ephemeral: true });
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2).setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text} — *${n.moderator}*`).join('\n'))] });
       }
+
+      // ── /announce — show selection menu, send to current channel ──
       if (cmd === 'announce') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
-        const typeName = interaction.options.getString('type').toLowerCase().trim();
-        const extraMsg = interaction.options.getString('message') ?? null;
         const ac = getAnnouncementConfig(guildId);
-        const entry = Object.entries(ac.types).find(([, t]) => t.name.toLowerCase() === typeName);
-        if (!entry) return interaction.reply({ content: `❌ No type **${typeName}** found.`, ephemeral: true });
-        const [, t] = entry;
-        if (!t.channel) return interaction.reply({ content: '❌ No channel set.', ephemeral: true });
-        const ch = interaction.guild.channels.cache.get(t.channel);
-        if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
-        const embed = new EmbedBuilder().setTitle(`${t.emoji || '📢'} ${t.title || t.name}`).setDescription(extraMsg ? `${t.description || ''}\n\n${extraMsg}`.trim() : (t.description || '*No description*')).setColor(hexToInt(t.color)).setFooter({ text: `By ${interaction.user.tag}` }).setTimestamp();
-        if (t.image) embed.setImage(t.image);
-        await ch.send({ content: t.pingRole ? `<@&${t.pingRole}>` : undefined, embeds: [embed] });
-        return interaction.editReply({ content: `✅ Sent in <#${t.channel}>!` });
+        const types = Object.entries(ac.types);
+        if (!types.length) return interaction.reply({ content: '❌ No announcement types configured. Use `/setup announcements`.', ephemeral: true });
+        // Store the current channel
+        pendingAnnounceChannel.set(interaction.user.id, interaction.channel.id);
+        const options = types.slice(0, 25).map(([tid, t]) => ({
+          label: `${t.emoji ? t.emoji + ' ' : ''}${t.name}`.slice(0, 100),
+          value: tid,
+          description: (t.title || '').slice(0, 100) || undefined,
+        }));
+        const sel = new StringSelectMenuBuilder()
+          .setCustomId('announce_pick')
+          .setPlaceholder('Select an announcement type...')
+          .addOptions(options);
+        return interaction.reply({
+          content: `### 📣 Select announcement type to send in <#${interaction.channel.id}>`,
+          components: [new ActionRowBuilder().addComponents(sel)],
+          ephemeral: true,
+        });
       }
+
       if (cmd === 'embed') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ch = interaction.options.getChannel('channel');
@@ -1541,6 +1557,48 @@ client.on('interactionCreate', async interaction => {
     // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId; const val = interaction.values[0];
+
+      // ── announce_pick — user selected an announcement type ──
+      if (id === 'announce_pick') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const ac = getAnnouncementConfig(guildId);
+        const t = ac.types[val];
+        if (!t) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
+        // Get the stored target channel (where command was used)
+        const targetChannelId = pendingAnnounceChannel.get(interaction.user.id);
+        pendingAnnounceChannel.delete(interaction.user.id);
+        const targetCh = targetChannelId ? interaction.guild.channels.cache.get(targetChannelId) : interaction.channel;
+        if (!targetCh) return interaction.reply({ content: '❌ Target channel not found.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        const embed = new EmbedBuilder()
+          .setTitle(`${t.emoji || '📢'} ${t.title || t.name}`)
+          .setDescription(t.description || '*No description*')
+          .setColor(hexToInt(t.color))
+          .setFooter({ text: `By ${interaction.user.tag}` })
+          .setTimestamp();
+        if (t.image) embed.setImage(t.image);
+        await targetCh.send({ content: t.pingRole ? `<@&${t.pingRole}>` : undefined, embeds: [embed] });
+        return interaction.editReply({ content: `✅ Announcement **${t.name}** sent in <#${targetCh.id}>!` });
+      }
+
+      // ── sendmsg_pick — user selected a saved message ──
+      if (id === 'sendmsg_pick') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const sm = getSavedMessagesConfig(guildId);
+        const msg = sm.messages[val];
+        if (!msg) return interaction.reply({ content: '❌ Saved message not found.', ephemeral: true });
+        // Get the stored target channel (where command was used)
+        const targetChannelId = pendingSendMsgChannel.get(interaction.user.id);
+        pendingSendMsgChannel.delete(interaction.user.id);
+        const targetCh = targetChannelId ? interaction.guild.channels.cache.get(targetChannelId) : interaction.channel;
+        if (!targetCh) return interaction.reply({ content: '❌ Target channel not found.', ephemeral: true });
+        const embed = new EmbedBuilder().setTitle(msg.title).setDescription(msg.description).setColor(hexToInt(msg.color));
+        if (msg.image) embed.setImage(msg.image);
+        if (msg.footer) embed.setFooter({ text: msg.footer });
+        await targetCh.send({ content: msg.pingRole ? `<@&${msg.pingRole}>` : undefined, embeds: [embed] });
+        return interaction.reply({ content: `✅ Message **${msg.name}** sent in <#${targetCh.id}>!`, ephemeral: true });
+      }
+
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       if (id === 'ard_remove') { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
       if (id === 'apd_remove_type') { const ac = getApplicationConfig(guildId); ac.appTypes = ac.appTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Application type removed.', ephemeral: true }); }
@@ -1580,7 +1638,6 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
-      // ── Automod modals ──
       if (mid === 'modal_am_keywords') {
         const am = getAutomodConfig(guildId);
         const raw = interaction.fields.getTextInputValue('am_kw').trim();
@@ -1591,7 +1648,8 @@ client.on('interactionCreate', async interaction => {
       if (mid === 'modal_am_action') {
         const am = getAutomodConfig(guildId);
         const act = interaction.fields.getTextInputValue('am_act').trim().toLowerCase();
-        const mins = parseInt(interaction.fields.getTextInputValue('am_mute_mins').trim(), 10);
+        const minsRaw = interaction.fields.getTextInputValue('am_mute_mins').trim();
+        const mins = parseInt(minsRaw, 10);
         if (!['delete', 'delete+warn', 'delete+mute'].includes(act)) return interaction.reply({ content: '❌ Invalid action. Use: `delete`, `delete+warn`, or `delete+mute`.', ephemeral: true });
         am.action = act;
         if (!isNaN(mins) && mins > 0) am.muteMinutes = mins;
@@ -1630,8 +1688,8 @@ client.on('interactionCreate', async interaction => {
         const sm = getSavedMessagesConfig(guildId);
         const name = interaction.fields.getTextInputValue('sm_name').trim();
         if (Object.values(sm.messages).some(m => m.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ A message named **${name}** already exists.`, ephemeral: true });
-        const mid2 = genId();
-        sm.messages[mid2] = { name, title: interaction.fields.getTextInputValue('sm_title').trim(), description: interaction.fields.getTextInputValue('sm_desc').trim(), color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2', image: interaction.fields.getTextInputValue('sm_image').trim() || null, footer: null, pingRole: null };
+        const newId = genId();
+        sm.messages[newId] = { name, title: interaction.fields.getTextInputValue('sm_title').trim(), description: interaction.fields.getTextInputValue('sm_desc').trim(), color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2', image: interaction.fields.getTextInputValue('sm_image').trim() || null, footer: null, pingRole: null };
         saveConfig(config);
         return interaction.reply({ content: `✅ Saved message **${name}** created!`, ephemeral: true });
       }
