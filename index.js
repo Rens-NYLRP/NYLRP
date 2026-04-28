@@ -20,6 +20,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences, // needed for online count
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
@@ -79,6 +80,158 @@ function getAutomodConfig(guildId) {
   return gc.automod;
 }
 
+// ════════════════════════════════════════════
+// COUNTER CONFIG
+// ════════════════════════════════════════════
+function getCounterConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.counters) gc.counters = {
+    enabled: false,
+    categoryId: null,
+    channels: {
+      members:  { enabled: true,  channelId: null, label: '👥 Members: {count}' },
+      bots:     { enabled: true,  channelId: null, label: '🤖 Bots: {count}' },
+      online:   { enabled: true,  channelId: null, label: '🟢 Online: {count}' },
+      channels: { enabled: true,  channelId: null, label: '💬 Channels: {count}' },
+      roles:    { enabled: true,  channelId: null, label: '🎭 Roles: {count}' },
+    }
+  };
+  return gc.counters;
+}
+
+// ════════════════════════════════════════════
+// COUNTER LOGIC
+// ════════════════════════════════════════════
+async function getCounterValue(guild, type) {
+  switch (type) {
+    case 'members': {
+      await guild.members.fetch();
+      return guild.members.cache.filter(m => !m.user.bot).size;
+    }
+    case 'bots': {
+      await guild.members.fetch();
+      return guild.members.cache.filter(m => m.user.bot).size;
+    }
+    case 'online': {
+      await guild.members.fetch();
+      return guild.members.cache.filter(m => !m.user.bot && m.presence && ['online', 'idle', 'dnd'].includes(m.presence.status)).size;
+    }
+    case 'channels':
+      return guild.channels.cache.filter(c => c.type !== ChannelType.GuildCategory).size;
+    case 'roles':
+      return guild.roles.cache.size - 1; // exclude @everyone
+    default:
+      return 0;
+  }
+}
+
+async function updateCounters(guild) {
+  const cc = getCounterConfig(guild.id);
+  if (!cc.enabled) return;
+
+  for (const [type, cfg] of Object.entries(cc.channels)) {
+    if (!cfg.enabled || !cfg.channelId) continue;
+    try {
+      const channel = guild.channels.cache.get(cfg.channelId);
+      if (!channel) continue;
+      const count = await getCounterValue(guild, type);
+      const newName = cfg.label.replace('{count}', count);
+      if (channel.name !== newName) {
+        await channel.setName(newName).catch(() => {});
+      }
+    } catch (e) {
+      console.error(`Counter update error [${type}]:`, e);
+    }
+  }
+}
+
+async function createCounterChannel(guild, type, cc) {
+  const cfg = cc.channels[type];
+  const count = await getCounterValue(guild, type);
+  const name = cfg.label.replace('{count}', count);
+  const opts = {
+    name,
+    type: ChannelType.GuildVoice,
+    permissionOverwrites: [
+      { id: guild.roles.everyone, deny: [PermissionFlagsBits.Connect] },
+    ],
+  };
+  if (cc.categoryId) opts.parent = cc.categoryId;
+  const ch = await guild.channels.create(opts);
+  cfg.channelId = ch.id;
+  return ch;
+}
+
+async function deleteCounterChannel(guild, type, cc) {
+  const cfg = cc.channels[type];
+  if (!cfg.channelId) return;
+  const ch = guild.channels.cache.get(cfg.channelId);
+  if (ch) await ch.delete().catch(() => {});
+  cfg.channelId = null;
+}
+
+// Update all guilds every 5 minutes
+// Discord rate-limits channel renames to 2/10min per channel, so 5 min is safe
+setInterval(async () => {
+  for (const guild of client.guilds.cache.values()) {
+    await updateCounters(guild).catch(console.error);
+  }
+}, 5 * 60 * 1000);
+
+// ════════════════════════════════════════════
+// COUNTER SETUP PAYLOAD
+// ════════════════════════════════════════════
+function buildCounterSetupPayload(guildId) {
+  const cc = getCounterConfig(guildId);
+  const typeLabels = {
+    members:  '👥 Members',
+    bots:     '🤖 Bots',
+    online:   '🟢 Online',
+    channels: '💬 Channels',
+    roles:    '🎭 Roles',
+  };
+  const fields = Object.entries(cc.channels).map(([type, cfg]) => ({
+    name: typeLabels[type],
+    value: cfg.channelId ? `<#${cfg.channelId}> — ${cfg.enabled ? '✅ On' : '❌ Off'}` : `${cfg.enabled ? '✅ On' : '❌ Off'} — *No channel yet*`,
+    inline: true,
+  }));
+
+  const embed = new EmbedBuilder()
+    .setTitle('📊 Counter Setup')
+    .setColor(0x5865F2)
+    .setDescription(
+      '**Member counters** display live stats in voice channel names.\n\n' +
+      '**How to use:**\n' +
+      '1. (Optional) Set a category\n' +
+      '2. Click **Create All Counters** to auto-create all channels\n' +
+      '3. Toggle individual counters on/off\n' +
+      '4. Edit labels using **Edit Labels**\n\n' +
+      `**Status:** ${cc.enabled ? '✅ Active' : '❌ Inactive'}\n` +
+      `**Category:** ${cc.categoryId ? `<#${cc.categoryId}>` : '*None*'}`
+    )
+    .addFields(fields);
+
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cnt_toggle').setLabel(cc.enabled ? 'Disable Counters' : 'Enable Counters').setStyle(cc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(cc.enabled ? '🔴' : '🟢'),
+    new ButtonBuilder().setCustomId('cnt_category').setLabel('Set Category').setStyle(ButtonStyle.Primary).setEmoji('📁'),
+    new ButtonBuilder().setCustomId('cnt_create_all').setLabel('Create All Counters').setStyle(ButtonStyle.Success).setEmoji('🚀'),
+    new ButtonBuilder().setCustomId('cnt_delete_all').setLabel('Delete All').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+  );
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cnt_toggle_members').setLabel('Members').setStyle(cc.channels.members.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('👥'),
+    new ButtonBuilder().setCustomId('cnt_toggle_bots').setLabel('Bots').setStyle(cc.channels.bots.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🤖'),
+    new ButtonBuilder().setCustomId('cnt_toggle_online').setLabel('Online').setStyle(cc.channels.online.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🟢'),
+    new ButtonBuilder().setCustomId('cnt_toggle_channels').setLabel('Channels').setStyle(cc.channels.channels.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('💬'),
+    new ButtonBuilder().setCustomId('cnt_toggle_roles').setLabel('Roles').setStyle(cc.channels.roles.enabled ? ButtonStyle.Success : ButtonStyle.Secondary).setEmoji('🎭'),
+  );
+  const r3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cnt_labels').setLabel('Edit Labels').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
+    new ButtonBuilder().setCustomId('cnt_refresh').setLabel('Force Refresh').setStyle(ButtonStyle.Primary).setEmoji('🔄'),
+  );
+
+  return { embeds: [embed], components: [r1, r2, r3], ephemeral: true };
+}
+
 function getWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; return gc.warnings[userId]; }
 function addWarning(guildId, userId, warn) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; gc.warnings[userId].push(warn); saveConfig(config); }
 function clearWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; gc.warnings[userId] = []; saveConfig(config); }
@@ -109,9 +262,8 @@ const activeVotes      = new Map();
 const pendingCloseReqs = new Map();
 const appPendingType   = new Map();
 
-// ─── Stores the target channel for deferred /announce and /sendmessage selections ───
-const pendingAnnounceChannel = new Map(); // userId -> channelId
-const pendingSendMsgChannel  = new Map(); // userId -> channelId
+const pendingAnnounceChannel = new Map();
+const pendingSendMsgChannel  = new Map();
 
 // ════════════════════════════════════════════
 // UTILS
@@ -456,7 +608,6 @@ const commands = [
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
   { name: 'apply', description: 'Submit an application', options: [{ name: 'type', type: 3, description: 'Application type', required: true }] },
-  // /sendmessage — no longer takes name/channel args; uses a selection menu instead
   { name: 'sendmessage', description: '[SHR] Send a saved message to this channel' },
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
@@ -485,7 +636,6 @@ const commands = [
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
   { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  // /announce — no args; uses a selection menu in the current channel
   { name: 'announce', description: '[SHR] Send an announcement to this channel' },
   { name: 'embed', description: '[SHR] Send custom embed', options: [
     { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'title', type: 3, description: 'Title', required: true },
@@ -516,6 +666,7 @@ const commands = [
     { name: 'applications', type: 1, description: 'Application system' },
     { name: 'savedmessages', type: 1, description: 'Saved messages system' },
     { name: 'automod', type: 1, description: 'Automod keyword filter' },
+    { name: 'counters', type: 1, description: 'Member counter channels' }, // ← NEW
   ]},
 ];
 
@@ -527,6 +678,20 @@ client.once('clientReady', async () => {
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); console.log('✅ Commands registered'); }
   catch (e) { console.error('❌ Command registration failed:', e); }
+
+  // Initial counter update on startup
+  for (const guild of client.guilds.cache.values()) {
+    await updateCounters(guild).catch(console.error);
+  }
+});
+
+// Update counters when a member joins or leaves
+client.on('guildMemberAdd', async member => {
+  await updateCounters(member.guild).catch(console.error);
+  // ... rest of join logic below
+});
+client.on('guildMemberRemove', async member => {
+  await updateCounters(member.guild).catch(console.error);
 });
 
 // ════════════════════════════════════════════
@@ -580,7 +745,7 @@ client.on('messageCreate', async message => {
 });
 
 // ════════════════════════════════════════════
-// GUILD MEMBER ADD
+// GUILD MEMBER ADD (welcomer + autorole)
 // ════════════════════════════════════════════
 client.on('guildMemberAdd', async member => {
   const guildId = member.guild.id;
@@ -786,13 +951,11 @@ client.on('interactionCreate', async interaction => {
         return interaction.showModal(modal);
       }
 
-      // ── /sendmessage — show selection menu, send to current channel ──
       if (cmd === 'sendmessage') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
         const msgs = Object.entries(sm.messages);
         if (!msgs.length) return interaction.reply({ content: '❌ No saved messages yet. Use `/setup savedmessages` to create some.', ephemeral: true });
-        // Store the current channel so we know where to send after selection
         pendingSendMsgChannel.set(interaction.user.id, interaction.channel.id);
         const options = msgs.slice(0, 25).map(([mid, m]) => ({
           label: m.name.slice(0, 100),
@@ -811,7 +974,6 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      // ── /ban — deletes all messages and threads ──
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         await interaction.deferReply();
@@ -913,13 +1075,11 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`📝 Notes — ${user.tag}`).setColor(0x5865F2).setDescription(notes.map((n, i) => `**${i + 1}.** ${n.text} — *${n.moderator}*`).join('\n'))] });
       }
 
-      // ── /announce — show selection menu, send to current channel ──
       if (cmd === 'announce') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ac = getAnnouncementConfig(guildId);
         const types = Object.entries(ac.types);
         if (!types.length) return interaction.reply({ content: '❌ No announcement types configured. Use `/setup announcements`.', ephemeral: true });
-        // Store the current channel
         pendingAnnounceChannel.set(interaction.user.id, interaction.channel.id);
         const options = types.slice(0, 25).map(([tid, t]) => ({
           label: `${t.emoji ? t.emoji + ' ' : ''}${t.name}`.slice(0, 100),
@@ -1045,12 +1205,98 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'applications')  return interaction.reply(buildApplicationSetupPayload(guildId));
         if (sub === 'savedmessages') return interaction.reply(buildSavedMessagesPayload(guildId));
         if (sub === 'automod')       return interaction.reply(buildAutomodSetupPayload(guildId));
+        if (sub === 'counters')      return interaction.reply(buildCounterSetupPayload(guildId)); // ← NEW
       }
     }
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      // ════════════════════════════════════════
+      // COUNTER BUTTONS
+      // ════════════════════════════════════════
+      if (id.startsWith('cnt_')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const cc = getCounterConfig(guildId);
+
+        if (id === 'cnt_toggle') {
+          cc.enabled = !cc.enabled;
+          saveConfig(config);
+          return interaction.update(buildCounterSetupPayload(guildId));
+        }
+
+        if (id === 'cnt_category') {
+          return interaction.reply({
+            content: '### 📁 Select the category for counter channels',
+            components: [channelDropdown('cntd_category', 'Select category...', [ChannelType.GuildCategory])],
+            ephemeral: true,
+          });
+        }
+
+        if (id === 'cnt_create_all') {
+          await interaction.deferReply({ ephemeral: true });
+          const guild = interaction.guild;
+          let created = 0;
+          for (const type of Object.keys(cc.channels)) {
+            if (!cc.channels[type].enabled) continue;
+            if (cc.channels[type].channelId) {
+              // Check if the channel still exists
+              const existing = guild.channels.cache.get(cc.channels[type].channelId);
+              if (existing) continue;
+            }
+            try {
+              await createCounterChannel(guild, type, cc);
+              created++;
+            } catch (e) {
+              console.error(`Counter create error [${type}]:`, e);
+            }
+          }
+          cc.enabled = true;
+          saveConfig(config);
+          return interaction.editReply({ content: `✅ Created **${created}** counter channel(s)! They'll update every 5 minutes.` });
+        }
+
+        if (id === 'cnt_delete_all') {
+          await interaction.deferReply({ ephemeral: true });
+          const guild = interaction.guild;
+          for (const type of Object.keys(cc.channels)) {
+            await deleteCounterChannel(guild, type, cc).catch(() => {});
+          }
+          cc.enabled = false;
+          saveConfig(config);
+          return interaction.editReply({ content: '✅ All counter channels deleted.' });
+        }
+
+        // Toggle individual counters
+        const toggleTypes = ['members', 'bots', 'online', 'channels', 'roles'];
+        for (const type of toggleTypes) {
+          if (id === `cnt_toggle_${type}`) {
+            cc.channels[type].enabled = !cc.channels[type].enabled;
+            saveConfig(config);
+            return interaction.update(buildCounterSetupPayload(guildId));
+          }
+        }
+
+        if (id === 'cnt_labels') {
+          const cc = getCounterConfig(guildId);
+          const modal = new ModalBuilder().setCustomId('modal_cnt_labels').setTitle('Edit Counter Labels');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cnt_lbl_members').setLabel('Members label (use {count})').setStyle(TextInputStyle.Short).setValue(cc.channels.members.label).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cnt_lbl_bots').setLabel('Bots label (use {count})').setStyle(TextInputStyle.Short).setValue(cc.channels.bots.label).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cnt_lbl_online').setLabel('Online label (use {count})').setStyle(TextInputStyle.Short).setValue(cc.channels.online.label).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cnt_lbl_channels').setLabel('Channels label (use {count})').setStyle(TextInputStyle.Short).setValue(cc.channels.channels.label).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cnt_lbl_roles').setLabel('Roles label (use {count})').setStyle(TextInputStyle.Short).setValue(cc.channels.roles.label).setRequired(true)),
+          );
+          return interaction.showModal(modal);
+        }
+
+        if (id === 'cnt_refresh') {
+          await interaction.deferReply({ ephemeral: true });
+          await updateCounters(interaction.guild);
+          return interaction.editReply({ content: '✅ Counters refreshed!' });
+        }
+      }
 
       // ── Automod setup ──
       if (id.startsWith('am_')) {
@@ -1552,19 +1798,24 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'amd_log')        { getAutomodConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Automod log: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId.startsWith('anch__')) { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
       if (interaction.customId.startsWith('srch__')) { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
+
+      // ── Counter category ──
+      if (interaction.customId === 'cntd_category') {
+        getCounterConfig(guildId).categoryId = chId;
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Counter category set to <#${chId}>!`, ephemeral: true });
+      }
     }
 
     // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId; const val = interaction.values[0];
 
-      // ── announce_pick — user selected an announcement type ──
       if (id === 'announce_pick') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const ac = getAnnouncementConfig(guildId);
         const t = ac.types[val];
         if (!t) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
-        // Get the stored target channel (where command was used)
         const targetChannelId = pendingAnnounceChannel.get(interaction.user.id);
         pendingAnnounceChannel.delete(interaction.user.id);
         const targetCh = targetChannelId ? interaction.guild.channels.cache.get(targetChannelId) : interaction.channel;
@@ -1581,13 +1832,11 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply({ content: `✅ Announcement **${t.name}** sent in <#${targetCh.id}>!` });
       }
 
-      // ── sendmsg_pick — user selected a saved message ──
       if (id === 'sendmsg_pick') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
         const msg = sm.messages[val];
         if (!msg) return interaction.reply({ content: '❌ Saved message not found.', ephemeral: true });
-        // Get the stored target channel (where command was used)
         const targetChannelId = pendingSendMsgChannel.get(interaction.user.id);
         pendingSendMsgChannel.delete(interaction.user.id);
         const targetCh = targetChannelId ? interaction.guild.channels.cache.get(targetChannelId) : interaction.channel;
@@ -1637,6 +1886,20 @@ client.on('interactionCreate', async interaction => {
     // ══ MODALS ══
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
+
+      // ── Counter labels modal ──
+      if (mid === 'modal_cnt_labels') {
+        const cc = getCounterConfig(guildId);
+        cc.channels.members.label  = interaction.fields.getTextInputValue('cnt_lbl_members').trim() || cc.channels.members.label;
+        cc.channels.bots.label     = interaction.fields.getTextInputValue('cnt_lbl_bots').trim()    || cc.channels.bots.label;
+        cc.channels.online.label   = interaction.fields.getTextInputValue('cnt_lbl_online').trim()  || cc.channels.online.label;
+        cc.channels.channels.label = interaction.fields.getTextInputValue('cnt_lbl_channels').trim()|| cc.channels.channels.label;
+        cc.channels.roles.label    = interaction.fields.getTextInputValue('cnt_lbl_roles').trim()   || cc.channels.roles.label;
+        saveConfig(config);
+        // Trigger an immediate refresh so channels show new names
+        await updateCounters(interaction.guild).catch(() => {});
+        return interaction.reply({ content: '✅ Labels updated and counters refreshed!', ephemeral: true });
+      }
 
       if (mid === 'modal_am_keywords') {
         const am = getAutomodConfig(guildId);
