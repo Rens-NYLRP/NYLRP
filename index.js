@@ -27,17 +27,75 @@ const client = new Client({
 });
 
 // ════════════════════════════════════════════
-// CONFIG
+// CONFIG — PERSISTENT & CRASH-SAFE
 // ════════════════════════════════════════════
-const CONFIG_FILE = path.join(__dirname, 'config.json');
+const CONFIG_FILE  = path.join(__dirname, 'config.json');
+const CONFIG_BAK   = path.join(__dirname, 'config.backup.json');
+const CONFIG_TMP   = path.join(__dirname, 'config.tmp.json');
+
 function loadConfig() {
-  try { if (fs.existsSync(CONFIG_FILE)) return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (e) { console.error('Config load error:', e); }
+  // Try primary file first, then backup, then return empty
+  for (const file of [CONFIG_FILE, CONFIG_BAK]) {
+    try {
+      if (fs.existsSync(file)) {
+        const raw = fs.readFileSync(file, 'utf8');
+        const parsed = JSON.parse(raw);
+        console.log(`✅ Config geladen vanuit ${path.basename(file)}`);
+        return parsed;
+      }
+    } catch (e) {
+      console.error(`⚠️ Config laden mislukt (${path.basename(file)}):`, e.message);
+    }
+  }
+  console.log('ℹ️ Geen config gevonden, start met lege config.');
   return {};
 }
+
 function saveConfig(cfg) {
-  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); } catch (e) { console.error('Config save error:', e); }
+  try {
+    const data = JSON.stringify(cfg, null, 2);
+    // Atomic write: schrijf naar tmp, kopieer naar backup, hernoem naar primary
+    fs.writeFileSync(CONFIG_TMP, data, 'utf8');
+    // Backup maken van de huidige config voordat we overschrijven
+    if (fs.existsSync(CONFIG_FILE)) {
+      fs.copyFileSync(CONFIG_FILE, CONFIG_BAK);
+    }
+    fs.renameSync(CONFIG_TMP, CONFIG_FILE);
+  } catch (e) {
+    console.error('❌ Config opslaan mislukt:', e);
+    // Noodopslag: probeer direct te schrijven zonder atomic
+    try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); } catch {}
+  }
 }
+
 let config = loadConfig();
+
+// Auto-save elke 60 seconden als extra zekerheid
+setInterval(() => {
+  try {
+    saveConfig(config);
+  } catch (e) {
+    console.error('Auto-save fout:', e);
+  }
+}, 60 * 1000);
+
+// Zorg dat config ook opgeslagen wordt bij afsluiten
+function gracefulShutdown(signal) {
+  console.log(`\n⚠️ ${signal} ontvangen — config opslaan voor afsluiten...`);
+  try { saveConfig(config); console.log('✅ Config opgeslagen.'); } catch (e) { console.error('Config opslaan bij afsluiten mislukt:', e); }
+  process.exit(0);
+}
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  try { saveConfig(config); } catch {}
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('❌ Unhandled Rejection:', reason);
+  try { saveConfig(config); } catch {}
+});
 
 function getGuildConfig(guildId) { if (!config[guildId]) config[guildId] = {}; return config[guildId]; }
 
@@ -72,22 +130,47 @@ function getVerificationConfig(guildId) {
 function getApplicationConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.applications) gc.applications = {
-    // Array of panel configs — each panel has its own channel and set of appTypes
     panels: [],
-    // Global review channel (can be overridden per panel)
     reviewChannel: null,
     logChannel: null,
-    // appTypes array
     appTypes: [],
   };
-  // Migrate old format
-  if (!gc.applications.panels) gc.applications.panels = [];
+  // Zorg dat verplichte velden altijd aanwezig zijn (migratie van oude data)
+  if (!gc.applications.panels)   gc.applications.panels   = [];
+  if (!gc.applications.appTypes) gc.applications.appTypes = [];
+  // Patch elk bestaand type met ontbrekende velden zodat data nooit verloren gaat
+  for (const t of gc.applications.appTypes) {
+    if (!Array.isArray(t.questions))    t.questions    = [];
+    if (!Array.isArray(t.acceptRoles))  t.acceptRoles  = [];
+    if (t.acceptMessage  === undefined) t.acceptMessage  = null;
+    if (t.denyMessage    === undefined) t.denyMessage    = null;
+    if (t.groupLink      === undefined) t.groupLink      = null;
+    if (t.nicknameFormat === undefined) t.nicknameFormat = null;
+  }
+  // Patch elk bestaand panel met ontbrekende velden
+  for (const p of gc.applications.panels) {
+    if (!Array.isArray(p.appTypeIds)) p.appTypeIds = [];
+    if (p.reviewChannel === undefined) p.reviewChannel = null;
+    if (p.title         === undefined) p.title         = '📋 Applications';
+    if (p.description   === undefined) p.description   = null;
+    if (p.color         === undefined) p.color         = '#5865F2';
+    if (p.channel       === undefined) p.channel       = null;
+  }
   return gc.applications;
 }
 
 function getSavedMessagesConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.savedMessages) gc.savedMessages = { messages: {} };
+  if (!gc.savedMessages.messages) gc.savedMessages.messages = {};
+  // Patch bestaande messages met ontbrekende velden
+  for (const msg of Object.values(gc.savedMessages.messages)) {
+    if (msg.title       === undefined) msg.title       = 'Bericht';
+    if (msg.description === undefined) msg.description = '';
+    if (msg.color       === undefined) msg.color       = '#5865F2';
+    if (msg.image       === undefined) msg.image       = null;
+    if (msg.footer      === undefined) msg.footer      = null;
+  }
   return gc.savedMessages;
 }
 function getAutomodConfig(guildId) {
@@ -1414,6 +1497,33 @@ client.on('interactionCreate', async interaction => {
             ephemeral: true,
           });
         }
+        if (action === 'set_messages') {
+          const modal = new ModalBuilder().setCustomId(`modal_apte_messages__${typeId}`).setTitle(`DM Berichten: ${appType.label}`);
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('accept_msg').setLabel('Accept DM bericht').setStyle(TextInputStyle.Paragraph).setValue(appType.acceptMessage || '').setPlaceholder('Gefeliciteerd {username}! Je bent geaccepteerd voor {type} in {server}! 🎉').setRequired(false).setMaxLength(1500)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deny_msg').setLabel('Deny DM bericht').setStyle(TextInputStyle.Paragraph).setValue(appType.denyMessage || '').setPlaceholder('Helaas {username}, je bent afgewezen voor {type}.\n\nReden: {reason}').setRequired(false).setMaxLength(1500)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (action === 'set_grouplink') {
+          const modal = new ModalBuilder().setCustomId(`modal_apte_grouplink__${typeId}`).setTitle(`Groep Link: ${appType.label}`);
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('group_link').setLabel('Roblox groep link (of andere link)').setStyle(TextInputStyle.Short).setValue(appType.groupLink || '').setPlaceholder('https://www.roblox.com/groups/...').setRequired(false)));
+          return interaction.showModal(modal);
+        }
+        if (action === 'set_nickname') {
+          const modal = new ModalBuilder().setCustomId(`modal_apte_nickname__${typeId}`).setTitle(`Nickname Formaat: ${appType.label}`);
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('nickname_format')
+              .setLabel('Nickname formaat (leeg = uitgeschakeld)')
+              .setStyle(TextInputStyle.Short)
+              .setValue(appType.nicknameFormat || '')
+              .setPlaceholder('[Lid] | {user}')
+              .setRequired(false)
+              .setMaxLength(32)
+          ));
+          return interaction.showModal(modal);
+        }
         if (action === 'edit_questions') {
           const modal = new ModalBuilder().setCustomId(`modal_apte_questions__${typeId}`).setTitle(`Edit Questions: ${appType.label}`);
           modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 20)').setStyle(TextInputStyle.Paragraph).setValue(appType.questions.join('\n')).setRequired(true)));
@@ -1502,6 +1612,17 @@ client.on('interactionCreate', async interaction => {
             }
           }
 
+          // Set nickname if format is configured
+          let newNickname = null;
+          if (appType?.nicknameFormat && applicant) {
+            newNickname = appType.nicknameFormat
+              .replace(/{user}/g, applicant.user.username)
+              .replace(/{username}/g, applicant.user.username)
+              .replace(/{rank}/g, appType.label)
+              .slice(0, 32);
+            await applicant.setNickname(newNickname, `Sollicitatie geaccepteerd: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
+          }
+
           const givenRoles = appType?.acceptRoles?.length
             ? appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
             : 'None';
@@ -1512,6 +1633,7 @@ client.on('interactionCreate', async interaction => {
                 { name: '👤 Applicant', value: applicant?.user.tag ?? applicantId, inline: true },
                 { name: '✅ Accepted by', value: interaction.user.tag, inline: true },
                 { name: '🎭 Roles Given', value: givenRoles, inline: true },
+                { name: '🏷️ Nickname', value: newNickname ? `\`${newNickname}\`` : '*Niet gewijzigd*', inline: true },
                 { name: '🔔 DM Sent', value: action === 'accept' ? 'Yes' : 'No (silent)', inline: true },
               ).setTimestamp()],
             components: [],
@@ -1519,11 +1641,39 @@ client.on('interactionCreate', async interaction => {
 
           if (action === 'accept' && applicant) {
             const acceptRoleNames = appType?.acceptRoles?.length
-              ? '\n\n**Roles given:** ' + appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
+              ? '\n\n**Rollen gegeven:** ' + appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
               : '';
-            await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287)
-              .setDescription(`Your **${appType?.label ?? 'application'}** in **${interaction.guild.name}** has been **accepted**! 🎉${acceptRoleNames}`)
-              .setTimestamp()] }).catch(() => {});
+
+            // Build custom accept message using variables
+            const vars = {
+              username: applicant.user.username,
+              userMention: `<@${applicant.user.id}>`,
+              type: appType?.label ?? 'application',
+              server: interaction.guild.name,
+            };
+            const rawMsg = appType?.acceptMessage
+              ? appType.acceptMessage
+                  .replace(/{username}/g, vars.username)
+                  .replace(/{userMention}/g, vars.userMention)
+                  .replace(/{type}/g, vars.type)
+                  .replace(/{server}/g, vars.server)
+              : `✅ Gefeliciteerd **${vars.username}**!\n\nJe **${vars.type}** in **${vars.server}** is **geaccepteerd**! 🎉${acceptRoleNames}`;
+
+            const acceptEmbed = new EmbedBuilder()
+              .setTitle('✅ Aanvraag Geaccepteerd!')
+              .setColor(0x57F287)
+              .setDescription(rawMsg)
+              .setTimestamp();
+
+            // Group link button if set
+            const dmComponents = [];
+            if (appType?.groupLink && isValidUrl(appType.groupLink)) {
+              dmComponents.push(new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setLabel('🚀 Join de groep!').setStyle(ButtonStyle.Link).setURL(appType.groupLink)
+              ));
+            }
+
+            await applicant.send({ embeds: [acceptEmbed], components: dmComponents }).catch(() => {});
           }
 
           // Log
@@ -2021,14 +2171,23 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '📝 Questions', value: `${appType.questions.length} question(s)`, inline: true },
             { name: '🎭 Accept Roles', value: roles, inline: true },
-            { name: '❓ Questions Preview', value: appType.questions.slice(0, 5).map((q, i) => `${i + 1}. ${q.slice(0, 80)}`).join('\n') || '*None*', inline: false },
+            { name: '🔗 Group Link', value: appType.groupLink ? `[Klik hier](${appType.groupLink})` : '*Niet ingesteld*', inline: true },
+            { name: '🏷️ Nickname Formaat', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Uitgeschakeld*', inline: true },
+            { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
+            { name: '❌ Deny Bericht', value: appType.denyMessage ? `\`\`\`${appType.denyMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
+            { name: '❓ Vragen preview', value: appType.questions.slice(0, 5).map((q, i) => `${i + 1}. ${q.slice(0, 80)}`).join('\n') || '*Geen*', inline: false },
           );
         const r1 = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Edit Questions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
-          new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Set Accept Roles').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
-          new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Back').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Vragen bewerken').setStyle(ButtonStyle.Primary).setEmoji('📝'),
+          new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept rollen').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM berichten').setStyle(ButtonStyle.Primary).setEmoji('💬'),
+          new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Groep link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
+          new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
         );
-        return interaction.update({ embeds: [embed], components: [r1] });
+        const r2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Terug').setStyle(ButtonStyle.Secondary),
+        );
+        return interaction.update({ embeds: [embed], components: [r1, r2] });
       }
 
       if (id === 'apd_select_edit_panel') {
@@ -2176,8 +2335,24 @@ client.on('interactionCreate', async interaction => {
           components: [],
         });
         if (applicant) {
-          await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245)
-            .setDescription(`Your **${appType?.label ?? 'application'}** in **${interaction.guild.name}** has been **denied**.\n\n**Reason:** ${reason}`)
+          const vars = {
+            username: applicant.user.username,
+            userMention: `<@${applicant.user.id}>`,
+            type: appType?.label ?? 'application',
+            server: interaction.guild.name,
+            reason,
+          };
+          const rawDenyMsg = appType?.denyMessage
+            ? appType.denyMessage
+                .replace(/{username}/g, vars.username)
+                .replace(/{userMention}/g, vars.userMention)
+                .replace(/{type}/g, vars.type)
+                .replace(/{server}/g, vars.server)
+                .replace(/{reason}/g, vars.reason)
+            : `❌ Helaas **${vars.username}**, je **${vars.type}** aanvraag in **${vars.server}** is **afgewezen**.\n\n**Reden:** ${reason}`;
+
+          await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Aanvraag Afgewezen').setColor(0xED4245)
+            .setDescription(rawDenyMsg)
             .setTimestamp()] }).catch(() => {});
         }
         if (ac.logChannel) {
@@ -2197,7 +2372,7 @@ client.on('interactionCreate', async interaction => {
         const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 20);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         const newId = genId();
-        ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [] });
+        ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [], acceptMessage: null, denyMessage: null, groupLink: null, nicknameFormat: null });
         saveConfig(config);
         // Ask for accept roles
         return interaction.reply({
@@ -2343,6 +2518,75 @@ client.on('interactionCreate', async interaction => {
         const title = interaction.fields.getTextInputValue('an_c_title').trim(); const desc = interaction.fields.getTextInputValue('an_c_desc').trim(); const color = interaction.fields.getTextInputValue('an_c_color').trim(); const image = interaction.fields.getTextInputValue('an_c_image').trim(); const emoji = interaction.fields.getTextInputValue('an_c_emoji').trim();
         if (title) t.title = title; if (desc) t.description = desc; if (color) t.color = color; if (image) t.image = image; if (emoji) t.emoji = emoji;
         saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
+      }
+
+      // ── Application type: nickname formaat ──
+      if (mid.startsWith('modal_apte_nickname__')) {
+        const typeId = mid.replace('modal_apte_nickname__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        const fmt = interaction.fields.getTextInputValue('nickname_format').trim();
+        appType.nicknameFormat = fmt || null;
+        saveConfig(config);
+        return interaction.reply({
+          content: fmt
+            ? [
+                `✅ **Nickname formaat ingesteld:** \`${fmt}\``,
+                '',
+                '**Beschikbare variabelen:**',
+                '`{user}` of `{username}` — gebruikersnaam van de applicant',
+                '`{rank}` — naam van het application type',
+                '',
+                `**Voorbeeld:** \`${fmt.replace(/{user}/g, 'JohnDoe').replace(/{username}/g, 'JohnDoe').replace(/{rank}/g, appType.label)}\``,
+              ].join('\n')
+            : '✅ Nickname formaat **uitgeschakeld**. Nickname wordt niet meer automatisch gewijzigd.',
+          ephemeral: true,
+        });
+      }
+
+      // ── Application type: DM berichten ──
+      if (mid.startsWith('modal_apte_messages__')) {
+        const typeId = mid.replace('modal_apte_messages__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        const acceptMsg = interaction.fields.getTextInputValue('accept_msg').trim();
+        const denyMsg   = interaction.fields.getTextInputValue('deny_msg').trim();
+        appType.acceptMessage = acceptMsg || null;
+        appType.denyMessage   = denyMsg   || null;
+        saveConfig(config);
+        return interaction.reply({
+          content: [
+            '✅ **DM berichten opgeslagen!**',
+            '',
+            '**Beschikbare variabelen:**',
+            '`{username}` — naam van de applicant',
+            '`{userMention}` — mention van de applicant',
+            '`{type}` — naam van het application type',
+            '`{server}` — naam van de server',
+            '`{reason}` — reden *(alleen in deny bericht)*',
+          ].join('\n'),
+          ephemeral: true,
+        });
+      }
+
+      // ── Application type: groep link ──
+      if (mid.startsWith('modal_apte_grouplink__')) {
+        const typeId = mid.replace('modal_apte_grouplink__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        const link = interaction.fields.getTextInputValue('group_link').trim();
+        if (link && !isValidUrl(link)) return interaction.reply({ content: '❌ Ongeldige URL. Moet beginnen met `https://`.', ephemeral: true });
+        appType.groupLink = link || null;
+        saveConfig(config);
+        return interaction.reply({
+          content: link
+            ? `✅ Groep link ingesteld! Bij acceptatie krijgt de persoon een **"Join de groep!"** knop in zijn DM.`
+            : `✅ Groep link verwijderd.`,
+          ephemeral: true,
+        });
       }
 
       // ── Self roles ──
