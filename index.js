@@ -1,5 +1,7 @@
 require('dotenv').config();
-const http = require('http');
+const http     = require('http');
+const path     = require('path');
+const mongoose = require('mongoose');
 const {
   Client, GatewayIntentBits, Partials, REST, Routes,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
@@ -7,8 +9,6 @@ const {
   RoleSelectMenuBuilder, ChannelSelectMenuBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
-const fs   = require('fs');
-const path = require('path');
 
 http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 10000);
 process.chdir(path.dirname(require.main.filename));
@@ -27,77 +27,114 @@ const client = new Client({
 });
 
 // ════════════════════════════════════════════
-// CONFIG — PERSISTENT & CRASH-SAFE
+// CONFIG — MONGODB PERSISTENT STORAGE
 // ════════════════════════════════════════════
-const CONFIG_FILE  = path.join(__dirname, 'config.json');
-const CONFIG_BAK   = path.join(__dirname, 'config.backup.json');
-const CONFIG_TMP   = path.join(__dirname, 'config.tmp.json');
 
-function loadConfig() {
-  // Try primary file first, then backup, then return empty
-  for (const file of [CONFIG_FILE, CONFIG_BAK]) {
-    try {
-      if (fs.existsSync(file)) {
-        const raw = fs.readFileSync(file, 'utf8');
-        const parsed = JSON.parse(raw);
-        console.log(`✅ Config geladen vanuit ${path.basename(file)}`);
-        return parsed;
-      }
-    } catch (e) {
-      console.error(`⚠️ Config laden mislukt (${path.basename(file)}):`, e.message);
-    }
+// MongoDB schema: één document per guild, plus één 'global' doc
+const configSchema = new mongoose.Schema({
+  _id:  { type: String, required: true }, // guildId or 'global'
+  data: { type: mongoose.Schema.Types.Mixed, default: {} },
+}, { strict: false });
+
+const ConfigModel = mongoose.model('Config', configSchema);
+
+// In-memory config cache (zelfde structuur als voorheen)
+let config = {};
+let dbReady = false;
+
+// Verbinding maken met MongoDB
+async function connectDB() {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+    });
+    console.log('✅ MongoDB verbonden!');
+    dbReady = true;
+    await loadConfigFromDB();
+  } catch (e) {
+    console.error('❌ MongoDB verbinding mislukt:', e.message);
+    console.error('⚠️ Bot draait zonder persistente opslag! Voeg MONGODB_URI toe aan .env');
   }
-  console.log('ℹ️ Geen config gevonden, start met lege config.');
-  return {};
 }
 
+// Laad alle guild configs uit MongoDB in de in-memory cache
+async function loadConfigFromDB() {
+  try {
+    const docs = await ConfigModel.find({});
+    config = {};
+    for (const doc of docs) {
+      config[doc._id] = doc.data;
+    }
+    console.log(`✅ Config geladen: ${docs.length} guild(s)`);
+  } catch (e) {
+    console.error('❌ Config laden mislukt:', e.message);
+  }
+}
+
+// Sla één guild op naar MongoDB (wordt aangeroepen na elke wijziging)
+async function saveGuildConfig(guildId) {
+  if (!dbReady) return;
+  try {
+    await ConfigModel.findByIdAndUpdate(
+      guildId,
+      { _id: guildId, data: config[guildId] ?? {} },
+      { upsert: true, new: true }
+    );
+  } catch (e) {
+    console.error(`❌ Config opslaan mislukt (${guildId}):`, e.message);
+  }
+}
+
+// Sla alles op (wordt gebruikt bij shutdown)
+async function saveAllConfigs() {
+  if (!dbReady) return;
+  const promises = Object.keys(config).map(guildId => saveGuildConfig(guildId));
+  await Promise.allSettled(promises);
+}
+
+// saveConfig is een alias die de hele config wegschrijft
+// (voor backwards-compat met alle bestaande saveConfig(config) calls)
+// We vervangen dit door per-guild saves maar houden de functie intact
 function saveConfig(cfg) {
-  try {
-    const data = JSON.stringify(cfg, null, 2);
-    // Atomic write: schrijf naar tmp, kopieer naar backup, hernoem naar primary
-    fs.writeFileSync(CONFIG_TMP, data, 'utf8');
-    // Backup maken van de huidige config voordat we overschrijven
-    if (fs.existsSync(CONFIG_FILE)) {
-      fs.copyFileSync(CONFIG_FILE, CONFIG_BAK);
-    }
-    fs.renameSync(CONFIG_TMP, CONFIG_FILE);
-  } catch (e) {
-    console.error('❌ Config opslaan mislukt:', e);
-    // Noodopslag: probeer direct te schrijven zonder atomic
-    try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf8'); } catch {}
+  // cfg is altijd het globale config object
+  // Sla elke guild asynchroon op
+  for (const guildId of Object.keys(cfg)) {
+    saveGuildConfig(guildId).catch(() => {});
   }
 }
 
-let config = loadConfig();
-
-// Auto-save elke 60 seconden als extra zekerheid
+// Auto-save elke 5 minuten als extra zekerheid
 setInterval(() => {
-  try {
-    saveConfig(config);
-  } catch (e) {
-    console.error('Auto-save fout:', e);
-  }
-}, 60 * 1000);
+  saveAllConfigs().catch(console.error);
+}, 5 * 60 * 1000);
 
-// Zorg dat config ook opgeslagen wordt bij afsluiten
-function gracefulShutdown(signal) {
-  console.log(`\n⚠️ ${signal} ontvangen — config opslaan voor afsluiten...`);
-  try { saveConfig(config); console.log('✅ Config opgeslagen.'); } catch (e) { console.error('Config opslaan bij afsluiten mislukt:', e); }
+// Graceful shutdown
+async function gracefulShutdown(signal) {
+  console.log(`\n⚠️ ${signal} — config opslaan voor afsluiten...`);
+  await saveAllConfigs();
+  console.log('✅ Config opgeslagen. Afsluiten.');
   process.exit(0);
 }
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('uncaughtException', (err) => {
+process.on('uncaughtException', async (err) => {
   console.error('❌ Uncaught Exception:', err);
-  try { saveConfig(config); } catch {}
+  await saveAllConfigs().catch(() => {});
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('❌ Unhandled Rejection:', reason);
-  try { saveConfig(config); } catch {}
+  saveAllConfigs().catch(() => {});
 });
 
-function getGuildConfig(guildId) { if (!config[guildId]) config[guildId] = {}; return config[guildId]; }
+function getGuildConfig(guildId) {
+  if (!config[guildId]) {
+    config[guildId] = {};
+    // Nieuwe guild — direct opslaan
+    saveGuildConfig(guildId).catch(() => {});
+  }
+  return config[guildId];
+}
 
 function getTicketConfig(guildId) {
   const gc = getGuildConfig(guildId);
@@ -820,7 +857,7 @@ const commands = [
 // READY
 // ════════════════════════════════════════════
 client.once('clientReady', async () => {
-  console.log(`✅ Bot online as ${client.user.tag}`);
+  console.log(`✅ Bot online as ${client.user.tag} | DB: ${dbReady ? '✅ Verbonden' : '❌ Niet verbonden'}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); console.log('✅ Commands registered'); }
   catch (e) { console.error('❌ Command registration failed:', e); }
@@ -2632,4 +2669,8 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.login(process.env.TOKEN);
+// Start: eerst DB verbinden, dan bot inloggen
+(async () => {
+  await connectDB();
+  await client.login(process.env.TOKEN);
+})();
