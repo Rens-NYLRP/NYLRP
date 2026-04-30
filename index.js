@@ -261,6 +261,8 @@ const srPendingRoleAdd = new Map();
 const activeVotes      = new Map();
 const pendingCloseReqs = new Map();
 const appPendingType   = new Map();
+// activeAppSessions: userId -> { guildId, typeId, threadId, questionIndex, answers }
+const activeAppSessions = new Map();
 
 const pendingAnnounceChannel = new Map();
 const pendingSendMsgChannel  = new Map();
@@ -355,11 +357,11 @@ function buildApplicationSetupPayload(guildId) {
   const ac = getApplicationConfig(guildId);
   const embed = new EmbedBuilder()
     .setTitle('📋 Application System Setup').setColor(0x5865F2)
-    .setDescription('Configure application types below.')
+    .setDescription('Configure application types below.\n\n> Questions are answered one-by-one in a private thread (up to 100 per type).')
     .addFields(
       { name: '📢 Review Channel', value: ac.reviewChannel ? `<#${ac.reviewChannel}>` : '*Not set*', inline: true },
       { name: '📋 Log Channel',    value: ac.logChannel ? `<#${ac.logChannel}>` : '*Not set*', inline: true },
-      { name: '📝 App Types',      value: ac.appTypes.length ? ac.appTypes.map(t => `${t.emoji || '•'} \`${t.label}\` (${t.questions?.length ?? 0} questions)`).join('\n') : '*No types yet*', inline: false },
+      { name: '📝 App Types',      value: ac.appTypes.length ? ac.appTypes.map(t => `${t.emoji || '•'} \`${t.label}\` — ${t.questions?.length ?? 0} questions | accept role: ${t.acceptRole ? `<@&${t.acceptRole}>` : 'none'}`).join('\n') : '*No types yet*', inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ap_review_channel').setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
@@ -695,6 +697,82 @@ client.on('guildMemberRemove', async member => {
 });
 
 // ════════════════════════════════════════════
+// APPLICATION Q&A THREAD — MESSAGE CREATE
+// ════════════════════════════════════════════
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
+  const session = activeAppSessions.get(message.author.id);
+  if (!session || message.channel.id !== session.threadId) return;
+
+  const content = message.content.trim();
+
+  // Cancel
+  if (content.toLowerCase() === 'cancel') {
+    activeAppSessions.delete(message.author.id);
+    await message.channel.send('❌ Application cancelled.');
+    setTimeout(() => message.channel.delete().catch(() => {}), 3000);
+    return;
+  }
+
+  // Record answer
+  session.answers.push(content);
+  const ac = getApplicationConfig(session.guildId);
+  const appType = ac.appTypes.find(t => t.id === session.typeId);
+  if (!appType) { activeAppSessions.delete(message.author.id); return; }
+
+  const next = session.questionIndex + 1;
+
+  if (next < appType.questions.length) {
+    // Ask next question
+    session.questionIndex = next;
+    await message.channel.send({ embeds: [new EmbedBuilder().setColor(0x5865F2).setDescription(`✅ Answer recorded! *(${next}/${appType.questions.length})*`).setFooter({ text: `Question ${next + 1} / ${appType.questions.length}` })] });
+    await message.channel.send(`**Question ${next + 1}:** ${appType.questions[next]}`);
+  } else {
+    // All questions answered — submit
+    activeAppSessions.delete(message.author.id);
+    await message.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Submitted!').setColor(0x57F287).setDescription('All questions answered. Your application has been sent for review. This thread will close shortly.').setTimestamp()] });
+
+    try {
+      if (!ac.reviewChannel) throw new Error('No review channel');
+      const reviewCh = message.guild.channels.cache.get(ac.reviewChannel);
+      if (!reviewCh) throw new Error('Review channel not found');
+
+      const answerFields = appType.questions.map((q, i) => ({
+        name: `❓ ${q.slice(0, 250)}`,
+        value: (session.answers[i] ?? '*No answer*').slice(0, 1024),
+        inline: false,
+      }));
+
+      const embed = new EmbedBuilder()
+        .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
+        .setColor(0x5865F2)
+        .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
+        .addFields(
+          { name: '👤 Applicant', value: `${message.author.tag} (<@${message.author.id}>)`, inline: true },
+          { name: '🆔 User ID', value: message.author.id, inline: true },
+          { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
+          ...answerFields,
+        )
+        .setTimestamp()
+        .setFooter({ text: `Application ID: ${genId()}` });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`app__accept__${message.author.id}__${appType.id}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`app__acceptsilent__${message.author.id}__${appType.id}`).setLabel('🔕 Accept Silently').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`app__deny__${message.author.id}__${appType.id}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
+      );
+
+      await reviewCh.send({ embeds: [embed], components: [row] });
+    } catch (e) {
+      console.error('App submit error:', e);
+      await message.channel.send('⚠️ Could not send to review channel. Please contact staff.').catch(() => {});
+    }
+
+    setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+  }
+});
+
+// ════════════════════════════════════════════
 // AUTOMOD — MESSAGE CREATE
 // ════════════════════════════════════════════
 client.on('messageCreate', async message => {
@@ -943,12 +1021,24 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.label.toLowerCase() === typeName);
         if (!appType) return interaction.reply({ content: `❌ No application type **${typeName}** found.`, ephemeral: true });
         if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ This application type has no questions configured yet.', ephemeral: true });
-        appPendingType.set(interaction.user.id, appType.id);
-        const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
-        for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)));
+        if (activeAppSessions.has(interaction.user.id)) return interaction.reply({ content: '❌ You already have an active application in progress.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        try {
+          const thread = await interaction.channel.threads.create({
+            name: `📋 ${appType.label} — ${interaction.user.username}`,
+            autoArchiveDuration: 60,
+            type: ChannelType.PrivateThread,
+            reason: 'Application session',
+          });
+          await thread.members.add(interaction.user.id);
+          activeAppSessions.set(interaction.user.id, { guildId, typeId: appType.id, threadId: thread.id, questionIndex: 0, answers: [] });
+          await thread.send({ embeds: [new EmbedBuilder().setTitle(`📋 ${appType.label}`).setColor(0x5865F2).setDescription(`Welcome <@${interaction.user.id}>!\n\nYou have **${appType.questions.length}** question(s) to answer.\nType your answer in this thread after each question.\n\nYou can type \`cancel\` at any time to cancel.\n\n━━━━━━━━━━━━━━━━━━━━━━`).setFooter({ text: `Question 1 / ${appType.questions.length}` })] });
+          await thread.send(`**Question 1:** ${appType.questions[0]}`);
+          return interaction.editReply({ content: `✅ Your application has started! Head to <#${thread.id}> to answer the questions.` });
+        } catch (e) {
+          console.error('Apply thread error:', e);
+          return interaction.editReply({ content: '❌ Could not create application thread. Make sure the bot has permission to create private threads.' });
         }
-        return interaction.showModal(modal);
       }
 
       if (cmd === 'sendmessage') {
@@ -1359,8 +1449,7 @@ client.on('interactionCreate', async interaction => {
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 5)').setStyle(TextInputStyle.Paragraph).setRequired(true)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_accept_role').setLabel('Role ID to give on accept (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions — one per line (max 100)').setStyle(TextInputStyle.Paragraph).setPlaceholder('What is your age?\nWhy do you want to join?\nDo you have any experience?').setMaxLength(4000).setRequired(true)),
           );
           return interaction.showModal(modal);
         }
@@ -1392,32 +1481,60 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Application type no longer exists.', ephemeral: true });
         if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ No questions configured.', ephemeral: true });
-        appPendingType.set(interaction.user.id, appType.id);
-        const modal = new ModalBuilder().setCustomId(`modal_apply__${appType.id}`).setTitle(`📋 ${appType.label}`);
-        for (let i = 0; i < Math.min(appType.questions.length, 5); i++) {
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(`q${i}`).setLabel(appType.questions[i].slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)));
+        if (activeAppSessions.has(interaction.user.id)) return interaction.reply({ content: '❌ You already have an active application in progress.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        try {
+          const thread = await interaction.channel.threads.create({
+            name: `📋 ${appType.label} — ${interaction.user.username}`,
+            autoArchiveDuration: 60,
+            type: ChannelType.PrivateThread,
+            reason: 'Application session',
+          });
+          await thread.members.add(interaction.user.id);
+          activeAppSessions.set(interaction.user.id, { guildId, typeId: appType.id, threadId: thread.id, questionIndex: 0, answers: [] });
+          await thread.send({ embeds: [new EmbedBuilder().setTitle(`📋 ${appType.label}`).setColor(0x5865F2).setDescription(`Welcome <@${interaction.user.id}>!\n\nYou have **${appType.questions.length}** question(s) to answer.\nType your answer in this thread after each question.\n\nYou can type \`cancel\` at any time to cancel.\n\n━━━━━━━━━━━━━━━━━━━━━━`).setFooter({ text: `Question 1 / ${appType.questions.length}` })] });
+          await thread.send(`**Question 1:** ${appType.questions[0]}`);
+          return interaction.editReply({ content: `✅ Application started! Head to <#${thread.id}> to answer the questions.` });
+        } catch (e) {
+          console.error('App open thread error:', e);
+          return interaction.editReply({ content: '❌ Could not create application thread. Make sure the bot has permission to create private threads.' });
         }
-        return interaction.showModal(modal);
       }
 
-      // ── Application accept/deny ──
-      if (id.startsWith('app__accept__') || id.startsWith('app__deny__')) {
+      // ── Application accept / accept silently / deny ──
+      if (id.startsWith('app__accept__') || id.startsWith('app__acceptsilent__') || id.startsWith('app__deny__')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const parts = id.split('__'); const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
-        if (action === 'accept') {
-          if (appType?.acceptRole && applicant) { const role = interaction.guild.roles.cache.get(appType.acceptRole); if (role) await applicant.roles.add(role).catch(() => {}); }
-          await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).setDescription(`**${interaction.user.tag}** accepted this application.`).setTimestamp()], components: [] });
-          if (applicant) await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287).setDescription(`Your **${appType?.label ?? 'application'}** has been **accepted**!\n\nWelcome to the team! 🎉`).setTimestamp()] }).catch(() => {});
-          if (ac.logChannel) { const logCh = interaction.guild.channels.cache.get(ac.logChannel); if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: interaction.user.tag, inline: true }).setTimestamp()] }); }
-        } else {
-          await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`**${interaction.user.tag}** denied this application.`).setTimestamp()], components: [] });
-          if (applicant) await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`Your **${appType?.label ?? 'application'}** has been **denied**.\n\nYou may try again in the future.`).setTimestamp()] }).catch(() => {});
-          if (ac.logChannel) { const logCh = interaction.guild.channels.cache.get(ac.logChannel); if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }).setTimestamp()] }); }
+
+        if (action === 'accept' || action === 'acceptsilent') {
+          // Give accept role if configured
+          if (appType?.acceptRole && applicant) {
+            const role = interaction.guild.roles.cache.get(appType.acceptRole);
+            if (role) await applicant.roles.add(role).catch(() => {});
+          }
+          await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).setDescription(`**${interaction.user.tag}** accepted this application.${action === 'acceptsilent' ? '\n*(Applicant was not notified)*' : ''}`).setTimestamp()], components: [] });
+          // DM applicant only for regular accept
+          if (action === 'accept' && applicant) {
+            await applicant.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted!').setColor(0x57F287).setDescription(`Your **${appType?.label ?? 'application'}** has been **accepted**!\n\nWelcome to the team! 🎉`).setTimestamp()] }).catch(() => {});
+          }
+          if (ac.logChannel) {
+            const logCh = interaction.guild.channels.cache.get(ac.logChannel);
+            if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: interaction.user.tag, inline: true }, { name: 'DM sent', value: action === 'accept' ? 'Yes' : 'No (silent)', inline: true }).setTimestamp()] });
+          }
+          return;
         }
-        return;
+
+        if (action === 'deny') {
+          // Show modal to enter deny reason
+          const modal = new ModalBuilder().setCustomId(`modal_app_deny__${applicantId}__${typeId}`).setTitle('Deny Application');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deny_reason').setLabel('Reason for denial').setStyle(TextInputStyle.Paragraph).setPlaceholder('You did not meet the requirements...').setRequired(true).setMaxLength(1000)),
+          );
+          return interaction.showModal(modal);
+        }
       }
 
       // ── Saved messages ──
@@ -1764,6 +1881,20 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'sd_ping_roles')    { getSessionConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
       if (interaction.customId === 'sd_allowed_roles') { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
       if (interaction.customId.startsWith('anpr__')) { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+      // ── Application accept role ──
+      if (interaction.customId.startsWith('apd_accept_role__')) {
+        const typeId = interaction.customId.replace('apd_accept_role__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Application type not found.', ephemeral: true });
+        if (ids.length === 0) {
+          return interaction.reply({ content: `✅ No accept role set for **${appType.label}**. You can change this any time from \`/setup applications\`.`, ephemeral: true });
+        }
+        appType.acceptRole = ids[0];
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Accept role for **${appType.label}** set to <@&${ids[0]}>.`, ephemeral: true });
+      }
+
       if (interaction.customId.startsWith('srr__add__')) {
         const panelId = interaction.customId.replace('srr__add__', '');
         const src = getSelfRoleConfig(guildId); const panel = src.panels[panelId];
@@ -1920,32 +2051,48 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Action set to **${act}**${act === 'delete+mute' ? ` (${am.muteMinutes} minutes)` : ''}.`, ephemeral: true });
       }
 
-      if (mid.startsWith('modal_apply__')) {
-        await interaction.deferReply({ ephemeral: true });
-        const typeId = mid.replace('modal_apply__', '');
+      // modal_apply__ is kept for legacy safety but thread-based flow is primary now
+      // ── Application deny reason modal ──
+      if (mid.startsWith('modal_app_deny__')) {
+        const parts = mid.replace('modal_app_deny__', '').split('__');
+        const applicantId = parts[0]; const typeId = parts[1];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
-        if (!appType) return interaction.editReply({ content: '❌ Application type not found.' });
-        if (!ac.reviewChannel) return interaction.editReply({ content: '❌ No review channel set.' });
-        const reviewCh = interaction.guild.channels.cache.get(ac.reviewChannel);
-        if (!reviewCh) return interaction.editReply({ content: '❌ Review channel not found.' });
-        const answers = appType.questions.slice(0, 5).map((q, i) => { const ans = interaction.fields.getTextInputValue(`q${i}`).trim(); return { name: `❓ ${q.slice(0, 250)}`, value: ans.slice(0, 1024) || '*No answer*', inline: false }; });
-        const embed = new EmbedBuilder().setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`).setColor(0x5865F2).setThumbnail(interaction.user.displayAvatarURL({ dynamic: true })).addFields({ name: '👤 Applicant', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true }, { name: '🆔 User ID', value: interaction.user.id, inline: true }, { name: '📅 Submitted', value: new Date().toUTCString(), inline: false }, ...answers).setTimestamp().setFooter({ text: `Application ID: ${genId()}` });
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`app__accept__${interaction.user.id}__${typeId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`app__deny__${interaction.user.id}__${typeId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger));
-        await reviewCh.send({ embeds: [embed], components: [row] });
-        return interaction.editReply({ content: `✅ Your **${appType.label}** application has been submitted!` });
+        const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
+        const reason = interaction.fields.getTextInputValue('deny_reason').trim();
+        await interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }, { name: '📝 Reason', value: reason, inline: false }).setTimestamp()], components: [] });
+        if (applicant) {
+          await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).setDescription(`Your **${appType?.label ?? 'application'}** has been **denied**.\n\n**Reason:** ${reason}`).setTimestamp()] }).catch(() => {});
+        }
+        if (ac.logChannel) {
+          const logCh = interaction.guild.channels.cache.get(ac.logChannel);
+          if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245).addFields({ name: 'Applicant', value: applicant?.user.tag ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: interaction.user.tag, inline: true }, { name: '📝 Reason', value: reason, inline: false }).setTimestamp()] });
+        }
+        return;
       }
+
       if (mid === 'modal_ap_add_type') {
         const ac = getApplicationConfig(guildId);
         const label = interaction.fields.getTextInputValue('ap_label').trim();
         const emoji = interaction.fields.getTextInputValue('ap_emoji').trim() || null;
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
-        const acceptRole = interaction.fields.getTextInputValue('ap_accept_role').trim() || null;
-        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 5);
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 100);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
-        ac.appTypes.push({ id: genId(), label, emoji, questions, acceptRole });
+        const newId = genId();
+        ac.appTypes.push({ id: newId, label, emoji, questions, acceptRole: null });
         saveConfig(config);
-        return interaction.reply({ content: `✅ Application type **${label}** added!`, ephemeral: true });
+        // Ask for accept role via role select
+        return interaction.reply({
+          content: `✅ Application type **${label}** created with **${questions.length}** question(s)!\n\n### 🎭 Select the role to give when accepted (optional)`,
+          components: [new ActionRowBuilder().addComponents(
+            new RoleSelectMenuBuilder()
+              .setCustomId(`apd_accept_role__${newId}`)
+              .setPlaceholder('Select accept role (or dismiss to skip)...')
+              .setMinValues(0)
+              .setMaxValues(1)
+          )],
+          ephemeral: true,
+        });
       }
       if (mid === 'modal_sm_new') {
         const sm = getSavedMessagesConfig(guildId);
