@@ -188,6 +188,7 @@ function getApplicationConfig(guildId) {
   for (const p of gc.applications.panels) {
     if (!Array.isArray(p.appTypeIds)) p.appTypeIds = [];
     if (p.reviewChannel === undefined) p.reviewChannel = null;
+    if (p.image         === undefined) p.image         = null;
     if (p.title         === undefined) p.title         = '📋 Applications';
     if (p.description   === undefined) p.description   = null;
     if (p.color         === undefined) p.color         = '#5865F2';
@@ -1527,6 +1528,7 @@ client.on('interactionCreate', async interaction => {
               .setDescription(panel.description || 'Click a button below to apply!')
               .setColor(hexToInt(panel.color))
               .setThumbnail(LOGO_URL);
+            if (panel.image) embed.setImage(panel.image);
             const rows = [];
             const types = panel.appTypeIds.map(tid => ac.appTypes.find(t => t.id === tid)).filter(Boolean);
             for (let i = 0; i < Math.min(types.length, 25); i += 5) {
@@ -1544,6 +1546,7 @@ client.on('interactionCreate', async interaction => {
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_panel_title').setLabel('Embed title').setStyle(TextInputStyle.Short).setValue(panel.title || '').setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_panel_desc').setLabel('Embed description').setStyle(TextInputStyle.Paragraph).setValue(panel.description || '').setRequired(false)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_panel_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(panel.color || '').setRequired(false)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_panel_image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(panel.image || '').setRequired(false)),
           );
           return interaction.showModal(modal);
         }
@@ -2288,6 +2291,7 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '📬 Channel', value: panel.channel ? `<#${panel.channel}>` : '*Not set*', inline: true },
             { name: '📢 Review Ch.', value: panel.reviewChannel ? `<#${panel.reviewChannel}>` : 'Global', inline: true },
+            { name: '🖼️ Image', value: panel.image ? '✅ Set' : '❌ Not set', inline: true },
             { name: '📝 Types', value: types, inline: false },
           );
         const r1 = new ActionRowBuilder().addComponents(
@@ -2319,6 +2323,7 @@ client.on('interactionCreate', async interaction => {
             .setDescription(panel.description || 'Click a button below to apply!')
             .setColor(hexToInt(panel.color))
             .setThumbnail(LOGO_URL);
+          if (panel.image) embed.setImage(panel.image);
           const rows = [];
           const types = panel.appTypeIds.map(tid => ac.appTypes.find(t => t.id === tid)).filter(Boolean);
           for (let i = 0; i < Math.min(types.length, 25); i += 5) {
@@ -2511,6 +2516,7 @@ client.on('interactionCreate', async interaction => {
         panel.title       = interaction.fields.getTextInputValue('ap_panel_title').trim() || panel.title;
         panel.description = interaction.fields.getTextInputValue('ap_panel_desc').trim() || null;
         panel.color       = interaction.fields.getTextInputValue('ap_panel_color').trim() || panel.color;
+        panel.image       = interaction.fields.getTextInputValue('ap_panel_image').trim() || null;
         await saveConfig(config);
         return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
