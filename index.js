@@ -10,10 +10,6 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } = require('discord.js');
 
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log("MongoDB connected"))
-  .catch(err => console.log(err));
-
 http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 10000);
 process.chdir(path.dirname(require.main.filename));
 
