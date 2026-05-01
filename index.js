@@ -93,14 +93,13 @@ async function saveAllConfigs() {
 }
 
 // saveConfig is een alias die de hele config wegschrijft
-// (voor backwards-compat met alle bestaande saveConfig(config) calls)
+// (voor backwards-compat met alle bestaande await saveConfig(config) calls)
 // We vervangen dit door per-guild saves maar houden de functie intact
-function saveConfig(cfg) {
+async function saveConfig(cfg) {
   // cfg is altijd het globale config object
-  // Sla elke guild asynchroon op
-  for (const guildId of Object.keys(cfg)) {
-    saveGuildConfig(guildId).catch(() => {});
-  }
+  // Wacht tot alle guilds zijn opgeslagen (100% waterdicht)
+  const promises = Object.keys(cfg).map(guildId => saveGuildConfig(guildId).catch(() => {}));
+  await Promise.allSettled(promises);
 }
 
 // Auto-save elke 5 minuten als extra zekerheid
@@ -306,10 +305,10 @@ function buildCounterSetupPayload(guildId) {
 }
 
 function getWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; return gc.warnings[userId]; }
-function addWarning(guildId, userId, warn) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; gc.warnings[userId].push(warn); saveConfig(config); }
-function clearWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; gc.warnings[userId] = []; saveConfig(config); }
+function addWarning(guildId, userId, warn) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; if (!gc.warnings[userId]) gc.warnings[userId] = []; gc.warnings[userId].push(warn); await saveConfig(config); }
+function clearWarnings(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.warnings) gc.warnings = {}; gc.warnings[userId] = []; await saveConfig(config); }
 function getNotes(guildId, userId) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; return gc.notes[userId]; }
-function addNote(guildId, userId, note) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; gc.notes[userId].push(note); saveConfig(config); }
+function addNote(guildId, userId, note) { const gc = getGuildConfig(guildId); if (!gc.notes) gc.notes = {}; if (!gc.notes[userId]) gc.notes[userId] = []; gc.notes[userId].push(note); await saveConfig(config); }
 
 // ════════════════════════════════════════════
 // CONSTANTS
@@ -1354,7 +1353,7 @@ client.on('interactionCreate', async interaction => {
       if (id.startsWith('cnt_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const cc = getCounterConfig(guildId);
-        if (id === 'cnt_toggle') { cc.enabled = !cc.enabled; saveConfig(config); return interaction.update(buildCounterSetupPayload(guildId)); }
+        if (id === 'cnt_toggle') { cc.enabled = !cc.enabled; await saveConfig(config); return interaction.update(buildCounterSetupPayload(guildId)); }
         if (id === 'cnt_category') return interaction.reply({ content: '### 📁 Select category', components: [channelDropdown('cntd_category', 'Select category...', [ChannelType.GuildCategory])], ephemeral: true });
         if (id === 'cnt_create_all') {
           await interaction.deferReply({ ephemeral: true });
@@ -1364,17 +1363,17 @@ client.on('interactionCreate', async interaction => {
             if (cc.channels[type].channelId && interaction.guild.channels.cache.get(cc.channels[type].channelId)) continue;
             try { await createCounterChannel(interaction.guild, type, cc); created++; } catch (e) { console.error(`Counter create error [${type}]:`, e); }
           }
-          cc.enabled = true; saveConfig(config);
+          cc.enabled = true; await saveConfig(config);
           return interaction.editReply({ content: `✅ Created **${created}** counter channel(s)!` });
         }
         if (id === 'cnt_delete_all') {
           await interaction.deferReply({ ephemeral: true });
           for (const type of Object.keys(cc.channels)) { await deleteCounterChannel(interaction.guild, type, cc).catch(() => {}); }
-          cc.enabled = false; saveConfig(config);
+          cc.enabled = false; await saveConfig(config);
           return interaction.editReply({ content: '✅ All counter channels deleted.' });
         }
         for (const type of ['members', 'bots', 'online', 'channels', 'roles']) {
-          if (id === `cnt_toggle_${type}`) { cc.channels[type].enabled = !cc.channels[type].enabled; saveConfig(config); return interaction.update(buildCounterSetupPayload(guildId)); }
+          if (id === `cnt_toggle_${type}`) { cc.channels[type].enabled = !cc.channels[type].enabled; await saveConfig(config); return interaction.update(buildCounterSetupPayload(guildId)); }
         }
         if (id === 'cnt_labels') {
           const modal = new ModalBuilder().setCustomId('modal_cnt_labels').setTitle('Edit Counter Labels');
@@ -1394,7 +1393,7 @@ client.on('interactionCreate', async interaction => {
       if (id.startsWith('am_')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const am = getAutomodConfig(guildId);
-        if (id === 'am_toggle') { am.enabled = !am.enabled; saveConfig(config); return interaction.update(buildAutomodSetupPayload(guildId)); }
+        if (id === 'am_toggle') { am.enabled = !am.enabled; await saveConfig(config); return interaction.update(buildAutomodSetupPayload(guildId)); }
         if (id === 'am_log') return interaction.reply({ content: '### 📋 Automod log channel', components: [channelDropdown('amd_log', 'Select channel...')], ephemeral: true });
         if (id === 'am_keywords') {
           const modal = new ModalBuilder().setCustomId('modal_am_keywords').setTitle('Edit Automod Keywords');
@@ -1535,7 +1534,7 @@ client.on('interactionCreate', async interaction => {
               rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`appopen__${t.id}__${panel.id}`).setLabel(t.label.slice(0, 80)).setStyle(ButtonStyle.Primary), t.emoji))));
             }
             await ch.send({ embeds: [embed], components: rows });
-            saveConfig(config);
+            await saveConfig(config);
             return interaction.editReply({ content: `✅ Panel **${panel.name}** deployed to <#${panel.channel}>!` });
           } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
         }
@@ -1792,7 +1791,7 @@ client.on('interactionCreate', async interaction => {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const wc = getWelcomerConfig(guildId);
         if (id === 'wc_channel') return interaction.reply({ content: '### 📢 Welcome channel', components: [channelDropdown('wcd_channel', 'Select channel...')], ephemeral: true });
-        if (id === 'wc_toggle') { wc.enabled = !wc.enabled; saveConfig(config); return interaction.update(buildWelcomerSetupPayload(guildId)); }
+        if (id === 'wc_toggle') { wc.enabled = !wc.enabled; await saveConfig(config); return interaction.update(buildWelcomerSetupPayload(guildId)); }
         if (id === 'wc_content') {
           const modal = new ModalBuilder().setCustomId('modal_wc_content').setTitle('Edit Welcome Message');
           modal.addComponents(
@@ -1812,7 +1811,7 @@ client.on('interactionCreate', async interaction => {
         const ar = getAutoroleConfig(guildId);
         if (id === 'ar_add') return interaction.reply({ content: '### ➕ Select autoroles', components: [roleDropdown('ard_add', 'Select roles...')], ephemeral: true });
         if (id === 'ar_remove') { if (!ar.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true }); const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role...').addOptions(ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: id }; })); return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true }); }
-        if (id === 'ar_toggle') { ar.enabled = !ar.enabled; saveConfig(config); return interaction.update(buildAutoroleSetupPayload(guildId)); }
+        if (id === 'ar_toggle') { ar.enabled = !ar.enabled; await saveConfig(config); return interaction.update(buildAutoroleSetupPayload(guildId)); }
       }
 
       // ════ VERIFICATION BUTTONS ════
@@ -1821,7 +1820,7 @@ client.on('interactionCreate', async interaction => {
         const vc = getVerificationConfig(guildId);
         if (id === 'vc_channel') return interaction.reply({ content: '### 📢 Verification channel', components: [channelDropdown('vcd_channel', 'Select channel...')], ephemeral: true });
         if (id === 'vc_role')    return interaction.reply({ content: '### 🎭 Verified role', components: [roleDropdown('vcd_role', 'Select role...', 1, 1)], ephemeral: true });
-        if (id === 'vc_toggle')  { vc.enabled = !vc.enabled; saveConfig(config); return interaction.update(buildVerificationSetupPayload(guildId)); }
+        if (id === 'vc_toggle')  { vc.enabled = !vc.enabled; await saveConfig(config); return interaction.update(buildVerificationSetupPayload(guildId)); }
         if (id === 'vc_content') {
           const modal = new ModalBuilder().setCustomId('modal_vc_content').setTitle('Edit Verification Panel');
           modal.addComponents(
@@ -1894,7 +1893,7 @@ client.on('interactionCreate', async interaction => {
           if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
           await interaction.deferReply({ ephemeral: true });
           await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
-          saveConfig(config);
+          await saveConfig(config);
           return interaction.editReply({ content: `✅ Ticket panel deployed!` });
         }
       }
@@ -1973,7 +1972,7 @@ client.on('interactionCreate', async interaction => {
           }
           if (action === 'channel')   return interaction.reply({ content: `### 📢 Channel for **${t.name}**`, components: [channelDropdown(`anch__${typeId}`, 'Select channel...')], ephemeral: true });
           if (action === 'pingrole')  return interaction.reply({ content: `### 🔔 Ping role for **${t.name}**`, components: [roleDropdown(`anpr__${typeId}`, 'Select role...', 1, 1)], ephemeral: true });
-          if (action === 'clearping') { t.pingRole = null; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+          if (action === 'clearping') { t.pingRole = null; await saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
         }
       }
 
@@ -2016,7 +2015,7 @@ client.on('interactionCreate', async interaction => {
             if (!panel.channel || !panel.roles.length) return interaction.reply({ content: '❌ Set channel and add roles first.', ephemeral: true });
             await interaction.deferReply({ ephemeral: true });
             await deploySelfRolePanel(interaction.guild, panelId, panel);
-            saveConfig(config);
+            await saveConfig(config);
             return interaction.editReply({ content: `✅ **${panel.title}** deployed!` });
           }
         }
@@ -2083,12 +2082,12 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isRoleSelectMenu()) {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const ids = interaction.values;
-      if (interaction.customId === 'ard_add')          { const ar = getAutoroleConfig(guildId); for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); } saveConfig(config); return interaction.reply({ content: `✅ Autoroles added.`, ephemeral: true }); }
-      if (interaction.customId === 'vcd_role')          { const vc = getVerificationConfig(guildId); vc.verifiedRole = ids[0]; saveConfig(config); return interaction.reply({ content: `✅ Verified role: <@&${ids[0]}>.`, ephemeral: true }); }
-      if (interaction.customId === 'td_ping_roles')     { getTicketConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
-      if (interaction.customId === 'sd_ping_roles')     { getSessionConfig(guildId).pingRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
-      if (interaction.customId === 'sd_allowed_roles')  { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
-      if (interaction.customId.startsWith('anpr__'))    { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+      if (interaction.customId === 'ard_add')          { const ar = getAutoroleConfig(guildId); for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); } await saveConfig(config); return interaction.reply({ content: `✅ Autoroles added.`, ephemeral: true }); }
+      if (interaction.customId === 'vcd_role')          { const vc = getVerificationConfig(guildId); vc.verifiedRole = ids[0]; await saveConfig(config); return interaction.reply({ content: `✅ Verified role: <@&${ids[0]}>.`, ephemeral: true }); }
+      if (interaction.customId === 'td_ping_roles')     { getTicketConfig(guildId).pingRoles = ids; await saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', ephemeral: true }); }
+      if (interaction.customId === 'sd_ping_roles')     { getSessionConfig(guildId).pingRoles = ids; await saveConfig(config); return interaction.reply({ content: '✅ Session ping roles set.', ephemeral: true }); }
+      if (interaction.customId === 'sd_allowed_roles')  { getSessionConfig(guildId).allowedRoles = ids; await saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
+      if (interaction.customId.startsWith('anpr__'))    { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; await saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
 
       // Application type accept roles
       if (interaction.customId.startsWith('apte_roles__')) {
@@ -2097,7 +2096,7 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         appType.acceptRoles = ids; // Could be empty array if none selected
-        saveConfig(config);
+        await saveConfig(config);
         const roleNames = ids.length ? ids.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).join(', ') : 'None';
         return interaction.reply({ content: `✅ Accept roles for **${appType.label}** set to: ${roleNames}`, ephemeral: true });
       }
@@ -2125,18 +2124,18 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isChannelSelectMenu()) {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
       const chId = interaction.values[0];
-      if (interaction.customId === 'wcd_channel')         { getWelcomerConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'vcd_channel')         { getVerificationConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_transcript')       { getTicketConfig(guildId).transcriptChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_channel')          { getTicketConfig(guildId).ticketChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'td_category')         { getTicketConfig(guildId).ticketCategory = chId; saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'sd_channel')          { getSessionConfig(guildId).channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'apd_review_channel')  { getApplicationConfig(guildId).reviewChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Global review channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'apd_log_channel')     { getApplicationConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'amd_log')             { getAutomodConfig(guildId).logChannel = chId; saveConfig(config); return interaction.reply({ content: `✅ Automod log: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId.startsWith('anch__'))      { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
-      if (interaction.customId.startsWith('srch__'))      { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
-      if (interaction.customId === 'cntd_category')       { getCounterConfig(guildId).categoryId = chId; saveConfig(config); return interaction.reply({ content: `✅ Counter category: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'wcd_channel')         { getWelcomerConfig(guildId).channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'vcd_channel')         { getVerificationConfig(guildId).channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_transcript')       { getTicketConfig(guildId).transcriptChannel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_channel')          { getTicketConfig(guildId).ticketChannel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'td_category')         { getTicketConfig(guildId).ticketCategory = chId; await saveConfig(config); return interaction.reply({ content: `✅ Category: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'sd_channel')          { getSessionConfig(guildId).channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'apd_review_channel')  { getApplicationConfig(guildId).reviewChannel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Global review channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'apd_log_channel')     { getApplicationConfig(guildId).logChannel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'amd_log')             { getAutomodConfig(guildId).logChannel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Automod log: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId.startsWith('anch__'))      { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; await saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
+      if (interaction.customId.startsWith('srch__'))      { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
+      if (interaction.customId === 'cntd_category')       { getCounterConfig(guildId).categoryId = chId; await saveConfig(config); return interaction.reply({ content: `✅ Counter category: <#${chId}>`, ephemeral: true }); }
 
       if (interaction.customId.startsWith('apte_review_channel__')) {
         const typeId = interaction.customId.replace('apte_review_channel__', '');
@@ -2144,7 +2143,7 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         appType.reviewChannel = chId;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ Review kanaal voor **${appType.label}** ingesteld op <#${chId}>!`, ephemeral: true });
       }
       // Application panel channel
@@ -2153,7 +2152,7 @@ client.on('interactionCreate', async interaction => {
         const ac = getApplicationConfig(guildId);
         const panel = ac.panels.find(p => p.id === panelId);
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        panel.channel = chId; saveConfig(config);
+        panel.channel = chId; await saveConfig(config);
         return interaction.reply({ content: `✅ Panel channel set to <#${chId}>!`, ephemeral: true });
       }
       // Application panel review channel override
@@ -2162,7 +2161,7 @@ client.on('interactionCreate', async interaction => {
         const ac = getApplicationConfig(guildId);
         const panel = ac.panels.find(p => p.id === panelId);
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        panel.reviewChannel = chId; saveConfig(config);
+        panel.reviewChannel = chId; await saveConfig(config);
         return interaction.reply({ content: `✅ Review channel override set to <#${chId}>!`, ephemeral: true });
       }
     }
@@ -2206,14 +2205,14 @@ client.on('interactionCreate', async interaction => {
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
 
       // Standard selects
-      if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
-      if (id === 'smd_delete')      { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; saveConfig(config); return interaction.reply({ content: '✅ Deleted.', ephemeral: true }); }
+      if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); await saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
+      if (id === 'smd_delete')      { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; await saveConfig(config); return interaction.reply({ content: '✅ Deleted.', ephemeral: true }); }
       if (id === 'an_sel_edit')     { return interaction.update(buildAnnouncementEditor(guildId, val)); }
-      if (id === 'an_sel_delete')   { delete getAnnouncementConfig(guildId).types[val]; saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
+      if (id === 'an_sel_delete')   { delete getAnnouncementConfig(guildId).types[val]; await saveConfig(config); return interaction.update(buildAnnouncementOverview(guildId)); }
       if (id === 'sr_sel_edit')     { return interaction.update(buildPanelEditor(guildId, val)); }
-      if (id === 'sr_sel_delete')   { delete getSelfRoleConfig(guildId).panels[val]; saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
-      if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
-      if (id === 'td_remove_type')  { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
+      if (id === 'sr_sel_delete')   { delete getSelfRoleConfig(guildId).panels[val]; await saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
+      if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); await saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
+      if (id === 'td_remove_type')  { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); await saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
 
       // Self role dropdown
       if (id.startsWith('srp__dd__')) {
@@ -2233,14 +2232,14 @@ client.on('interactionCreate', async interaction => {
         // Remove from all panels too
         for (const panel of ac.panels) { panel.appTypeIds = panel.appTypeIds.filter(tid => tid !== val); }
         ac.appTypes = ac.appTypes.filter(t => t.id !== val);
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: '✅ Application type removed.', ephemeral: true });
       }
 
       if (id === 'apd_remove_panel') {
         const ac = getApplicationConfig(guildId);
         ac.panels = ac.panels.filter(p => p.id !== val);
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: '✅ Panel removed.', ephemeral: true });
       }
 
@@ -2327,7 +2326,7 @@ client.on('interactionCreate', async interaction => {
             rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`appopen__${t.id}__${panel.id}`).setLabel(t.label.slice(0, 80)).setStyle(ButtonStyle.Primary), t.emoji))));
           }
           await ch.send({ embeds: [embed], components: rows });
-          saveConfig(config);
+          await saveConfig(config);
           return interaction.editReply({ content: `✅ Panel **${panel.name}** deployed to <#${panel.channel}>!` });
         } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
       }
@@ -2338,7 +2337,7 @@ client.on('interactionCreate', async interaction => {
         const ac = getApplicationConfig(guildId);
         const panel = ac.panels.find(p => p.id === panelId);
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
-        if (!panel.appTypeIds.includes(val)) { panel.appTypeIds.push(val); saveConfig(config); }
+        if (!panel.appTypeIds.includes(val)) { panel.appTypeIds.push(val); await saveConfig(config); }
         return interaction.reply({ content: `✅ Type added to panel!`, ephemeral: true });
       }
       if (id.startsWith('appe_remove_type__')) {
@@ -2347,7 +2346,7 @@ client.on('interactionCreate', async interaction => {
         const panel = ac.panels.find(p => p.id === panelId);
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
         panel.appTypeIds = panel.appTypeIds.filter(tid => tid !== val);
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ Type removed from panel!`, ephemeral: true });
       }
 
@@ -2378,7 +2377,7 @@ client.on('interactionCreate', async interaction => {
         cc.channels.online.label   = interaction.fields.getTextInputValue('cnt_lbl_online').trim()   || cc.channels.online.label;
         cc.channels.channels.label = interaction.fields.getTextInputValue('cnt_lbl_channels').trim() || cc.channels.channels.label;
         cc.channels.roles.label    = interaction.fields.getTextInputValue('cnt_lbl_roles').trim()    || cc.channels.roles.label;
-        saveConfig(config);
+        await saveConfig(config);
         await updateCounters(interaction.guild).catch(() => {});
         return interaction.reply({ content: '✅ Labels updated and counters refreshed!', ephemeral: true });
       }
@@ -2388,7 +2387,7 @@ client.on('interactionCreate', async interaction => {
         const am = getAutomodConfig(guildId);
         const raw = interaction.fields.getTextInputValue('am_kw').trim();
         am.keywords = raw ? raw.split(',').map(k => k.trim().toLowerCase()).filter(Boolean) : [];
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ **${am.keywords.length}** keyword(s) set.`, ephemeral: true });
       }
       if (mid === 'modal_am_action') {
@@ -2399,7 +2398,7 @@ client.on('interactionCreate', async interaction => {
         if (!['delete', 'delete+warn', 'delete+mute'].includes(act)) return interaction.reply({ content: '❌ Invalid action.', ephemeral: true });
         am.action = act;
         if (!isNaN(mins) && mins > 0) am.muteMinutes = mins;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ Action set to **${act}**.`, ephemeral: true });
       }
 
@@ -2460,7 +2459,7 @@ client.on('interactionCreate', async interaction => {
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         const newId = genId();
         ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [], acceptMessage: null, denyMessage: null, groupLink: null, nicknameFormat: null });
-        saveConfig(config);
+        await saveConfig(config);
         // Ask for accept roles
         return interaction.reply({
           content: `✅ Application type **${label}** created with **${questions.length}** question(s)!\n\n### 🎭 Select roles to give when accepted (optional — dismiss to skip)`,
@@ -2478,7 +2477,7 @@ client.on('interactionCreate', async interaction => {
         const color = interaction.fields.getTextInputValue('ap_panel_color').trim() || '#5865F2';
         const pid = genId();
         ac.panels.push({ id: pid, name, title, description: desc, color, channel: null, reviewChannel: null, appTypeIds: [] });
-        saveConfig(config);
+        await saveConfig(config);
         // Open panel editor
         const panel = ac.panels.find(p => p.id === pid);
         const embed = new EmbedBuilder()
@@ -2512,7 +2511,7 @@ client.on('interactionCreate', async interaction => {
         panel.title       = interaction.fields.getTextInputValue('ap_panel_title').trim() || panel.title;
         panel.description = interaction.fields.getTextInputValue('ap_panel_desc').trim() || null;
         panel.color       = interaction.fields.getTextInputValue('ap_panel_color').trim() || panel.color;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
 
@@ -2526,7 +2525,7 @@ client.on('interactionCreate', async interaction => {
         const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 60);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         appType.questions = questions;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ Questions updated! **${questions.length}** question(s) set.`, ephemeral: true });
       }
 
@@ -2537,7 +2536,7 @@ client.on('interactionCreate', async interaction => {
         if (Object.values(sm.messages).some(m => m.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ **${name}** already exists.`, ephemeral: true });
         const newId = genId();
         sm.messages[newId] = { name, title: interaction.fields.getTextInputValue('sm_title').trim(), description: interaction.fields.getTextInputValue('sm_desc').trim(), color: interaction.fields.getTextInputValue('sm_color').trim() || '#5865F2', image: interaction.fields.getTextInputValue('sm_image').trim() || null, footer: null };
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({ content: `✅ Saved message **${name}** created!`, ephemeral: true });
       }
       if (mid.startsWith('modal_sm_edit__')) {
@@ -2546,7 +2545,7 @@ client.on('interactionCreate', async interaction => {
         if (!msg) return interaction.reply({ content: '❌ Not found.', ephemeral: true });
         const t = interaction.fields.getTextInputValue('sm_title').trim(); const d = interaction.fields.getTextInputValue('sm_desc').trim(); const c = interaction.fields.getTextInputValue('sm_color').trim(); const im = interaction.fields.getTextInputValue('sm_image').trim(); const f = interaction.fields.getTextInputValue('sm_footer').trim();
         if (t) msg.title = t; if (d) msg.description = d; if (c) msg.color = c; msg.image = im || null; msg.footer = f || null;
-        saveConfig(config); return interaction.reply({ content: `✅ Updated!`, ephemeral: true });
+        await saveConfig(config); return interaction.reply({ content: `✅ Updated!`, ephemeral: true });
       }
 
       // ── Welcomer ──
@@ -2554,7 +2553,7 @@ client.on('interactionCreate', async interaction => {
         const wc = getWelcomerConfig(guildId);
         const t = interaction.fields.getTextInputValue('wc_title').trim(); const d = interaction.fields.getTextInputValue('wc_desc').trim(); const c = interaction.fields.getTextInputValue('wc_color').trim(); const im = interaction.fields.getTextInputValue('wc_image').trim(); const f = interaction.fields.getTextInputValue('wc_footer').trim();
         if (t) wc.title = t; if (d) wc.description = d; if (c) wc.color = c; wc.image = im || null; wc.footer = f || null;
-        saveConfig(config); return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
+        await saveConfig(config); return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
       }
 
       // ── Verification ──
@@ -2562,7 +2561,7 @@ client.on('interactionCreate', async interaction => {
         const vc = getVerificationConfig(guildId);
         const t = interaction.fields.getTextInputValue('vc_title').trim(); const d = interaction.fields.getTextInputValue('vc_desc').trim(); const c = interaction.fields.getTextInputValue('vc_color').trim(); const im = interaction.fields.getTextInputValue('vc_image').trim();
         if (t) vc.panelTitle = t; if (d) vc.panelDescription = d; if (c) vc.panelColor = c; vc.panelImage = im || null;
-        saveConfig(config); return interaction.reply({ content: '✅ Updated!', ephemeral: true });
+        await saveConfig(config); return interaction.reply({ content: '✅ Updated!', ephemeral: true });
       }
       if (mid === 'modal_verify_submit') {
         await interaction.deferReply({ ephemeral: true });
@@ -2579,15 +2578,15 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ── Ticket ──
-      if (mid === 'modal_t_embed')   { const tc = getTicketConfig(guildId); const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim(); if (t) tc.panelTitle = t; if (d) tc.panelDescription = d; if (c) tc.panelColor = c; if (th) tc.panelThumbnail = th; saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true }); }
-      if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); saveConfig(config); return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true }); }
-      if (mid === 'modal_t_add_type') { const tc = getTicketConfig(guildId); tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null }); saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true }); }
+      if (mid === 'modal_t_embed')   { const tc = getTicketConfig(guildId); const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim(); if (t) tc.panelTitle = t; if (d) tc.panelDescription = d; if (c) tc.panelColor = c; if (th) tc.panelThumbnail = th; await saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true }); }
+      if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); await saveConfig(config); return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true }); }
+      if (mid === 'modal_t_add_type') { const tc = getTicketConfig(guildId); tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null }); await saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true }); }
 
       // ── Session ──
-      if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true }); getSessionConfig(guildId).joinLink = rawLink; saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, ephemeral: true }); }
-      if (mid === 'modal_s_desc')      { const sc = getSessionConfig(guildId); const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim(); if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh; saveConfig(config); return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true }); }
-      if (mid === 'modal_s_images')    { const sc = getSessionConfig(guildId); const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim(); if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi; saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true }); }
-      if (mid === 'modal_s_threshold') { const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10); if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number 1-999.', ephemeral: true }); getSessionConfig(guildId).voteThreshold = num; saveConfig(config); return interaction.reply({ content: `✅ Vote threshold: **${num}**.`, ephemeral: true }); }
+      if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true }); getSessionConfig(guildId).joinLink = rawLink; await saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, ephemeral: true }); }
+      if (mid === 'modal_s_desc')      { const sc = getSessionConfig(guildId); const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim(); if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh; await saveConfig(config); return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true }); }
+      if (mid === 'modal_s_images')    { const sc = getSessionConfig(guildId); const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim(); if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi; await saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true }); }
+      if (mid === 'modal_s_threshold') { const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10); if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number 1-999.', ephemeral: true }); getSessionConfig(guildId).voteThreshold = num; await saveConfig(config); return interaction.reply({ content: `✅ Vote threshold: **${num}**.`, ephemeral: true }); }
 
       // ── Announcement ──
       if (mid === 'modal_an_new') {
@@ -2596,7 +2595,7 @@ client.on('interactionCreate', async interaction => {
         if (Object.values(ac.types).some(t => t.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ **${name}** already exists.`, ephemeral: true });
         const tid = genId();
         ac.types[tid] = { name, emoji: interaction.fields.getTextInputValue('an_emoji').trim() || null, title: interaction.fields.getTextInputValue('an_title').trim(), description: interaction.fields.getTextInputValue('an_desc').trim() || null, color: interaction.fields.getTextInputValue('an_color').trim() || '#ED4245', channel: null, pingRole: null, image: null };
-        saveConfig(config); return interaction.reply({ ...buildAnnouncementEditor(guildId, tid) });
+        await saveConfig(config); return interaction.reply({ ...buildAnnouncementEditor(guildId, tid) });
       }
       if (mid.startsWith('modal_an_content__')) {
         const typeId = mid.replace('modal_an_content__', '');
@@ -2604,7 +2603,7 @@ client.on('interactionCreate', async interaction => {
         if (!t) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const title = interaction.fields.getTextInputValue('an_c_title').trim(); const desc = interaction.fields.getTextInputValue('an_c_desc').trim(); const color = interaction.fields.getTextInputValue('an_c_color').trim(); const image = interaction.fields.getTextInputValue('an_c_image').trim(); const emoji = interaction.fields.getTextInputValue('an_c_emoji').trim();
         if (title) t.title = title; if (desc) t.description = desc; if (color) t.color = color; if (image) t.image = image; if (emoji) t.emoji = emoji;
-        saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
+        await saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
       }
 
       // ── Application type: nickname formaat ──
@@ -2615,7 +2614,7 @@ client.on('interactionCreate', async interaction => {
         if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
         const fmt = interaction.fields.getTextInputValue('nickname_format').trim();
         appType.nicknameFormat = fmt || null;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({
           content: fmt
             ? [
@@ -2642,7 +2641,7 @@ client.on('interactionCreate', async interaction => {
         const denyMsg   = interaction.fields.getTextInputValue('deny_msg').trim();
         appType.acceptMessage = acceptMsg || null;
         appType.denyMessage   = denyMsg   || null;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({
           content: [
             '✅ **DM berichten opgeslagen!**',
@@ -2667,7 +2666,7 @@ client.on('interactionCreate', async interaction => {
         const link = interaction.fields.getTextInputValue('group_link').trim();
         if (link && !isValidUrl(link)) return interaction.reply({ content: '❌ Ongeldige URL. Moet beginnen met `https://`.', ephemeral: true });
         appType.groupLink = link || null;
-        saveConfig(config);
+        await saveConfig(config);
         return interaction.reply({
           content: link
             ? `✅ Groep link ingesteld! Bij acceptatie krijgt de persoon een **"Join de groep!"** knop in zijn DM.`
@@ -2683,7 +2682,7 @@ client.on('interactionCreate', async interaction => {
         if (!['buttons', 'dropdown', 'reaction'].includes(type)) return interaction.reply({ content: '❌ Type must be `buttons`, `dropdown`, or `reaction`.', ephemeral: true });
         const pid = genId();
         src.panels[pid] = { title: interaction.fields.getTextInputValue('sr_title').trim(), description: interaction.fields.getTextInputValue('sr_desc').trim() || null, color: interaction.fields.getTextInputValue('sr_color').trim() || null, thumbnail: null, channel: null, messageId: null, type, max: parseInt(interaction.fields.getTextInputValue('sr_max').trim(), 10) || 0, roles: [] };
-        saveConfig(config); return interaction.reply({ ...buildPanelEditor(guildId, pid) });
+        await saveConfig(config); return interaction.reply({ ...buildPanelEditor(guildId, pid) });
       }
       if (mid.startsWith('modal_sr_embed__')) {
         const panelId = mid.replace('modal_sr_embed__', '');
@@ -2691,7 +2690,7 @@ client.on('interactionCreate', async interaction => {
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
         const t = interaction.fields.getTextInputValue('sr_e_title').trim(); const d = interaction.fields.getTextInputValue('sr_e_desc').trim(); const c = interaction.fields.getTextInputValue('sr_e_color').trim(); const th = interaction.fields.getTextInputValue('sr_e_thumbnail').trim();
         if (t) panel.title = t; if (d) panel.description = d; if (c) panel.color = c; if (th) panel.thumbnail = th;
-        saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
+        await saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
       if (mid.startsWith('modal_sr_rolelabel__')) {
         const panelId = mid.replace('modal_sr_rolelabel__', '');
@@ -2704,7 +2703,7 @@ client.on('interactionCreate', async interaction => {
         const reaction = interaction.fields.getTextInputValue('sr_rl_reaction')?.trim() || null;
         const desc     = interaction.fields.getTextInputValue('sr_rl_desc')?.trim() || null;
         panel.roles.push({ id: pending.roleId, label: label.slice(0, 80), emoji, reaction, description: desc });
-        saveConfig(config); srPendingRoleAdd.delete(interaction.user.id);
+        await saveConfig(config); srPendingRoleAdd.delete(interaction.user.id);
         return interaction.reply({ content: `✅ Added <@&${pending.roleId}> to **${panel.title}**!`, ephemeral: true });
       }
     }
