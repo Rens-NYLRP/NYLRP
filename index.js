@@ -30,16 +30,19 @@ const client = new Client({
 // CONFIG — MONGODB PERSISTENT STORAGE
 // ════════════════════════════════════════════
 
+// MongoDB schema: één document per guild, plus één 'global' doc
 const configSchema = new mongoose.Schema({
-  _id:  { type: String, required: true },
+  _id:  { type: String, required: true }, // guildId or 'global'
   data: { type: mongoose.Schema.Types.Mixed, default: {} },
 }, { strict: false });
 
 const ConfigModel = mongoose.model('Config', configSchema);
 
+// In-memory config cache (zelfde structuur als voorheen)
 let config = {};
 let dbReady = false;
 
+// Verbinding maken met MongoDB
 async function connectDB() {
   try {
     await mongoose.connect(process.env.MONGODB_URI, {
@@ -54,6 +57,7 @@ async function connectDB() {
   }
 }
 
+// Laad alle guild configs uit MongoDB in de in-memory cache
 async function loadConfigFromDB() {
   try {
     const docs = await ConfigModel.find({});
@@ -67,6 +71,7 @@ async function loadConfigFromDB() {
   }
 }
 
+// Sla één guild op naar MongoDB (wordt aangeroepen na elke wijziging)
 async function saveGuildConfig(guildId) {
   if (!dbReady) return;
   try {
@@ -80,22 +85,30 @@ async function saveGuildConfig(guildId) {
   }
 }
 
+// Sla alles op (wordt gebruikt bij shutdown)
 async function saveAllConfigs() {
   if (!dbReady) return;
   const promises = Object.keys(config).map(guildId => saveGuildConfig(guildId));
   await Promise.allSettled(promises);
 }
 
+// saveConfig is een alias die de hele config wegschrijft
+// (voor backwards-compat met alle bestaande saveConfig(config) calls)
+// We vervangen dit door per-guild saves maar houden de functie intact
 function saveConfig(cfg) {
+  // cfg is altijd het globale config object
+  // Sla elke guild asynchroon op
   for (const guildId of Object.keys(cfg)) {
     saveGuildConfig(guildId).catch(() => {});
   }
 }
 
+// Auto-save elke 5 minuten als extra zekerheid
 setInterval(() => {
   saveAllConfigs().catch(console.error);
 }, 5 * 60 * 1000);
 
+// Graceful shutdown
 async function gracefulShutdown(signal) {
   console.log(`\n⚠️ ${signal} — config opslaan voor afsluiten...`);
   await saveAllConfigs();
@@ -117,6 +130,7 @@ process.on('unhandledRejection', (reason) => {
 function getGuildConfig(guildId) {
   if (!config[guildId]) {
     config[guildId] = {};
+    // Nieuwe guild — direct opslaan
     saveGuildConfig(guildId).catch(() => {});
   }
   return config[guildId];
@@ -148,7 +162,7 @@ function getVerificationConfig(guildId) {
 }
 
 // ════════════════════════════════════════════
-// APPLICATION CONFIG
+// APPLICATION CONFIG (overhauled)
 // ════════════════════════════════════════════
 function getApplicationConfig(guildId) {
   const gc = getGuildConfig(guildId);
@@ -158,8 +172,10 @@ function getApplicationConfig(guildId) {
     logChannel: null,
     appTypes: [],
   };
+  // Zorg dat verplichte velden altijd aanwezig zijn (migratie van oude data)
   if (!gc.applications.panels)   gc.applications.panels   = [];
   if (!gc.applications.appTypes) gc.applications.appTypes = [];
+  // Patch elk bestaand type met ontbrekende velden zodat data nooit verloren gaat
   for (const t of gc.applications.appTypes) {
     if (!Array.isArray(t.questions))    t.questions    = [];
     if (!Array.isArray(t.acceptRoles))  t.acceptRoles  = [];
@@ -167,8 +183,8 @@ function getApplicationConfig(guildId) {
     if (t.denyMessage    === undefined) t.denyMessage    = null;
     if (t.groupLink      === undefined) t.groupLink      = null;
     if (t.nicknameFormat === undefined) t.nicknameFormat = null;
-    if (t.channel        === undefined) t.channel        = null; // per-type review kanaal
   }
+  // Patch elk bestaand panel met ontbrekende velden
   for (const p of gc.applications.panels) {
     if (!Array.isArray(p.appTypeIds)) p.appTypeIds = [];
     if (p.reviewChannel === undefined) p.reviewChannel = null;
@@ -184,6 +200,7 @@ function getSavedMessagesConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.savedMessages) gc.savedMessages = { messages: {} };
   if (!gc.savedMessages.messages) gc.savedMessages.messages = {};
+  // Patch bestaande messages met ontbrekende velden
   for (const msg of Object.values(gc.savedMessages.messages)) {
     if (msg.title       === undefined) msg.title       = 'Bericht';
     if (msg.description === undefined) msg.description = '';
@@ -320,6 +337,9 @@ const pendingSendMsgChannel  = new Map();
 
 // ════════════════════════════════════════════
 // APPLICATION SESSION STATE
+// activeAppSessions: userId -> {
+//   guildId, typeId, panelId, questionIndex, answers, dmChannelId, guildName, startedAt
+// }
 // ════════════════════════════════════════════
 const activeAppSessions = new Map();
 
@@ -386,6 +406,9 @@ function channelDropdown(customId, placeholder, types = [ChannelType.GuildText])
 // APPLICATION SYSTEM — CORE FUNCTIONS
 // ════════════════════════════════════════════
 
+/**
+ * Send the next question to the user's DM and update the session state.
+ */
 async function sendNextQuestion(userId, session, appType) {
   const dmChannel = await client.users.fetch(userId).then(u => u.createDM()).catch(() => null);
   if (!dmChannel) return false;
@@ -400,6 +423,7 @@ async function sendNextQuestion(userId, session, appType) {
     .setDescription(`**${question}**`)
     .setFooter({ text: `Type your answer below. Type "cancel" to cancel your application. • ${session.guildName}` });
 
+  // Add progress bar
   const filled = Math.round((qIndex / total) * 10);
   const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
   embed.addFields({ name: 'Progress', value: `\`${bar}\` ${qIndex}/${total} answered`, inline: false });
@@ -412,15 +436,15 @@ async function sendNextQuestion(userId, session, appType) {
   }
 }
 
+/**
+ * Submit the completed application to the review channel.
+ */
 async function submitApplication(userId, session, appType, guild) {
   const ac = getApplicationConfig(session.guildId);
 
-  // Prioriteit: type-kanaal → panel-kanaal → globaal kanaal
+  // Determine review channel: panel-level override or global
   let reviewChannelId = ac.reviewChannel;
-  const appTypeForChannel = ac.appTypes.find(t => t.id === session.typeId);
-  if (appTypeForChannel?.channel) {
-    reviewChannelId = appTypeForChannel.channel;
-  } else if (session.panelId) {
+  if (session.panelId) {
     const panel = ac.panels.find(p => p.id === session.panelId);
     if (panel?.reviewChannel) reviewChannelId = panel.reviewChannel;
   }
@@ -492,8 +516,7 @@ function buildApplicationSetupPayload(guildId) {
   const typeList = ac.appTypes.length
     ? ac.appTypes.map(t => {
         const roles = (t.acceptRoles ?? []).map(id => `<@&${id}>`).join(', ') || 'None';
-        const ch = t.channel ? `<#${t.channel}>` : 'Globaal';
-        return `${t.emoji || '•'} \`${t.label}\` — **${t.questions?.length ?? 0}** vragen | Rollen: ${roles} | Kanaal: ${ch}`;
+        return `${t.emoji || '•'} \`${t.label}\` — **${t.questions?.length ?? 0}** questions | Accept roles: ${roles}`;
       }).join('\n')
     : '*No types yet*';
 
@@ -542,7 +565,7 @@ function buildApplicationSetupPayload(guildId) {
 }
 
 // ════════════════════════════════════════════
-// OTHER SETUP PAYLOADS
+// OTHER SETUP PAYLOADS (unchanged)
 // ════════════════════════════════════════════
 function buildSavedMessagesPayload(guildId) {
   const sm = getSavedMessagesConfig(guildId);
@@ -848,21 +871,24 @@ client.on('guildMemberRemove', async member => { await updateCounters(member.gui
 // DM MESSAGE — APPLICATION Q&A
 // ════════════════════════════════════════════
 client.on('messageCreate', async message => {
+  // Only handle DMs from non-bots
   if (message.author.bot) return;
-  if (message.guild) return;
+  if (message.guild) return; // Ignore guild messages here — handle in automod listener
 
   const userId = message.author.id;
   const session = activeAppSessions.get(userId);
-  if (!session) return;
+  if (!session) return; // Not in an application session
 
   const content = message.content.trim();
 
+  // Cancel command
   if (content.toLowerCase() === 'cancel') {
     activeAppSessions.delete(userId);
     await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('❌ Application Cancelled').setDescription('Your application has been cancelled. You can start a new one at any time.')] });
     return;
   }
 
+  // Validate session data still exists in config
   const ac = getApplicationConfig(session.guildId);
   const appType = ac.appTypes.find(t => t.id === session.typeId);
   if (!appType) {
@@ -871,26 +897,40 @@ client.on('messageCreate', async message => {
     return;
   }
 
+  // Record the answer
   session.answers.push(content);
   const nextIndex = session.questionIndex + 1;
 
   if (nextIndex < appType.questions.length) {
+    // More questions remain
     session.questionIndex = nextIndex;
+
     await message.channel.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setDescription(`✅ **Answer recorded!**`).setFooter({ text: `${nextIndex}/${appType.questions.length} answered` })] });
+
+    // Send next question
     const sent = await sendNextQuestion(userId, session, appType);
-    if (!sent) { activeAppSessions.delete(userId); }
+    if (!sent) {
+      activeAppSessions.delete(userId);
+    }
   } else {
+    // All questions answered — submit
     activeAppSessions.delete(userId);
+
     await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⏳ Submitting…').setDescription('All questions answered! Submitting your application…')] });
+
     try {
       const guild = await client.guilds.fetch(session.guildId).catch(() => null);
       if (!guild) throw new Error('Server not found.');
+
       const appId = await submitApplication(userId, session, appType, guild);
+
       await message.channel.send({ embeds: [new EmbedBuilder()
         .setTitle('✅ Application Submitted!')
         .setColor(0x57F287)
         .setDescription(`Your **${appType.label}** application has been submitted for review.\n\nYou will receive a DM when a decision has been made.\n\n**Application ID:** \`${appId}\``)
         .setTimestamp()] });
+
+      // Log
       const logChId = ac.logChannel;
       if (logChId) {
         const logCh = guild.channels.cache.get(logChId);
@@ -1374,7 +1414,7 @@ client.on('interactionCreate', async interaction => {
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions — one per line (max 60)').setStyle(TextInputStyle.Paragraph).setPlaceholder('What is your age?\nWhy do you want to join?').setMaxLength(12000).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions — one per line (max 20)').setStyle(TextInputStyle.Paragraph).setPlaceholder('What is your age?\nWhy do you want to join?').setMaxLength(4000).setRequired(true)),
           );
           return interaction.showModal(modal);
         }
@@ -1487,13 +1527,6 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
 
-        if (action === 'set_channel') {
-          return interaction.reply({
-            content: `### 📬 Eigen review kanaal voor **${appType.label}**\nDit kanaal heeft prioriteit boven het panel- en globaal kanaal.`,
-            components: [channelDropdown(`apte_channel__${typeId}`, 'Selecteer kanaal...')],
-            ephemeral: true,
-          });
-        }
         if (action === 'set_roles') {
           return interaction.reply({
             content: `### 🎭 Select accept roles for **${appType.label}**\nThese roles will be given to applicants on acceptance.`,
@@ -1530,7 +1563,7 @@ client.on('interactionCreate', async interaction => {
         }
         if (action === 'edit_questions') {
           const modal = new ModalBuilder().setCustomId(`modal_apte_questions__${typeId}`).setTitle(`Edit Questions: ${appType.label}`);
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 60)').setStyle(TextInputStyle.Paragraph).setValue(appType.questions.join('\n')).setRequired(true).setMaxLength(12000)));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 20)').setStyle(TextInputStyle.Paragraph).setValue(appType.questions.join('\n')).setRequired(true)));
           return interaction.showModal(modal);
         }
         if (action === 'back') return interaction.update(buildApplicationSetupPayload(guildId));
@@ -1547,6 +1580,7 @@ client.on('interactionCreate', async interaction => {
 
         await interaction.deferReply({ ephemeral: true });
 
+        // Try to open DM first
         let dmChannel;
         try {
           dmChannel = await interaction.user.createDM();
@@ -1554,6 +1588,7 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ content: '❌ I could not open a DM with you. Please enable DMs from server members.' });
         }
 
+        // Create session
         const session = {
           guildId,
           typeId,
@@ -1566,6 +1601,7 @@ client.on('interactionCreate', async interaction => {
         };
         activeAppSessions.set(interaction.user.id, session);
 
+        // Send intro embed
         try {
           const introEmbed = new EmbedBuilder()
             .setTitle(`📋 ${appType.label}`)
@@ -1580,6 +1616,7 @@ client.on('interactionCreate', async interaction => {
             .setThumbnail(interaction.guild.iconURL({ dynamic: true }));
           await dmChannel.send({ embeds: [introEmbed] });
 
+          // Send first question
           const sent = await sendNextQuestion(interaction.user.id, session, appType);
           if (!sent) {
             activeAppSessions.delete(interaction.user.id);
@@ -1598,12 +1635,13 @@ client.on('interactionCreate', async interaction => {
       if (id.startsWith('app__accept__') || id.startsWith('app__acceptsilent__') || id.startsWith('app__deny__')) {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
         const parts = id.split('__');
-        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3];
+        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3]; // appId is parts[4]
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
 
         if (action === 'accept' || action === 'acceptsilent') {
+          // Give accept roles
           if (appType?.acceptRoles?.length && applicant) {
             for (const roleId of appType.acceptRoles) {
               const role = interaction.guild.roles.cache.get(roleId);
@@ -1611,6 +1649,7 @@ client.on('interactionCreate', async interaction => {
             }
           }
 
+          // Set nickname if format is configured
           let newNickname = null;
           if (appType?.nicknameFormat && applicant) {
             newNickname = appType.nicknameFormat
@@ -1642,6 +1681,7 @@ client.on('interactionCreate', async interaction => {
               ? '\n\n**Rollen gegeven:** ' + appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
               : '';
 
+            // Build custom accept message using variables
             const vars = {
               username: applicant.user.username,
               userMention: `<@${applicant.user.id}>`,
@@ -1662,6 +1702,7 @@ client.on('interactionCreate', async interaction => {
               .setDescription(rawMsg)
               .setTimestamp();
 
+            // Group link button if set
             const dmComponents = [];
             if (appType?.groupLink && isValidUrl(appType.groupLink)) {
               dmComponents.push(new ActionRowBuilder().addComponents(
@@ -1672,6 +1713,7 @@ client.on('interactionCreate', async interaction => {
             await applicant.send({ embeds: [acceptEmbed], components: dmComponents }).catch(() => {});
           }
 
+          // Log
           if (ac.logChannel) {
             const logCh = interaction.guild.channels.cache.get(ac.logChannel);
             if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287)
@@ -2009,12 +2051,13 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'sd_allowed_roles')  { getSessionConfig(guildId).allowedRoles = ids; saveConfig(config); return interaction.reply({ content: '✅ Allowed roles set.', ephemeral: true }); }
       if (interaction.customId.startsWith('anpr__'))    { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
 
+      // Application type accept roles
       if (interaction.customId.startsWith('apte_roles__')) {
         const typeId = interaction.customId.replace('apte_roles__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
-        appType.acceptRoles = ids;
+        appType.acceptRoles = ids; // Could be empty array if none selected
         saveConfig(config);
         const roleNames = ids.length ? ids.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).join(', ') : 'None';
         return interaction.reply({ content: `✅ Accept roles for **${appType.label}** set to: ${roleNames}`, ephemeral: true });
@@ -2056,6 +2099,7 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('srch__'))      { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'cntd_category')       { getCounterConfig(guildId).categoryId = chId; saveConfig(config); return interaction.reply({ content: `✅ Counter category: <#${chId}>`, ephemeral: true }); }
 
+      // Application panel channel
       if (interaction.customId.startsWith('appe_channel__')) {
         const panelId = interaction.customId.replace('appe_channel__', '');
         const ac = getApplicationConfig(guildId);
@@ -2064,6 +2108,7 @@ client.on('interactionCreate', async interaction => {
         panel.channel = chId; saveConfig(config);
         return interaction.reply({ content: `✅ Panel channel set to <#${chId}>!`, ephemeral: true });
       }
+      // Application panel review channel override
       if (interaction.customId.startsWith('appe_review_channel__')) {
         const panelId = interaction.customId.replace('appe_review_channel__', '');
         const ac = getApplicationConfig(guildId);
@@ -2071,17 +2116,6 @@ client.on('interactionCreate', async interaction => {
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
         panel.reviewChannel = chId; saveConfig(config);
         return interaction.reply({ content: `✅ Review channel override set to <#${chId}>!`, ephemeral: true });
-      }
-
-      // Per-type review kanaal
-      if (interaction.customId.startsWith('apte_channel__')) {
-        const typeId = interaction.customId.replace('apte_channel__', '');
-        const ac = getApplicationConfig(guildId);
-        const appType = ac.appTypes.find(t => t.id === typeId);
-        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
-        appType.channel = chId;
-        saveConfig(config);
-        return interaction.reply({ content: `✅ Review kanaal voor **${appType.label}** ingesteld op <#${chId}>!`, ephemeral: true });
       }
     }
 
@@ -2123,6 +2157,7 @@ client.on('interactionCreate', async interaction => {
 
       if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
 
+      // Standard selects
       if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
       if (id === 'smd_delete')      { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; saveConfig(config); return interaction.reply({ content: '✅ Deleted.', ephemeral: true }); }
       if (id === 'an_sel_edit')     { return interaction.update(buildAnnouncementEditor(guildId, val)); }
@@ -2132,6 +2167,7 @@ client.on('interactionCreate', async interaction => {
       if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
       if (id === 'td_remove_type')  { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
 
+      // Self role dropdown
       if (id.startsWith('srp__dd__')) {
         const panelId = id.replace('srp__dd__', '');
         const src = getSelfRoleConfig(guildId); const panel = src.panels[panelId];
@@ -2143,8 +2179,10 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: toAdd.length ? `✅ Roles: ${toAdd.map(r => `**${r.name}**`).join(', ')}` : '✅ All roles removed.', ephemeral: true });
       }
 
+      // ── Application selects ──
       if (id === 'apd_remove_type') {
         const ac = getApplicationConfig(guildId);
+        // Remove from all panels too
         for (const panel of ac.panels) { panel.appTypeIds = panel.appTypeIds.filter(tid => tid !== val); }
         ac.appTypes = ac.appTypes.filter(t => t.id !== val);
         saveConfig(config);
@@ -2159,6 +2197,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (id === 'apd_select_edit_type') {
+        // Show type editor
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === val);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
@@ -2169,7 +2208,6 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '📝 Questions', value: `${appType.questions.length} question(s)`, inline: true },
             { name: '🎭 Accept Roles', value: roles, inline: true },
-            { name: '📬 Review Kanaal', value: appType.channel ? `<#${appType.channel}>` : '*Globaal*', inline: true },
             { name: '🔗 Group Link', value: appType.groupLink ? `[Klik hier](${appType.groupLink})` : '*Niet ingesteld*', inline: true },
             { name: '🏷️ Nickname Formaat', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Uitgeschakeld*', inline: true },
             { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
@@ -2184,13 +2222,13 @@ client.on('interactionCreate', async interaction => {
           new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
         );
         const r2 = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`apte__set_channel__${val}`).setLabel('Review Kanaal').setStyle(ButtonStyle.Primary).setEmoji('📬'),
           new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Terug').setStyle(ButtonStyle.Secondary),
         );
         return interaction.update({ embeds: [embed], components: [r1, r2] });
       }
 
       if (id === 'apd_select_edit_panel') {
+        // Show panel editor
         const ac = getApplicationConfig(guildId);
         const panel = ac.panels.find(p => p.id === val);
         if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
@@ -2244,6 +2282,7 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
       }
 
+      // Panel type management from panel editor
       if (id.startsWith('appe_add_type__')) {
         const panelId = id.replace('appe_add_type__', '');
         const ac = getApplicationConfig(guildId);
@@ -2281,6 +2320,7 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
+      // ── Counter labels ──
       if (mid === 'modal_cnt_labels') {
         const cc = getCounterConfig(guildId);
         cc.channels.members.label  = interaction.fields.getTextInputValue('cnt_lbl_members').trim()  || cc.channels.members.label;
@@ -2293,6 +2333,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '✅ Labels updated and counters refreshed!', ephemeral: true });
       }
 
+      // ── Automod ──
       if (mid === 'modal_am_keywords') {
         const am = getAutomodConfig(guildId);
         const raw = interaction.fields.getTextInputValue('am_kw').trim();
@@ -2312,6 +2353,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Action set to **${act}**.`, ephemeral: true });
       }
 
+      // ── Application deny reason ──
       if (mid.startsWith('modal_app_deny__')) {
         const parts = mid.replace('modal_app_deny__', '').split('__');
         const applicantId = parts[0]; const typeId = parts[1];
@@ -2358,16 +2400,18 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
+      // ── Add application type ──
       if (mid === 'modal_ap_add_type') {
         const ac = getApplicationConfig(guildId);
         const label = interaction.fields.getTextInputValue('ap_label').trim();
         const emoji = interaction.fields.getTextInputValue('ap_emoji').trim() || null;
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
-        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 60);
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 20);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         const newId = genId();
-        ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [], acceptMessage: null, denyMessage: null, groupLink: null, nicknameFormat: null, channel: null });
+        ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [], acceptMessage: null, denyMessage: null, groupLink: null, nicknameFormat: null });
         saveConfig(config);
+        // Ask for accept roles
         return interaction.reply({
           content: `✅ Application type **${label}** created with **${questions.length}** question(s)!\n\n### 🎭 Select roles to give when accepted (optional — dismiss to skip)`,
           components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`apte_roles__${newId}`).setPlaceholder('Select accept roles (optional)...').setMinValues(0).setMaxValues(10))],
@@ -2375,6 +2419,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ── Add application panel ──
       if (mid === 'modal_ap_add_panel') {
         const ac = getApplicationConfig(guildId);
         const name  = interaction.fields.getTextInputValue('ap_panel_name').trim();
@@ -2384,6 +2429,7 @@ client.on('interactionCreate', async interaction => {
         const pid = genId();
         ac.panels.push({ id: pid, name, title, description: desc, color, channel: null, reviewChannel: null, appTypeIds: [] });
         saveConfig(config);
+        // Open panel editor
         const panel = ac.panels.find(p => p.id === pid);
         const embed = new EmbedBuilder()
           .setTitle(`✏️ Editing Panel: ${panel.name}`)
@@ -2407,6 +2453,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ embeds: [embed], components: [r1, r2], ephemeral: true });
       }
 
+      // ── Edit panel embed ──
       if (mid.startsWith('modal_appe_embed__')) {
         const panelId = mid.replace('modal_appe_embed__', '');
         const ac = getApplicationConfig(guildId);
@@ -2419,19 +2466,21 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true });
       }
 
+      // ── Edit type questions ──
       if (mid.startsWith('modal_apte_questions__')) {
         const typeId = mid.replace('modal_apte_questions__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
-        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 60);
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 20);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         appType.questions = questions;
         saveConfig(config);
         return interaction.reply({ content: `✅ Questions updated! **${questions.length}** question(s) set.`, ephemeral: true });
       }
 
+      // ── Saved messages ──
       if (mid === 'modal_sm_new') {
         const sm = getSavedMessagesConfig(guildId);
         const name = interaction.fields.getTextInputValue('sm_name').trim();
@@ -2450,6 +2499,7 @@ client.on('interactionCreate', async interaction => {
         saveConfig(config); return interaction.reply({ content: `✅ Updated!`, ephemeral: true });
       }
 
+      // ── Welcomer ──
       if (mid === 'modal_wc_content') {
         const wc = getWelcomerConfig(guildId);
         const t = interaction.fields.getTextInputValue('wc_title').trim(); const d = interaction.fields.getTextInputValue('wc_desc').trim(); const c = interaction.fields.getTextInputValue('wc_color').trim(); const im = interaction.fields.getTextInputValue('wc_image').trim(); const f = interaction.fields.getTextInputValue('wc_footer').trim();
@@ -2457,6 +2507,7 @@ client.on('interactionCreate', async interaction => {
         saveConfig(config); return interaction.reply({ content: '✅ Welcome message updated!', ephemeral: true });
       }
 
+      // ── Verification ──
       if (mid === 'modal_vc_content') {
         const vc = getVerificationConfig(guildId);
         const t = interaction.fields.getTextInputValue('vc_title').trim(); const d = interaction.fields.getTextInputValue('vc_desc').trim(); const c = interaction.fields.getTextInputValue('vc_color').trim(); const im = interaction.fields.getTextInputValue('vc_image').trim();
@@ -2477,15 +2528,18 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply({ content: `❌ Verification failed. Try again later.` }); }
       }
 
+      // ── Ticket ──
       if (mid === 'modal_t_embed')   { const tc = getTicketConfig(guildId); const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim(); if (t) tc.panelTitle = t; if (d) tc.panelDescription = d; if (c) tc.panelColor = c; if (th) tc.panelThumbnail = th; saveConfig(config); return interaction.reply({ content: '✅ Panel embed updated!', ephemeral: true }); }
       if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); saveConfig(config); return interaction.reply({ content: '✅ Welcome text saved!', ephemeral: true }); }
       if (mid === 'modal_t_add_type') { const tc = getTicketConfig(guildId); tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null }); saveConfig(config); return interaction.reply({ content: `✅ Ticket type added!`, ephemeral: true }); }
 
+      // ── Session ──
       if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true }); getSessionConfig(guildId).joinLink = rawLink; saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, ephemeral: true }); }
       if (mid === 'modal_s_desc')      { const sc = getSessionConfig(guildId); const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim(); if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh; saveConfig(config); return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true }); }
       if (mid === 'modal_s_images')    { const sc = getSessionConfig(guildId); const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim(); if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi; saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true }); }
       if (mid === 'modal_s_threshold') { const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10); if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number 1-999.', ephemeral: true }); getSessionConfig(guildId).voteThreshold = num; saveConfig(config); return interaction.reply({ content: `✅ Vote threshold: **${num}**.`, ephemeral: true }); }
 
+      // ── Announcement ──
       if (mid === 'modal_an_new') {
         const ac = getAnnouncementConfig(guildId);
         const name = interaction.fields.getTextInputValue('an_name').trim();
@@ -2503,6 +2557,7 @@ client.on('interactionCreate', async interaction => {
         saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId));
       }
 
+      // ── Application type: nickname formaat ──
       if (mid.startsWith('modal_apte_nickname__')) {
         const typeId = mid.replace('modal_apte_nickname__', '');
         const ac = getApplicationConfig(guildId);
@@ -2527,6 +2582,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ── Application type: DM berichten ──
       if (mid.startsWith('modal_apte_messages__')) {
         const typeId = mid.replace('modal_apte_messages__', '');
         const ac = getApplicationConfig(guildId);
@@ -2552,6 +2608,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ── Application type: groep link ──
       if (mid.startsWith('modal_apte_grouplink__')) {
         const typeId = mid.replace('modal_apte_grouplink__', '');
         const ac = getApplicationConfig(guildId);
@@ -2569,6 +2626,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ── Self roles ──
       if (mid === 'modal_sr_new') {
         const src = getSelfRoleConfig(guildId);
         const type = interaction.fields.getTextInputValue('sr_type').trim().toLowerCase();
