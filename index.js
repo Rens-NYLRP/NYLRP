@@ -183,6 +183,7 @@ function getApplicationConfig(guildId) {
     if (t.denyMessage    === undefined) t.denyMessage    = null;
     if (t.groupLink      === undefined) t.groupLink      = null;
     if (t.nicknameFormat === undefined) t.nicknameFormat = null;
+    if (t.reviewChannel  === undefined) t.reviewChannel  = null;
   }
   // Patch elk bestaand panel met ontbrekende velden
   for (const p of gc.applications.panels) {
@@ -442,12 +443,13 @@ async function sendNextQuestion(userId, session, appType) {
 async function submitApplication(userId, session, appType, guild) {
   const ac = getApplicationConfig(session.guildId);
 
-  // Determine review channel: panel-level override or global
+  // Determine review channel: type-level override > panel-level override > global
   let reviewChannelId = ac.reviewChannel;
   if (session.panelId) {
     const panel = ac.panels.find(p => p.id === session.panelId);
     if (panel?.reviewChannel) reviewChannelId = panel.reviewChannel;
   }
+  if (appType.reviewChannel) reviewChannelId = appType.reviewChannel;
 
   if (!reviewChannelId) throw new Error('No review channel configured.');
   const reviewCh = guild.channels.cache.get(reviewChannelId);
@@ -462,18 +464,44 @@ async function submitApplication(userId, session, appType, guild) {
   }));
 
   const appId = genId();
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
-    .setColor(0x5865F2)
-    .setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null)
-    .addFields(
-      { name: '👤 Applicant', value: applicant ? `${applicant.tag} (<@${userId}>)` : `<@${userId}>`, inline: true },
-      { name: '🆔 User ID',   value: userId, inline: true },
-      { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
-      ...answerFields,
-    )
-    .setTimestamp()
-    .setFooter({ text: `Application ID: ${appId}` });
+
+  const headerFields = [
+    { name: '👤 Applicant', value: applicant ? `${applicant.tag} (<@${userId}>)` : `<@${userId}>`, inline: true },
+    { name: '🆔 User ID',   value: userId, inline: true },
+    { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
+  ];
+
+  // Split answers over multiple embeds (max 25 fields per embed, Discord limit)
+  const FIELDS_PER_EMBED = 25;
+  const embeds = [];
+
+  // First embed: header + first batch of answers
+  const firstBatch = answerFields.slice(0, FIELDS_PER_EMBED - headerFields.length);
+  embeds.push(
+    new EmbedBuilder()
+      .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
+      .setColor(0x5865F2)
+      .setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null)
+      .addFields(...headerFields, ...firstBatch)
+      .setFooter({ text: `Application ID: ${appId}${answerFields.length > firstBatch.length ? ' • Continued below ↓' : ''}` })
+      .setTimestamp()
+  );
+
+  // Extra embeds for remaining answers
+  let remaining = answerFields.slice(FIELDS_PER_EMBED - headerFields.length);
+  let page = 2;
+  while (remaining.length > 0) {
+    const batch = remaining.slice(0, FIELDS_PER_EMBED);
+    remaining = remaining.slice(FIELDS_PER_EMBED);
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle(`📋 Application (continued) — ${appType.label} — Page ${page}`)
+        .setColor(0x5865F2)
+        .addFields(...batch)
+        .setFooter({ text: `Application ID: ${appId}${remaining.length > 0 ? ' • Continued below ↓' : ''}` })
+    );
+    page++;
+  }
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`app__accept__${userId}__${appType.id}__${appId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
@@ -481,7 +509,7 @@ async function submitApplication(userId, session, appType, guild) {
     new ButtonBuilder().setCustomId(`app__deny__${userId}__${appType.id}__${appId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
   );
 
-  await reviewCh.send({ embeds: [embed], components: [row] });
+  await reviewCh.send({ embeds, components: [row] });
   return appId;
 }
 
@@ -898,6 +926,10 @@ client.on('messageCreate', async message => {
   }
 
   // Record the answer
+  if (content.length > 12000) {
+    await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ **Answer too long!** Max 12,000 characters. Your answer was ${content.length} characters.\n\nPlease shorten your answer and try again.`)] });
+    return;
+  }
   session.answers.push(content);
   const nextIndex = session.questionIndex + 1;
 
@@ -1414,7 +1446,7 @@ client.on('interactionCreate', async interaction => {
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_label').setLabel('Application name').setStyle(TextInputStyle.Short).setMaxLength(80).setRequired(true)),
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions — one per line (max 20)').setStyle(TextInputStyle.Paragraph).setPlaceholder('What is your age?\nWhy do you want to join?').setMaxLength(4000).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions — one per line (max 60)').setStyle(TextInputStyle.Paragraph).setPlaceholder('What is your age?\nWhy do you want to join?').setMaxLength(4000).setRequired(true)),
           );
           return interaction.showModal(modal);
         }
@@ -1527,6 +1559,13 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
 
+        if (action === 'set_review_channel') {
+          return interaction.reply({
+            content: `### 📢 Selecteer review kanaal voor **${appType.label}**\nAplicaties van dit type worden naar dit kanaal gestuurd.`,
+            components: [channelDropdown(`apte_review_channel__${typeId}`, 'Select channel...')],
+            ephemeral: true,
+          });
+        }
         if (action === 'set_roles') {
           return interaction.reply({
             content: `### 🎭 Select accept roles for **${appType.label}**\nThese roles will be given to applicants on acceptance.`,
@@ -1563,7 +1602,7 @@ client.on('interactionCreate', async interaction => {
         }
         if (action === 'edit_questions') {
           const modal = new ModalBuilder().setCustomId(`modal_apte_questions__${typeId}`).setTitle(`Edit Questions: ${appType.label}`);
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 20)').setStyle(TextInputStyle.Paragraph).setValue(appType.questions.join('\n')).setRequired(true)));
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_questions').setLabel('Questions (one per line, max 60)').setStyle(TextInputStyle.Paragraph).setValue(appType.questions.join('\n')).setRequired(true)));
           return interaction.showModal(modal);
         }
         if (action === 'back') return interaction.update(buildApplicationSetupPayload(guildId));
@@ -2099,6 +2138,15 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('srch__'))      { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; saveConfig(config); return interaction.reply({ content: `✅ Channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'cntd_category')       { getCounterConfig(guildId).categoryId = chId; saveConfig(config); return interaction.reply({ content: `✅ Counter category: <#${chId}>`, ephemeral: true }); }
 
+      if (interaction.customId.startsWith('apte_review_channel__')) {
+        const typeId = interaction.customId.replace('apte_review_channel__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        appType.reviewChannel = chId;
+        saveConfig(config);
+        return interaction.reply({ content: `✅ Review kanaal voor **${appType.label}** ingesteld op <#${chId}>!`, ephemeral: true });
+      }
       // Application panel channel
       if (interaction.customId.startsWith('appe_channel__')) {
         const panelId = interaction.customId.replace('appe_channel__', '');
@@ -2208,6 +2256,7 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '📝 Questions', value: `${appType.questions.length} question(s)`, inline: true },
             { name: '🎭 Accept Roles', value: roles, inline: true },
+            { name: '📢 Review Kanaal', value: appType.reviewChannel ? `<#${appType.reviewChannel}>` : '*Globaal (fallback)*', inline: true },
             { name: '🔗 Group Link', value: appType.groupLink ? `[Klik hier](${appType.groupLink})` : '*Niet ingesteld*', inline: true },
             { name: '🏷️ Nickname Formaat', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Uitgeschakeld*', inline: true },
             { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
@@ -2217,11 +2266,12 @@ client.on('interactionCreate', async interaction => {
         const r1 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Vragen bewerken').setStyle(ButtonStyle.Primary).setEmoji('📝'),
           new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept rollen').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review kanaal').setStyle(ButtonStyle.Primary).setEmoji('📢'),
           new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM berichten').setStyle(ButtonStyle.Primary).setEmoji('💬'),
           new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Groep link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
-          new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
         );
         const r2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
           new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Terug').setStyle(ButtonStyle.Secondary),
         );
         return interaction.update({ embeds: [embed], components: [r1, r2] });
@@ -2406,7 +2456,7 @@ client.on('interactionCreate', async interaction => {
         const label = interaction.fields.getTextInputValue('ap_label').trim();
         const emoji = interaction.fields.getTextInputValue('ap_emoji').trim() || null;
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
-        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 20);
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 60);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         const newId = genId();
         ac.appTypes.push({ id: newId, label, emoji, questions, acceptRoles: [], acceptMessage: null, denyMessage: null, groupLink: null, nicknameFormat: null });
@@ -2473,7 +2523,7 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const questionsRaw = interaction.fields.getTextInputValue('ap_questions').trim();
-        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 20);
+        const questions = questionsRaw.split('\n').map(q => q.trim()).filter(Boolean).slice(0, 60);
         if (!questions.length) return interaction.reply({ content: '❌ At least one question required.', ephemeral: true });
         appType.questions = questions;
         saveConfig(config);
