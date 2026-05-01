@@ -48,12 +48,12 @@ async function connectDB() {
     await mongoose.connect(process.env.MONGODB_URI, {
       serverSelectionTimeoutMS: 10000,
     });
-    console.log('✅ MongoDB verbonden!');
+    console.log('✅ MongoDB connected!');
     dbReady = true;
     await loadConfigFromDB();
   } catch (e) {
-    console.error('❌ MongoDB verbinding mislukt:', e.message);
-    console.error('⚠️ Bot draait zonder persistente opslag! Voeg MONGODB_URI toe aan .env');
+    console.error('❌ MongoDB connection failed:', e.message);
+    console.error('⚠️ Bot running without persistent storage! Add MONGODB_URI to .env');
   }
 }
 
@@ -65,9 +65,9 @@ async function loadConfigFromDB() {
     for (const doc of docs) {
       config[doc._id] = doc.data;
     }
-    console.log(`✅ Config geladen: ${docs.length} guild(s)`);
+    console.log(`✅ Config loaded: ${docs.length} guild(s)`);
   } catch (e) {
-    console.error('❌ Config laden mislukt:', e.message);
+    console.error('❌ Config load failed:', e.message);
   }
 }
 
@@ -81,7 +81,7 @@ async function saveGuildConfig(guildId) {
       { upsert: true, new: true }
     );
   } catch (e) {
-    console.error(`❌ Config opslaan mislukt (${guildId}):`, e.message);
+    console.error(`❌ Config save failed (${guildId}):`, e.message);
   }
 }
 
@@ -109,9 +109,9 @@ setInterval(() => {
 
 // Graceful shutdown
 async function gracefulShutdown(signal) {
-  console.log(`\n⚠️ ${signal} — config opslaan voor afsluiten...`);
+  console.log(`\n⚠️ ${signal} — saving config before shutdown...`);
   await saveAllConfigs();
-  console.log('✅ Config opgeslagen. Afsluiten.');
+  console.log('✅ Config saved. Shutting down.');
   process.exit(0);
 }
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
@@ -1560,7 +1560,7 @@ client.on('interactionCreate', async interaction => {
 
         if (action === 'set_review_channel') {
           return interaction.reply({
-            content: `### 📢 Selecteer review kanaal voor **${appType.label}**\nAplicaties van dit type worden naar dit kanaal gestuurd.`,
+            content: `### 📢 Select review channel for **${appType.label}**\nApplications of this type will be sent to this channel.`,
             components: [channelDropdown(`apte_review_channel__${typeId}`, 'Select channel...')],
             ephemeral: true,
           });
@@ -1575,22 +1575,22 @@ client.on('interactionCreate', async interaction => {
         if (action === 'set_messages') {
           const modal = new ModalBuilder().setCustomId(`modal_apte_messages__${typeId}`).setTitle(`DM Berichten: ${appType.label}`);
           modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('accept_msg').setLabel('Accept DM bericht').setStyle(TextInputStyle.Paragraph).setValue(appType.acceptMessage || '').setPlaceholder('Gefeliciteerd {username}! Je bent geaccepteerd voor {type} in {server}! 🎉').setRequired(false).setMaxLength(1500)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deny_msg').setLabel('Deny DM bericht').setStyle(TextInputStyle.Paragraph).setValue(appType.denyMessage || '').setPlaceholder('Helaas {username}, je bent afgewezen voor {type}.\n\nReden: {reason}').setRequired(false).setMaxLength(1500)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('accept_msg').setLabel('Accept DM message').setStyle(TextInputStyle.Paragraph).setValue(appType.acceptMessage || '').setPlaceholder('Congratulations {username}! You have been accepted for {type} in {server}! 🎉').setRequired(false).setMaxLength(1500)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deny_msg').setLabel('Deny DM message').setStyle(TextInputStyle.Paragraph).setValue(appType.denyMessage || '').setPlaceholder('Sorry {username}, you have been denied for {type}.\n\nReason: {reason}').setRequired(false).setMaxLength(1500)),
           );
           return interaction.showModal(modal);
         }
         if (action === 'set_grouplink') {
-          const modal = new ModalBuilder().setCustomId(`modal_apte_grouplink__${typeId}`).setTitle(`Groep Link: ${appType.label}`);
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('group_link').setLabel('Roblox groep link (of andere link)').setStyle(TextInputStyle.Short).setValue(appType.groupLink || '').setPlaceholder('https://www.roblox.com/groups/...').setRequired(false)));
+          const modal = new ModalBuilder().setCustomId(`modal_apte_grouplink__${typeId}`).setTitle(`Group Link: ${appType.label}`);
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('group_link').setLabel('Roblox group link (or other link)').setStyle(TextInputStyle.Short).setValue(appType.groupLink || '').setPlaceholder('https://www.roblox.com/groups/...').setRequired(false)));
           return interaction.showModal(modal);
         }
         if (action === 'set_nickname') {
-          const modal = new ModalBuilder().setCustomId(`modal_apte_nickname__${typeId}`).setTitle(`Nickname Formaat: ${appType.label}`);
+          const modal = new ModalBuilder().setCustomId(`modal_apte_nickname__${typeId}`).setTitle(`Nickname Format: ${appType.label}`);
           modal.addComponents(new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('nickname_format')
-              .setLabel('Nickname formaat (leeg = uitgeschakeld)')
+              .setLabel('Nickname format (empty = disabled)')
               .setStyle(TextInputStyle.Short)
               .setValue(appType.nicknameFormat || '')
               .setPlaceholder('[Lid] | {user}')
@@ -1695,7 +1695,7 @@ client.on('interactionCreate', async interaction => {
               .replace(/{username}/g, applicant.user.username)
               .replace(/{rank}/g, appType.label)
               .slice(0, 32);
-            await applicant.setNickname(newNickname, `Sollicitatie geaccepteerd: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
+            await applicant.setNickname(newNickname, `Application accepted: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
           }
 
           const givenRoles = appType?.acceptRoles?.length
@@ -1708,7 +1708,7 @@ client.on('interactionCreate', async interaction => {
                 { name: '👤 Applicant', value: applicant?.user.tag ?? applicantId, inline: true },
                 { name: '✅ Accepted by', value: interaction.user.tag, inline: true },
                 { name: '🎭 Roles Given', value: givenRoles, inline: true },
-                { name: '🏷️ Nickname', value: newNickname ? `\`${newNickname}\`` : '*Niet gewijzigd*', inline: true },
+                { name: '🏷️ Nickname', value: newNickname ? `\`${newNickname}\`` : '*Not changed*', inline: true },
                 { name: '🔔 DM Sent', value: action === 'accept' ? 'Yes' : 'No (silent)', inline: true },
               ).setTimestamp()],
             components: [],
@@ -1716,7 +1716,7 @@ client.on('interactionCreate', async interaction => {
 
           if (action === 'accept' && applicant) {
             const acceptRoleNames = appType?.acceptRoles?.length
-              ? '\n\n**Rollen gegeven:** ' + appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
+              ? '\n\n**Roles given:** ' + appType.acceptRoles.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).filter(Boolean).join(', ')
               : '';
 
             // Build custom accept message using variables
@@ -1732,10 +1732,10 @@ client.on('interactionCreate', async interaction => {
                   .replace(/{userMention}/g, vars.userMention)
                   .replace(/{type}/g, vars.type)
                   .replace(/{server}/g, vars.server)
-              : `✅ Gefeliciteerd **${vars.username}**!\n\nJe **${vars.type}** in **${vars.server}** is **geaccepteerd**! 🎉${acceptRoleNames}`;
+              : `✅ Congratulations **${vars.username}**!\n\nYour **${vars.type}** in **${vars.server}** has been **accepted**! 🎉${acceptRoleNames}`;
 
             const acceptEmbed = new EmbedBuilder()
-              .setTitle('✅ Aanvraag Geaccepteerd!')
+              .setTitle('✅ Application Accepted!')
               .setColor(0x57F287)
               .setDescription(rawMsg)
               .setTimestamp();
@@ -1744,7 +1744,7 @@ client.on('interactionCreate', async interaction => {
             const dmComponents = [];
             if (appType?.groupLink && isValidUrl(appType.groupLink)) {
               dmComponents.push(new ActionRowBuilder().addComponents(
-                new ButtonBuilder().setLabel('🚀 Join de groep!').setStyle(ButtonStyle.Link).setURL(appType.groupLink)
+                new ButtonBuilder().setLabel('🚀 Join the group!').setStyle(ButtonStyle.Link).setURL(appType.groupLink)
               ));
             }
 
@@ -2144,7 +2144,7 @@ client.on('interactionCreate', async interaction => {
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         appType.reviewChannel = chId;
         await saveConfig(config);
-        return interaction.reply({ content: `✅ Review kanaal voor **${appType.label}** ingesteld op <#${chId}>!`, ephemeral: true });
+        return interaction.reply({ content: `✅ Review channel for **${appType.label}** set to <#${chId}>!`, ephemeral: true });
       }
       // Application panel channel
       if (interaction.customId.startsWith('appe_channel__')) {
@@ -2255,23 +2255,23 @@ client.on('interactionCreate', async interaction => {
           .addFields(
             { name: '📝 Questions', value: `${appType.questions.length} question(s)`, inline: true },
             { name: '🎭 Accept Roles', value: roles, inline: true },
-            { name: '📢 Review Kanaal', value: appType.reviewChannel ? `<#${appType.reviewChannel}>` : '*Globaal (fallback)*', inline: true },
-            { name: '🔗 Group Link', value: appType.groupLink ? `[Klik hier](${appType.groupLink})` : '*Niet ingesteld*', inline: true },
-            { name: '🏷️ Nickname Formaat', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Uitgeschakeld*', inline: true },
+            { name: '📢 Review Channel', value: appType.reviewChannel ? `<#${appType.reviewChannel}>` : '*Global (fallback)*', inline: true },
+            { name: '🔗 Group Link', value: appType.groupLink ? `[Click here](${appType.groupLink})` : '*Not set*', inline: true },
+            { name: '🏷️ Nickname Format', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Disabled*', inline: true },
             { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
             { name: '❌ Deny Bericht', value: appType.denyMessage ? `\`\`\`${appType.denyMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
-            { name: '❓ Vragen preview', value: appType.questions.slice(0, 5).map((q, i) => `${i + 1}. ${q.slice(0, 80)}`).join('\n') || '*Geen*', inline: false },
+            { name: '❓ Questions preview', value: appType.questions.slice(0, 5).map((q, i) => `${i + 1}. ${q.slice(0, 80)}`).join('\n') || '*None*', inline: false },
           );
         const r1 = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Vragen bewerken').setStyle(ButtonStyle.Primary).setEmoji('📝'),
-          new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept rollen').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
-          new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review kanaal').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-          new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM berichten').setStyle(ButtonStyle.Primary).setEmoji('💬'),
-          new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Groep link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
+          new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Edit Questions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
+          new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept Roles').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+          new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM Messages').setStyle(ButtonStyle.Primary).setEmoji('💬'),
+          new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Group Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
         );
         const r2 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
-          new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Terug').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Back').setStyle(ButtonStyle.Secondary),
         );
         return interaction.update({ embeds: [embed], components: [r1, r2] });
       }
@@ -2435,9 +2435,9 @@ client.on('interactionCreate', async interaction => {
                 .replace(/{type}/g, vars.type)
                 .replace(/{server}/g, vars.server)
                 .replace(/{reason}/g, vars.reason)
-            : `❌ Helaas **${vars.username}**, je **${vars.type}** aanvraag in **${vars.server}** is **afgewezen**.\n\n**Reden:** ${reason}`;
+            : `❌ Sorry **${vars.username}**, your **${vars.type}** application in **${vars.server}** has been **denied**.\n\n**Reason:** ${reason}`;
 
-          await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Aanvraag Afgewezen').setColor(0xED4245)
+          await applicant.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245)
             .setDescription(rawDenyMsg)
             .setTimestamp()] }).catch(() => {});
         }
@@ -2611,32 +2611,32 @@ client.on('interactionCreate', async interaction => {
         const typeId = mid.replace('modal_apte_nickname__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
-        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const fmt = interaction.fields.getTextInputValue('nickname_format').trim();
         appType.nicknameFormat = fmt || null;
         await saveConfig(config);
         return interaction.reply({
           content: fmt
             ? [
-                `✅ **Nickname formaat ingesteld:** \`${fmt}\``,
+                `✅ **Nickname format set:** \`${fmt}\``,
                 '',
-                '**Beschikbare variabelen:**',
-                '`{user}` of `{username}` — gebruikersnaam van de applicant',
-                '`{rank}` — naam van het application type',
+                '**Available variables:**',
+                '`{user}` of `{username}` — username of the applicant',
+                '`{rank}` — name of the application type',
                 '',
                 `**Voorbeeld:** \`${fmt.replace(/{user}/g, 'JohnDoe').replace(/{username}/g, 'JohnDoe').replace(/{rank}/g, appType.label)}\``,
               ].join('\n')
-            : '✅ Nickname formaat **uitgeschakeld**. Nickname wordt niet meer automatisch gewijzigd.',
+            : '✅ Nickname format **disabled**. Nickname will no longer be changed automatically.',
           ephemeral: true,
         });
       }
 
-      // ── Application type: DM berichten ──
+      // ── Application type: DM Messages ──
       if (mid.startsWith('modal_apte_messages__')) {
         const typeId = mid.replace('modal_apte_messages__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
-        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const acceptMsg = interaction.fields.getTextInputValue('accept_msg').trim();
         const denyMsg   = interaction.fields.getTextInputValue('deny_msg').trim();
         appType.acceptMessage = acceptMsg || null;
@@ -2644,14 +2644,14 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({
           content: [
-            '✅ **DM berichten opgeslagen!**',
+            '✅ **DM messages saved!**',
             '',
-            '**Beschikbare variabelen:**',
-            '`{username}` — naam van de applicant',
-            '`{userMention}` — mention van de applicant',
-            '`{type}` — naam van het application type',
-            '`{server}` — naam van de server',
-            '`{reason}` — reden *(alleen in deny bericht)*',
+            '**Available variables:**',
+            '`{username}` — name of the applicant',
+            '`{userMention}` — mention of the applicant',
+            '`{type}` — name of the application type',
+            '`{server}` — name of the server',
+            '`{reason}` — reason *(only in deny message)*',
           ].join('\n'),
           ephemeral: true,
         });
@@ -2662,15 +2662,15 @@ client.on('interactionCreate', async interaction => {
         const typeId = mid.replace('modal_apte_grouplink__', '');
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
-        if (!appType) return interaction.reply({ content: '❌ Type niet gevonden.', ephemeral: true });
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
         const link = interaction.fields.getTextInputValue('group_link').trim();
-        if (link && !isValidUrl(link)) return interaction.reply({ content: '❌ Ongeldige URL. Moet beginnen met `https://`.', ephemeral: true });
+        if (link && !isValidUrl(link)) return interaction.reply({ content: '❌ Invalid URL. Must start with `https://`.', ephemeral: true });
         appType.groupLink = link || null;
         await saveConfig(config);
         return interaction.reply({
           content: link
-            ? `✅ Groep link ingesteld! Bij acceptatie krijgt de persoon een **"Join de groep!"** knop in zijn DM.`
-            : `✅ Groep link verwijderd.`,
+            ? `✅ Group link set! Upon acceptance the user will receive a **"Join the group!"** button in their DM.`
+            : `✅ Group link removed.`,
           ephemeral: true,
         });
       }
