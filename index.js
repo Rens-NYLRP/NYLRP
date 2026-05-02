@@ -850,7 +850,10 @@ const commands = [
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
-  { name: 'sendmessage', description: '[SHR] Send a saved message to this channel' },
+  { name: 'send', description: 'Send a custom message to a channel', options: [
+    { name: 'channel', type: 7, description: 'Channel to send to', required: true },
+    { name: 'message', type: 3, description: 'Message content', required: true },
+  ]},
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
@@ -1200,6 +1203,15 @@ client.on('interactionCreate', async interaction => {
         );
         const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
         pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, messageId: msg.id });
+      }
+
+      if (cmd === 'send') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        const channel = interaction.options.getChannel('channel');
+        const message = interaction.options.getString('message');
+        if (!channel.isTextBased()) return interaction.reply({ content: '❌ That is not a text channel.', ephemeral: true });
+        await channel.send({ content: message });
+        return interaction.reply({ content: `✅ Message sent to <#${channel.id}>!`, ephemeral: true });
       }
 
       if (cmd === 'sendmessage') {
