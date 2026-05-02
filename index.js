@@ -315,11 +315,13 @@ async function addNote(guildId, userId, note) { const gc = getGuildConfig(guildI
 // CONSTANTS
 // ════════════════════════════════════════════
 const STAFF_ROLE = '《 𝑵𝒀𝑳𝑹𝑷 | Staff Team》';
-const SHR_ROLE   = 'SHR';
-const LOGO_URL   = 'https://cdn.discordapp.com/attachments/1363047391263064166/1484556795321122917/image.png';
+const SHR_ROLE      = 'SHR';
+const SETUP_ROLE_ID = '1379173469501264026';
+const LOGO_URL      = 'https://cdn.discordapp.com/attachments/1363047391263064166/1484556795321122917/image.png';
 
 const hasStaff    = m => m.roles.cache.some(r => r.name === STAFF_ROLE);
 const hasSHR      = m => m.roles.cache.some(r => r.name === SHR_ROLE);
+const hasSetup    = m => m.roles.cache.has(SETUP_ROLE_ID) || m.permissions.has('Administrator');
 const hasAnyStaff = m => hasStaff(m) || hasSHR(m);
 
 function canRunSession(member, guildId) {
@@ -790,7 +792,7 @@ async function deploySelfRolePanel(guild, panelId, panel) {
   }
   const msg = await channel.send({ embeds: [embed], components: rows }); panel.messageId = msg.id;
 }
-async function postSessionStart(guild, sc, hostUser, rawLink, vars) {
+async function postSessionStart(guild, sc, hostUser, rawLink, vars, voterMentions = null) {
   const sCh = guild.channels.cache.get(sc.channel);
   if (!sCh) throw new Error('Session channel not found');
   const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
@@ -799,7 +801,12 @@ async function postSessionStart(guild, sc, hostUser, rawLink, vars) {
   if (sc.startImage) embed.setImage(sc.startImage);
   const comps = [];
   if (isValidUrl(rawLink)) comps.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())));
-  await sCh.send({ content: ping ?? undefined, embeds: [embed], components: comps });
+
+  // Bouw content: ping roles + voters (als ze er zijn)
+  let content = ping ?? '';
+  if (voterMentions) content = content ? `${content}\n🗳️ **Voters:** ${voterMentions}` : `🗳️ **Voters:** ${voterMentions}`;
+
+  await sCh.send({ content: content || undefined, embeds: [embed], components: comps });
 }
 
 // ════════════════════════════════════════════
@@ -1068,8 +1075,10 @@ client.on('messageReactionAdd', async (reaction, user) => {
             const sc = getSessionConfig(guild.id);
             const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
             const vars = { userMention: `<@${voteData.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: hostUser.tag ?? 'Unknown', memberCount: guild.memberCount.toString(), server: guild.name };
+            // Verzamel alle voters (excl. bots)
+            const voterMentions = users.filter(u => !u.bot).map(u => `<@${u.id}>`).join(' ');
             await reaction.message.edit({ embeds: [new EmbedBuilder().setTitle('✅ Vote Passed!').setColor(0x57F287).setDescription(`**${humanVotes}/${voteData.threshold}** votes! Starting session…`).setTimestamp()], components: [] }).catch(() => {});
-            await postSessionStart(guild, sc, hostUser, voteData.joinLink, vars);
+            await postSessionStart(guild, sc, hostUser, voteData.joinLink, vars, voterMentions);
           } catch (e) { console.error('Auto-start error:', e); }
         }
       }
@@ -1330,7 +1339,7 @@ client.on('interactionCreate', async interaction => {
         }
       }
       if (cmd === 'setup') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
         if (sub === 'tickets')       return interaction.reply(buildTicketSetupPayload(guildId));
         if (sub === 'sessions')      return interaction.reply(buildSessionSetupPayload(guildId));
@@ -1352,7 +1361,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ COUNTER BUTTONS ════
       if (id.startsWith('cnt_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const cc = getCounterConfig(guildId);
         if (id === 'cnt_toggle') { cc.enabled = !cc.enabled; await saveConfig(config); return interaction.update(buildCounterSetupPayload(guildId)); }
         if (id === 'cnt_category') return interaction.reply({ content: '### 📁 Select category', components: [channelDropdown('cntd_category', 'Select category...', [ChannelType.GuildCategory])], ephemeral: true });
@@ -1392,7 +1401,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ AUTOMOD BUTTONS ════
       if (id.startsWith('am_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const am = getAutomodConfig(guildId);
         if (id === 'am_toggle') { am.enabled = !am.enabled; await saveConfig(config); return interaction.update(buildAutomodSetupPayload(guildId)); }
         if (id === 'am_log') return interaction.reply({ content: '### 📋 Automod log channel', components: [channelDropdown('amd_log', 'Select channel...')], ephemeral: true });
@@ -1435,7 +1444,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ APPLICATION SETUP BUTTONS ════
       if (id.startsWith('ap_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const ac = getApplicationConfig(guildId);
 
         if (id === 'ap_review_channel') return interaction.reply({ content: '### 📢 Select global review channel', components: [channelDropdown('apd_review_channel', 'Select channel...')], ephemeral: true });
@@ -1496,7 +1505,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ APPLICATION PANEL EDITOR BUTTONS ════
       if (id.startsWith('appe__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const parts = id.split('__'); const action = parts[1]; const panelId = parts[2];
         const ac = getApplicationConfig(guildId);
         const panel = ac.panels.find(p => p.id === panelId);
@@ -1555,7 +1564,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ APPLICATION TYPE EDITOR BUTTONS ════
       if (id.startsWith('apte__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const parts = id.split('__'); const action = parts[1]; const typeId = parts[2];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
@@ -1674,7 +1683,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ APPLICATION ACCEPT / DENY (review channel) ════
       if (id.startsWith('app__accept__') || id.startsWith('app__acceptsilent__') || id.startsWith('app__deny__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const parts = id.split('__');
         const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3]; // appId is parts[4]
         const ac = getApplicationConfig(guildId);
@@ -1772,7 +1781,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ SAVED MESSAGES BUTTONS ════
       if (id.startsWith('sm_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
         if (id === 'sm_new') {
           const modal = new ModalBuilder().setCustomId('modal_sm_new').setTitle('New Saved Message');
@@ -1791,7 +1800,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ WELCOMER BUTTONS ════
       if (id.startsWith('wc_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const wc = getWelcomerConfig(guildId);
         if (id === 'wc_channel') return interaction.reply({ content: '### 📢 Welcome channel', components: [channelDropdown('wcd_channel', 'Select channel...')], ephemeral: true });
         if (id === 'wc_toggle') { wc.enabled = !wc.enabled; await saveConfig(config); return interaction.update(buildWelcomerSetupPayload(guildId)); }
@@ -1810,7 +1819,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ AUTOROLE BUTTONS ════
       if (id.startsWith('ar_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const ar = getAutoroleConfig(guildId);
         if (id === 'ar_add') return interaction.reply({ content: '### ➕ Select autoroles', components: [roleDropdown('ard_add', 'Select roles...')], ephemeral: true });
         if (id === 'ar_remove') { if (!ar.roles.length) return interaction.reply({ content: '❌ No roles.', ephemeral: true }); const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role...').addOptions(ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: id }; })); return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true }); }
@@ -1819,7 +1828,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ VERIFICATION BUTTONS ════
       if (id.startsWith('vc_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const vc = getVerificationConfig(guildId);
         if (id === 'vc_channel') return interaction.reply({ content: '### 📢 Verification channel', components: [channelDropdown('vcd_channel', 'Select channel...')], ephemeral: true });
         if (id === 'vc_role')    return interaction.reply({ content: '### 🎭 Verified role', components: [roleDropdown('vcd_role', 'Select role...', 1, 1)], ephemeral: true });
@@ -1856,7 +1865,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ TICKET SETUP BUTTONS ════
       if (id.startsWith('t_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         if (id === 't_ping_roles') return interaction.reply({ content: '### 📢 Ping roles', components: [roleDropdown('td_ping_roles', 'Select roles...')], ephemeral: true });
         if (id === 't_transcript') return interaction.reply({ content: '### 📋 Transcript channel', components: [channelDropdown('td_transcript', 'Select channel...')], ephemeral: true });
         if (id === 't_channel')    return interaction.reply({ content: '### 📬 Panel channel', components: [channelDropdown('td_channel', 'Select channel...')], ephemeral: true });
@@ -1903,7 +1912,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ SESSION SETUP BUTTONS ════
       if (id.startsWith('s_')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         if (id === 's_channel')       return interaction.reply({ content: '### 📢 Session channel', components: [channelDropdown('sd_channel', 'Select channel...')], ephemeral: true });
         if (id === 's_ping_roles')    return interaction.reply({ content: '### 👥 Ping roles', components: [roleDropdown('sd_ping_roles', 'Select roles...')], ephemeral: true });
         if (id === 's_allowed_roles') return interaction.reply({ content: '### 🔑 Allowed roles', components: [roleDropdown('sd_allowed_roles', 'Select roles...')], ephemeral: true });
@@ -1942,7 +1951,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ ANNOUNCEMENT SETUP BUTTONS ════
       if (id.startsWith('an_') || id.startsWith('ane__') || id === 'an__back') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const ac = getAnnouncementConfig(guildId);
         if (id === 'an__back') return interaction.update(buildAnnouncementOverview(guildId));
         if (id === 'an_new') {
@@ -1981,7 +1990,7 @@ client.on('interactionCreate', async interaction => {
 
       // ════ SELF ROLE SETUP BUTTONS ════
       if (id.startsWith('sr_') || id.startsWith('sre__') || id === 'sr__back') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const src = getSelfRoleConfig(guildId);
         if (id === 'sr__back') return interaction.update(buildSelfRoleOverview(guildId));
         if (id === 'sr_new') {
@@ -2083,7 +2092,7 @@ client.on('interactionCreate', async interaction => {
 
     // ══ ROLE SELECT MENUS ══
     if (interaction.isRoleSelectMenu()) {
-      if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
       const ids = interaction.values;
       if (interaction.customId === 'ard_add')          { const ar = getAutoroleConfig(guildId); for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); } await saveConfig(config); return interaction.reply({ content: `✅ Autoroles added.`, ephemeral: true }); }
       if (interaction.customId === 'vcd_role')          { const vc = getVerificationConfig(guildId); vc.verifiedRole = ids[0]; await saveConfig(config); return interaction.reply({ content: `✅ Verified role: <@&${ids[0]}>.`, ephemeral: true }); }
@@ -2125,7 +2134,7 @@ client.on('interactionCreate', async interaction => {
 
     // ══ CHANNEL SELECT MENUS ══
     if (interaction.isChannelSelectMenu()) {
-      if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
       const chId = interaction.values[0];
       if (interaction.customId === 'wcd_channel')         { getWelcomerConfig(guildId).channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, ephemeral: true }); }
       if (interaction.customId === 'vcd_channel')         { getVerificationConfig(guildId).channel = chId; await saveConfig(config); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, ephemeral: true }); }
@@ -2174,7 +2183,7 @@ client.on('interactionCreate', async interaction => {
       const id = interaction.customId; const val = interaction.values[0];
 
       if (id === 'announce_pick') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const ac = getAnnouncementConfig(guildId);
         const t = ac.types[val];
         if (!t) return interaction.reply({ content: '❌ Announcement type not found.', ephemeral: true });
@@ -2190,7 +2199,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (id === 'sendmsg_pick') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const sm = getSavedMessagesConfig(guildId);
         const msg = sm.messages[val];
         if (!msg) return interaction.reply({ content: '❌ Saved message not found.', ephemeral: true });
@@ -2205,7 +2214,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Sent in <#${targetCh.id}>!`, ephemeral: true });
       }
 
-      if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+      if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
 
       // Standard selects
       if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); await saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, ephemeral: true }); }
