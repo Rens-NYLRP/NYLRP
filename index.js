@@ -1079,27 +1079,6 @@ client.on('messageReactionAdd', async (reaction, user) => {
     if (reaction.message?.partial) await reaction.message.fetch();
     const guild = reaction.message.guild;
     if (!guild) return;
-    const voteData = activeVotes.get(guild.id);
-    if (voteData && reaction.message.id === voteData.messageId && reaction.emoji.name === '✅') {
-      const freshReaction = reaction.message.reactions.cache.get('✅');
-      if (freshReaction) {
-        const users = await freshReaction.users.fetch();
-        const humanVotes = users.filter(u => !u.bot).size;
-        if (humanVotes >= voteData.threshold) {
-          activeVotes.delete(guild.id);
-          try {
-            const sc = getSessionConfig(guild.id);
-            const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
-            const vars = { userMention: `<@${voteData.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: hostUser.tag ?? 'Unknown', memberCount: guild.memberCount.toString(), server: guild.name };
-            // Verzamel alle voters (excl. bots)
-            const voterMentions = users.filter(u => !u.bot).map(u => `<@${u.id}>`).join(' ');
-            await reaction.message.edit({ embeds: [new EmbedBuilder().setTitle('✅ Vote Passed!').setColor(0x57F287).setDescription(`**${humanVotes}/${voteData.threshold}** votes! Starting session…`).setTimestamp()], components: [] }).catch(() => {});
-            await postSessionStart(guild, sc, hostUser, voteData.joinLink, vars, voterMentions);
-          } catch (e) { console.error('Auto-start error:', e); }
-        }
-      }
-      return;
-    }
     const src = getSelfRoleConfig(guild.id);
     let targetPanel = null, targetRole = null;
     for (const [, panel] of Object.entries(src.panels)) {
@@ -1338,11 +1317,13 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'vote') {
           const threshold = interaction.options.getInteger('votes') ?? sc.voteThreshold ?? 5;
           const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(`${replaceVars(sc.voteDescription ?? 'React with ✅ to vote!\n\n**{host}** wants to host.', vars)}\n\n**Votes needed:** ${threshold}`).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
+          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(`${replaceVars(sc.voteDescription ?? '**{host}** wants to host a session!\n\nClick the button below to vote!', vars)}\n\n**Votes: 0/${threshold}**`).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
           if (sc.voteImage) embed.setImage(sc.voteImage);
-          const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed] });
-          await msg.react('✅'); await msg.react('❌');
-          activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null });
+          const voteRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('session__vote').setLabel('Vote ✅').setStyle(ButtonStyle.Success),
+          );
+          const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [voteRow] });
+          activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null, voters: [] });
           return interaction.editReply({ content: `✅ Vote posted! Auto-starts at **${threshold}** votes.` });
         }
         if (sub === 'shutdown') {
@@ -1374,6 +1355,43 @@ client.on('interactionCreate', async interaction => {
     // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      // ════ SESSION VOTE BUTTON ════
+      if (id === 'session__vote') {
+        const voteData = activeVotes.get(guildId);
+        if (!voteData || voteData.messageId !== interaction.message.id) {
+          return interaction.reply({ content: '❌ This vote is no longer active.', ephemeral: true });
+        }
+        const userId = interaction.user.id;
+        if (voteData.voters.includes(userId)) {
+          return interaction.reply({ content: '❌ You have already voted!', ephemeral: true });
+        }
+        voteData.voters.push(userId);
+        const count = voteData.voters.length;
+        const threshold = voteData.threshold;
+
+        // Update embed met nieuwe vote count
+        const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+          .setDescription(interaction.message.embeds[0].description.replace(/\*\*Votes: \d+\/\d+\*\*/, `**Votes: ${count}/${threshold}**`));
+
+        if (count >= threshold) {
+          // Vote geslaagd — disable de knop en start sessie
+          activeVotes.delete(guildId);
+          const disabledRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('session__vote').setLabel(`✅ Vote Passed! (${count}/${threshold})`).setStyle(ButtonStyle.Success).setDisabled(true),
+          );
+          await interaction.update({ embeds: [updatedEmbed.setTitle('✅ Vote Passed!').setColor(0x57F287)], components: [disabledRow] });
+          const sc = getSessionConfig(guildId);
+          const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
+          const vars = { userMention: `<@${voteData.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: hostUser.tag ?? 'Unknown', memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
+          const voterMentions = voteData.voters.map(id => `<@${id}>`).join(' ');
+          await postSessionStart(interaction.guild, sc, hostUser, voteData.joinLink, vars, voterMentions);
+        } else {
+          // Nog niet genoeg votes — update de count
+          await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
+        }
+        return;
+      }
 
       // ════ COUNTER BUTTONS ════
       if (id.startsWith('cnt_')) {
