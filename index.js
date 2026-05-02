@@ -183,6 +183,7 @@ function getApplicationConfig(guildId) {
     if (t.groupLink      === undefined) t.groupLink      = null;
     if (t.nicknameFormat === undefined) t.nicknameFormat = null;
     if (t.reviewChannel  === undefined) t.reviewChannel  = null;
+    if (t.reviewRoles    === undefined) t.reviewRoles    = [];
   }
   // Patch elk bestaand panel met ontbrekende velden
   for (const p of gc.applications.panels) {
@@ -1585,6 +1586,13 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
 
+        if (action === 'set_review_roles') {
+          return interaction.reply({
+            content: `### 🔑 Select review roles for **${appType.label}**\nOnly members with these roles can accept or deny applications of this type.\n*Select multiple roles — send each one separately or use the dropdown.*`,
+            components: [roleDropdown(`apte_review_roles__${typeId}`, 'Select role...')],
+            ephemeral: true,
+          });
+        }
         if (action === 'set_review_channel') {
           return interaction.reply({
             content: `### 📢 Select review channel for **${appType.label}**\nApplications of this type will be sent to this channel.`,
@@ -1698,11 +1706,16 @@ client.on('interactionCreate', async interaction => {
 
       // ════ APPLICATION ACCEPT / DENY (review channel) ════
       if (id.startsWith('app__accept__') || id.startsWith('app__acceptsilent__') || id.startsWith('app__deny__')) {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
         const parts = id.split('__');
-        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3]; // appId is parts[4]
+        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
+
+        // Permission check: reviewRoles per type, fallback naar hasSetup
+        const canReview = appType?.reviewRoles?.length
+          ? appType.reviewRoles.some(rId => interaction.member.roles.cache.has(rId)) || hasSetup(interaction.member)
+          : hasSetup(interaction.member);
+        if (!canReview) return interaction.reply({ content: '❌ You do not have permission to accept or deny applications of this type.', ephemeral: true });
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
 
         if (action === 'accept' || action === 'acceptsilent') {
@@ -2117,6 +2130,17 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('anpr__'))    { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; await saveConfig(config); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
 
       // Application type accept roles
+      if (interaction.customId.startsWith('apte_review_roles__')) {
+        const typeId = interaction.customId.replace('apte_review_roles__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        appType.reviewRoles = ids;
+        await saveConfig(config);
+        const roleNames = ids.length ? ids.map(id => interaction.guild.roles.cache.get(id)?.name ?? id).join(', ') : 'None (everyone with setup)';
+        return interaction.reply({ content: `✅ Review roles for **${appType.label}** set to: **${roleNames}**`, ephemeral: true });
+      }
+
       if (interaction.customId.startsWith('apte_roles__')) {
         const typeId = interaction.customId.replace('apte_roles__', '');
         const ac = getApplicationConfig(guildId);
@@ -2283,6 +2307,7 @@ client.on('interactionCreate', async interaction => {
             { name: '📝 Questions', value: `${appType.questions.length} question(s)`, inline: true },
             { name: '🎭 Accept Roles', value: roles, inline: true },
             { name: '📢 Review Channel', value: appType.reviewChannel ? `<#${appType.reviewChannel}>` : '*Global (fallback)*', inline: true },
+            { name: '🔑 Review Roles', value: appType.reviewRoles?.length ? appType.reviewRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone with setup*', inline: true },
             { name: '🔗 Group Link', value: appType.groupLink ? `[Click here](${appType.groupLink})` : '*Not set*', inline: true },
             { name: '🏷️ Nickname Format', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Disabled*', inline: true },
             { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
@@ -2292,11 +2317,12 @@ client.on('interactionCreate', async interaction => {
         const r1 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Edit Questions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
           new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept Roles').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`apte__set_review_roles__${val}`).setLabel('Review Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
           new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
           new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM Messages').setStyle(ButtonStyle.Primary).setEmoji('💬'),
-          new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Group Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
         );
         const r2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Group Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
           new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
           new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Back').setStyle(ButtonStyle.Secondary),
         );
