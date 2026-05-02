@@ -473,37 +473,45 @@ async function submitApplication(userId, session, appType, guild) {
     { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
   ];
 
-  // Split answers over multiple embeds (max 25 fields per embed, Discord limit)
-  const FIELDS_PER_EMBED = 25;
+  // Helper: bereken embed size (Discord telt title + description + fields + footer)
+  const fieldSize = f => (f.name?.length ?? 0) + (f.value?.length ?? 0);
+  const EMBED_MAX = 5800; // iets onder 6000 als veiligheidsmarge
+  const MAX_FIELDS = 25;
+
+  // Bouw embeds waarbij we per embed de totale grootte bewaken
   const embeds = [];
+  let currentFields = [...headerFields];
+  let currentSize = 60 + headerFields.reduce((s, f) => s + fieldSize(f), 0); // 60 voor title/footer
+  let isFirst = true;
+  let page = 1;
 
-  // First embed: header + first batch of answers
-  const firstBatch = answerFields.slice(0, FIELDS_PER_EMBED - headerFields.length);
-  embeds.push(
-    new EmbedBuilder()
-      .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`)
+  const flushEmbed = (isLast) => {
+    const title = isFirst
+      ? `📋 New Application — ${appType.emoji || ''} ${appType.label}`
+      : `📋 Application (continued) — ${appType.label} — Page ${page}`;
+    const footer = `Application ID: ${appId}${!isLast ? ' • Continued below ↓' : ''}`;
+    const eb = new EmbedBuilder()
+      .setTitle(title)
       .setColor(0x5865F2)
-      .setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null)
-      .addFields(...headerFields, ...firstBatch)
-      .setFooter({ text: `Application ID: ${appId}${answerFields.length > firstBatch.length ? ' • Continued below ↓' : ''}` })
-      .setTimestamp()
-  );
-
-  // Extra embeds for remaining answers
-  let remaining = answerFields.slice(FIELDS_PER_EMBED - headerFields.length);
-  let page = 2;
-  while (remaining.length > 0) {
-    const batch = remaining.slice(0, FIELDS_PER_EMBED);
-    remaining = remaining.slice(FIELDS_PER_EMBED);
-    embeds.push(
-      new EmbedBuilder()
-        .setTitle(`📋 Application (continued) — ${appType.label} — Page ${page}`)
-        .setColor(0x5865F2)
-        .addFields(...batch)
-        .setFooter({ text: `Application ID: ${appId}${remaining.length > 0 ? ' • Continued below ↓' : ''}` })
-    );
+      .addFields(...currentFields)
+      .setFooter({ text: footer });
+    if (isFirst) { eb.setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null); eb.setTimestamp(); }
+    embeds.push(eb);
+    isFirst = false;
     page++;
+    currentFields = [];
+    currentSize = 60;
+  };
+
+  for (const field of answerFields) {
+    const fSize = fieldSize(field);
+    if (currentFields.length >= MAX_FIELDS || (currentSize + fSize > EMBED_MAX && currentFields.length > 0)) {
+      flushEmbed(false);
+    }
+    currentFields.push(field);
+    currentSize += fSize;
   }
+  if (currentFields.length > 0) flushEmbed(true);
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`app__accept__${userId}__${appType.id}__${appId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
@@ -511,7 +519,14 @@ async function submitApplication(userId, session, appType, guild) {
     new ButtonBuilder().setCustomId(`app__deny__${userId}__${appType.id}__${appId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
   );
 
-  await reviewCh.send({ embeds, components: [row] });
+  // Discord limit: max 10 embeds per message
+  // Stuur eerste batch met buttons, rest zonder (buttons op laatste bericht)
+  const EMBEDS_PER_MSG = 10;
+  for (let i = 0; i < embeds.length; i += EMBEDS_PER_MSG) {
+    const batch = embeds.slice(i, i + EMBEDS_PER_MSG);
+    const isLastBatch = i + EMBEDS_PER_MSG >= embeds.length;
+    await reviewCh.send({ embeds: batch, components: isLastBatch ? [row] : [] });
+  }
   return appId;
 }
 
