@@ -279,6 +279,30 @@ async function deleteCounterChannel(guild, type, cc) {
 }
 setInterval(async () => { for (const guild of client.guilds.cache.values()) { await updateCounters(guild).catch(console.error); } }, 5 * 60 * 1000);
 
+function buildErlcLogSetupPayload(guildId) {
+  const ec = getErlcLogConfig(guildId);
+  const embed = new EmbedBuilder().setTitle('📋 ERLC Log Setup').setColor(0x5865F2)
+    .setDescription(`**Status:** ${ec.enabled ? '✅ Active' : '❌ Inactive'}\n**Server Key:** ${ec.serverKey ? '✅ Set' : '❌ Not set — use `/erlcconfig`'}\n\nSet the Discord channel for each ERLC log type. Polls every **30 seconds**.**`)
+    .addFields(
+      { name: '🔨 Kick/Ban Logs',   value: ec.kickBans  ? `<#${ec.kickBans}>`  : '*Not set*', inline: true },
+      { name: '📥 Join/Leave Logs', value: ec.joinLeave ? `<#${ec.joinLeave}>` : '*Not set*', inline: true },
+      { name: '⌨️ Command Logs',    value: ec.cmds      ? `<#${ec.cmds}>`      : '*Not set*', inline: true },
+      { name: '🚨 Mod Call Logs',   value: ec.modCall   ? `<#${ec.modCall}>`   : '*Not set*', inline: true },
+      { name: '💀 Kill Logs',       value: ec.kills     ? `<#${ec.kills}>`     : '*Not set*', inline: true },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('erlc_toggle').setLabel(ec.enabled ? '🔴 Disable' : '🟢 Enable').setStyle(ec.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('erlc_set_kickbans').setLabel('Kick/Ban Channel').setStyle(ButtonStyle.Primary).setEmoji('🔨'),
+    new ButtonBuilder().setCustomId('erlc_set_joinleave').setLabel('Join/Leave Channel').setStyle(ButtonStyle.Primary).setEmoji('📥'),
+    new ButtonBuilder().setCustomId('erlc_set_cmds').setLabel('Commands Channel').setStyle(ButtonStyle.Primary).setEmoji('⌨️'),
+  );
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('erlc_set_modcall').setLabel('Mod Call Channel').setStyle(ButtonStyle.Primary).setEmoji('🚨'),
+    new ButtonBuilder().setCustomId('erlc_set_kills').setLabel('Kill Logs Channel').setStyle(ButtonStyle.Primary).setEmoji('💀'),
+  );
+  return { embeds: [embed], components: [r1, r2], ephemeral: true };
+}
+
 function buildTrainingSetupPayload(guildId) {
   const tc = getTrainingConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🎓 Training Request Setup').setColor(0x5865F2)
@@ -420,14 +444,35 @@ async function getRobloxUser(username) {
   return data.data[0];
 }
 
+async function getRobloxDescription(userId) {
+  const res = await fetch(`https://users.roblox.com/v1/users/${userId}`);
+  if (!res.ok) throw new Error('Roblox API error');
+  const data = await res.json();
+  return data.description ?? '';
+}
+
+const pendingVerifications = new Map(); // discordUserId → { code, robloxUsername, robloxId, expires }
+
 const ERLC_BASE = 'https://api.policeroleplay.community/v1';
-async function erlcRequest(p, method = 'GET', body = null) {
-  const opts = { method, headers: { 'Server-Key': process.env.ERLC_API_KEY, 'Content-Type': 'application/json' } };
+async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
+  const key = guildId ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY) : process.env.ERLC_API_KEY;
+  const opts = { method, headers: { 'Server-Key': key, 'Content-Type': 'application/json' } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${ERLC_BASE}${p}`, opts);
   if (!res.ok) throw new Error(`ERLC ${res.status}: ${res.statusText}`);
   return res.json();
 }
+
+function getErlcLogConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null, kickBans: null, joinLeave: null, cmds: null, modCall: null, kills: null };
+  if (!gc.erlcLogs.serverKey) gc.erlcLogs.serverKey = null;
+  return gc.erlcLogs;
+}
+
+// ERLC polling state — bijhouden wat we al gezien hebben
+const erlcState = new Map(); // guildId → { players: Set, kills: Set, modCalls: Set, cmds: Set, bans: Set }
 
 function roleDropdown(customId, placeholder, min = 1, max = 10) {
   return new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).setMinValues(min).setMaxValues(max));
@@ -896,7 +941,7 @@ const commands = [
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
   { name: 'promote', description: '[SHR] Promote a user to a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to promote to', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'demote', description: '[SHR] Demote a user from a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to demote from', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
-  { name: 'warnings', description: '[SHR] View warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'erlcconfig', description: '[SHR] Set ERLC server key for this server' },
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
   { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
@@ -933,6 +978,7 @@ const commands = [
     { name: 'automod', type: 1, description: 'Automod keyword filter' },
     { name: 'counters', type: 1, description: 'Member counter channels' },
     { name: 'training', type: 1, description: 'Training request system' },
+    { name: 'erlclogs', type: 1, description: 'ERLC log channels' },
   ]},
 ];
 
@@ -945,7 +991,121 @@ client.once('clientReady', async () => {
   try { await rest.put(Routes.applicationCommands(client.user.id), { body: commands }); console.log('✅ Commands registered'); }
   catch (e) { console.error('❌ Command registration failed:', e); }
   for (const guild of client.guilds.cache.values()) { await updateCounters(guild).catch(console.error); }
+
+  // ════ ERLC LOG POLLING ════
+  setInterval(async () => {
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const ec = getErlcLogConfig(guild.id);
+        if (!ec.enabled) continue;
+
+        if (!erlcState.has(guild.id)) {
+          erlcState.set(guild.id, { players: new Set(), kills: new Set(), modCalls: new Set(), cmds: new Set(), bans: new Set() });
+        }
+        const state = erlcState.get(guild.id);
+
+        // ── Join/Leave logs ──
+        if (ec.joinLeave) {
+          const ch = guild.channels.cache.get(ec.joinLeave);
+          if (ch) {
+            const players = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
+            if (players) {
+              const current = new Set(Object.keys(players));
+              // Joined
+              for (const id of current) {
+                if (!state.players.has(id)) {
+                  const p = players[id];
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📥 Player Joined').setColor(0x57F287).addFields({ name: '👤 Player', value: p.Player, inline: true }, { name: '🎭 Team', value: p.Team || 'None', inline: true }).setTimestamp()] }).catch(() => {});
+                }
+              }
+              // Left
+              for (const id of state.players) {
+                if (!current.has(id)) {
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📤 Player Left').setColor(0xED4245).addFields({ name: '👤 Player', value: id, inline: true }).setTimestamp()] }).catch(() => {});
+                }
+              }
+              state.players = current;
+            }
+          }
+        }
+
+        // ── Kill logs ──
+        if (ec.kills) {
+          const ch = guild.channels.cache.get(ec.kills);
+          if (ch) {
+            const kills = await erlcRequest('/server/killlogs', 'GET', null, guild.id).catch(() => null);
+            if (kills) {
+              for (const k of kills) {
+                const key = `${k.Killer}-${k.Killed}-${k.Timestamp}`;
+                if (!state.kills.has(key)) {
+                  state.kills.add(key);
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('💀 Kill Log').setColor(0xFF0000).addFields({ name: '🔫 Killer', value: k.Killer, inline: true }, { name: '💀 Killed', value: k.Killed, inline: true }, { name: '🗡️ Weapon', value: k.Weapon || 'Unknown', inline: true }).setTimestamp()] }).catch(() => {});
+                }
+              }
+              // Houd state klein
+              if (state.kills.size > 500) state.kills = new Set([...state.kills].slice(-200));
+            }
+          }
+        }
+
+        // ── Command logs ──
+        if (ec.cmds) {
+          const ch = guild.channels.cache.get(ec.cmds);
+          if (ch) {
+            const cmds = await erlcRequest('/server/commandlogs', 'GET', null, guild.id).catch(() => null);
+            if (cmds) {
+              for (const c of cmds) {
+                const key = `${c.Player}-${c.Command}-${c.Timestamp}`;
+                if (!state.cmds.has(key)) {
+                  state.cmds.add(key);
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('⌨️ Command Log').setColor(0x5865F2).addFields({ name: '👤 Player', value: c.Player, inline: true }, { name: '💬 Command', value: c.Command || 'Unknown', inline: false }).setTimestamp()] }).catch(() => {});
+                }
+              }
+              if (state.cmds.size > 500) state.cmds = new Set([...state.cmds].slice(-200));
+            }
+          }
+        }
+
+        // ── Mod call logs ──
+        if (ec.modCall) {
+          const ch = guild.channels.cache.get(ec.modCall);
+          if (ch) {
+            const modcalls = await erlcRequest('/server/modcalls', 'GET', null, guild.id).catch(() => null);
+            if (modcalls) {
+              for (const m of modcalls) {
+                const key = `${m.Caller}-${m.Timestamp}`;
+                if (!state.modCalls.has(key)) {
+                  state.modCalls.add(key);
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('🚨 Mod Call').setColor(0xFEE75C).addFields({ name: '📞 Caller', value: m.Caller, inline: true }, { name: '🛡️ Responder', value: m.Responder || '*No responder yet*', inline: true }).setTimestamp()] }).catch(() => {});
+                }
+              }
+              if (state.modCalls.size > 500) state.modCalls = new Set([...state.modCalls].slice(-200));
+            }
+          }
+        }
+
+        // ── Kick/Ban logs ──
+        if (ec.kickBans) {
+          const ch = guild.channels.cache.get(ec.kickBans);
+          if (ch) {
+            const bans = await erlcRequest('/server/bans', 'GET', null, guild.id).catch(() => null);
+            if (bans) {
+              for (const b of Object.keys(bans)) {
+                if (!state.bans.has(b)) {
+                  state.bans.add(b);
+                  const ban = bans[b];
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('🔨 Ban Log').setColor(0xFF0000).addFields({ name: '👤 Player', value: ban.UserName || b, inline: true }, { name: '👮 By', value: ban.moderatorName || 'Unknown', inline: true }, { name: '📝 Reason', value: ban.Reason || '*No reason*', inline: false }).setTimestamp()] }).catch(() => {});
+                }
+              }
+            }
+          }
+        }
+
+      } catch (e) { /* silently skip guild on error */ }
+    }
+  }, 30_000); // Poll elke 30 seconden
 });
+
 
 client.on('guildMemberAdd', async member => { await updateCounters(member.guild).catch(console.error); });
 client.on('guildMemberRemove', async member => { await updateCounters(member.guild).catch(console.error); });
@@ -1317,6 +1477,18 @@ client.on('interactionCreate', async interaction => {
         await member.roles.remove(role, reason);
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬇️ User Demoted').setColor(0xED4245).addFields({ name: '👤 User', value: user.tag, inline: true }, { name: '🎭 Role', value: role.name, inline: true }, { name: '📝 Reason', value: reason, inline: false }, { name: '👮 By', value: interaction.user.tag, inline: true }).setTimestamp()] });
       }
+      if (cmd === 'erlcconfig') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        const ec = getErlcLogConfig(guildId);
+        const modal = new ModalBuilder().setCustomId('modal_erlcconfig').setTitle('ERLC Server Key');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('erlc_server_key').setLabel('ERLC Server Key').setStyle(TextInputStyle.Short).setValue(ec.serverKey || '').setPlaceholder('Paste your ERLC server key here...').setRequired(true)
+          )
+        );
+        return interaction.showModal(modal);
+      }
+
       if (cmd === 'warnings') { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true }); const warns = getWarnings(guildId, user.id); if (!warns.length) return interaction.reply({ content: `✅ No warnings.`, ephemeral: true }); return interaction.reply({ ephemeral: true, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${user.tag}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] }); }
       if (cmd === 'clearwarnings') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); await clearWarnings(guildId, user.id); return interaction.reply(`✅ Cleared warnings for **${user.tag}**.`); }
       if (cmd === 'note')  { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); await addNote(guildId, user.id, { text: interaction.options.getString('text'), moderator: interaction.user.tag, date: new Date().toUTCString() }); return interaction.reply({ content: `✅ Note added.`, ephemeral: true }); }
@@ -1425,6 +1597,7 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'automod')       return interaction.reply(buildAutomodSetupPayload(guildId));
         if (sub === 'counters')      return interaction.reply(buildCounterSetupPayload(guildId));
         if (sub === 'training')      return interaction.reply(buildTrainingSetupPayload(guildId));
+        if (sub === 'erlclogs')      return interaction.reply(buildErlcLogSetupPayload(guildId));
       }
     }
 
@@ -1508,6 +1681,22 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
+      }
+
+      // ════ ERLC LOG SETUP BUTTONS ════
+      if (id.startsWith('erlc_')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
+        const ec = getErlcLogConfig(guildId);
+        if (id === 'erlc_toggle') { ec.enabled = !ec.enabled; await saveConfig(config); return interaction.update(buildErlcLogSetupPayload(guildId)); }
+        const channelMap = {
+          erlc_set_kickbans:  { key: 'kickBans',  label: '🔨 Kick/Ban logs channel',    cid: 'erlcd_kickbans' },
+          erlc_set_joinleave: { key: 'joinLeave', label: '📥 Join/Leave logs channel',   cid: 'erlcd_joinleave' },
+          erlc_set_cmds:      { key: 'cmds',      label: '⌨️ Command logs channel',      cid: 'erlcd_cmds' },
+          erlc_set_modcall:   { key: 'modCall',   label: '🚨 Mod call logs channel',     cid: 'erlcd_modcall' },
+          erlc_set_kills:     { key: 'kills',     label: '💀 Kill logs channel',         cid: 'erlcd_kills' },
+        };
+        const entry = channelMap[id];
+        if (entry) return interaction.reply({ content: `### ${entry.label}`, components: [channelDropdown(entry.cid, 'Select channel...')], ephemeral: true });
       }
 
       // ════ TRAINING SETUP BUTTONS ════
@@ -2055,10 +2244,37 @@ client.on('interactionCreate', async interaction => {
       if (id === 'verify_start') {
         const vc = getVerificationConfig(guildId);
         if (!vc.enabled) return interaction.reply({ content: '❌ Verification is disabled.', ephemeral: true });
-        if (vc.verifiedRole && interaction.member.roles.cache.has(vc.verifiedRole)) return interaction.reply({ content: '✅ Already verified!', ephemeral: true });
-        const modal = new ModalBuilder().setCustomId('modal_verify_submit').setTitle('Roblox Verification');
+        if (vc.verifiedRole && interaction.member.roles.cache.has(vc.verifiedRole)) return interaction.reply({ content: '✅ You are already verified!', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_verify_username').setTitle('Roblox Verification — Step 1');
         modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('roblox_username').setLabel('Your Roblox username').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Builderman').setRequired(true).setMinLength(3).setMaxLength(20)));
         return interaction.showModal(modal);
+      }
+
+      if (id === 'verify_confirm') {
+        const pending = pendingVerifications.get(interaction.user.id);
+        if (!pending) return interaction.reply({ content: '❌ No pending verification. Click **Verify** again to start over.', ephemeral: true });
+        if (Date.now() > pending.expires) {
+          pendingVerifications.delete(interaction.user.id);
+          return interaction.reply({ content: '❌ Verification expired (15 minutes). Click **Verify** again to start over.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        try {
+          const description = await getRobloxDescription(pending.robloxId);
+          if (!description.includes(pending.code)) {
+            return interaction.editReply({ content: `❌ Code **${pending.code}** not found in your Roblox profile description.\n\n1. Go to [your Roblox profile](https://www.roblox.com/users/${pending.robloxId}/profile)\n2. Click **Edit Profile**\n3. Paste \`${pending.code}\` anywhere in your description\n4. Save and click **✅ Done, check my profile** again` });
+          }
+          // Code gevonden — verifieer de gebruiker
+          const vc = getVerificationConfig(guildId);
+          const nickname = `(${interaction.user.username}) | ${pending.robloxUsername}`.slice(0, 32);
+          try { await interaction.member.setNickname(nickname, 'Roblox verification'); } catch {}
+          if (vc.verifiedRole) { const role = interaction.guild.roles.cache.get(vc.verifiedRole); if (role) await interaction.member.roles.add(role); }
+          pendingVerifications.delete(interaction.user.id);
+          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields(
+            { name: '🎮 Roblox Username', value: pending.robloxUsername, inline: true },
+            { name: '🆔 Roblox ID', value: `${pending.robloxId}`, inline: true },
+            { name: '📛 Nickname', value: `\`${nickname}\``, inline: false },
+          ).setDescription('You can now remove the code from your profile description.').setTimestamp()] });
+        } catch (e) { return interaction.editReply({ content: `❌ Could not check your profile. Try again later.` }); }
       }
 
       // ════ TICKET SETUP BUTTONS ════
@@ -2387,6 +2603,14 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({ content: `✅ Review channel for **${appType.label}** set to <#${chId}>!`, ephemeral: true });
       }
+      // ════ ERLC CHANNEL SELECTS ════
+      if (interaction.customId.startsWith('erlcd_')) {
+        const ec = getErlcLogConfig(guildId);
+        const map = { erlcd_kickbans: 'kickBans', erlcd_joinleave: 'joinLeave', erlcd_cmds: 'cmds', erlcd_modcall: 'modCall', erlcd_kills: 'kills' };
+        const key = map[interaction.customId];
+        if (key) { ec[key] = chId; await saveConfig(config); return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true }); }
+      }
+
       // ════ TRAINING CHANNEL SELECT ════
       if (interaction.customId === 'tr_setup_channel') {
         const tc = getTrainingConfig(guildId);
@@ -2817,18 +3041,59 @@ client.on('interactionCreate', async interaction => {
         if (t) vc.panelTitle = t; if (d) vc.panelDescription = d; if (c) vc.panelColor = c; vc.panelImage = im || null;
         await saveConfig(config); return interaction.reply({ content: '✅ Updated!', ephemeral: true });
       }
-      if (mid === 'modal_verify_submit') {
+      if (mid === 'modal_erlcconfig') {
+        const key = interaction.fields.getTextInputValue('erlc_server_key').trim();
+        const ec = getErlcLogConfig(guildId);
+        ec.serverKey = key;
+        await saveConfig(config);
+        // Test de key
+        try {
+          await erlcRequest('/server', 'GET', null, guildId);
+          return interaction.reply({ content: `✅ ERLC Server Key saved and **verified**! The connection works.`, ephemeral: true });
+        } catch (e) {
+          return interaction.reply({ content: `⚠️ Key saved but **could not connect** to ERLC (${e.message}). Double check the key is correct.`, ephemeral: true });
+        }
+      }
+
+      if (mid === 'modal_verify_username') {
         await interaction.deferReply({ ephemeral: true });
         const vc = getVerificationConfig(guildId);
         const robloxUsername = interaction.fields.getTextInputValue('roblox_username').trim();
         try {
           const robloxUser = await getRobloxUser(robloxUsername);
-          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox user **${robloxUsername}** not found.` });
-          const nickname = `(${interaction.user.username}) | ${robloxUser.name}`.slice(0, 32);
-          try { await interaction.member.setNickname(nickname, 'Roblox verification'); } catch {}
-          if (vc.verifiedRole) { const role = interaction.guild.roles.cache.get(vc.verifiedRole); if (role) await interaction.member.roles.add(role); }
-          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields({ name: '🎮 Roblox', value: robloxUser.name, inline: true }, { name: '🆔 ID', value: `${robloxUser.id}`, inline: true }, { name: '📛 Nickname', value: `\`${nickname}\``, inline: false }).setTimestamp()] });
-        } catch (e) { return interaction.editReply({ content: `❌ Verification failed. Try again later.` }); }
+          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox user **${robloxUsername}** not found. Check the spelling and try again.` });
+          // Genereer unieke code
+          const code = `NYLRP-${Math.random().toString(36).toUpperCase().slice(2, 8)}`;
+          pendingVerifications.set(interaction.user.id, {
+            code,
+            robloxUsername: robloxUser.name,
+            robloxId: robloxUser.id,
+            expires: Date.now() + 15 * 60 * 1000, // 15 minuten
+          });
+          const confirmRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setLabel('✏️ Edit my Roblox Profile').setStyle(ButtonStyle.Link).setURL(`https://www.roblox.com/users/${robloxUser.id}/profile`),
+            new ButtonBuilder().setCustomId('verify_confirm').setLabel('✅ Done, check my profile').setStyle(ButtonStyle.Success),
+          );
+          return interaction.editReply({
+            embeds: [new EmbedBuilder()
+              .setTitle('🔐 Step 2 — Add the code to your Roblox profile')
+              .setColor(0xFEE75C)
+              .setDescription([
+                `**Found:** ${robloxUser.name} (ID: ${robloxUser.id})`,
+                ``,
+                `**1.** Go to your [Roblox profile](https://www.roblox.com/users/${robloxUser.id}/profile)`,
+                `**2.** Click **Edit Profile**`,
+                `**3.** Paste this code anywhere in your **description:**`,
+                `\`\`\`${code}\`\`\``,
+                `**4.** Save your profile`,
+                `**5.** Click the button below`,
+                ``,
+                `⏳ This code expires in **15 minutes**.`,
+              ].join('\n'))
+            ],
+            components: [confirmRow],
+          });
+        } catch (e) { return interaction.editReply({ content: `❌ Could not reach Roblox. Try again later.` }); }
       }
 
       // ── Ticket ──
