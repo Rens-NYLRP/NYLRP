@@ -279,6 +279,143 @@ async function deleteCounterChannel(guild, type, cc) {
 }
 setInterval(async () => { for (const guild of client.guilds.cache.values()) { await updateCounters(guild).catch(console.error); } }, 5 * 60 * 1000);
 
+function buildRolePermsSetupPayload(guildId) {
+  const rp = getRolePermConfig(guildId);
+  const entries = Object.entries(rp);
+  const fieldVal = entries.length
+    ? entries.map(([roleId, perms]) => `<@&${roleId}>\n  ➕ Add: ${perms.addRoles?.length ? perms.addRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}\n  ➖ Remove: ${perms.removeRoles?.length ? perms.removeRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`).join('\n\n')
+    : '*No role permissions set*';
+  const embed = new EmbedBuilder().setTitle('🔐 Role Permissions Setup').setColor(0x5865F2)
+    .setDescription('Set which roles are required to add or remove specific roles.\n\n' + fieldVal);
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('rperms__add').setLabel('Configure Role').setStyle(ButtonStyle.Primary).setEmoji('🔐'),
+    new ButtonBuilder().setCustomId('rperms__clear').setLabel('Clear All').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+  );
+  return { embeds: [embed], components: [row], ephemeral: true };
+}
+
+function buildCommandListEmbed(guildId) {
+  const rp = getRolePermConfig(guildId);
+
+  const section = (title, commands) => ({ name: title, value: commands.join('\n'), inline: false });
+
+  const rolePermsStr = (roleId) => {
+    const p = rp[roleId];
+    if (!p) return 'Everyone';
+    const add = p.addRoles?.length ? p.addRoles.map(r => `<@&${r}>`).join(', ') : 'Everyone';
+    return add;
+  };
+
+  const fields = [
+    section('🛡️ Moderation', [
+      '`/ban` — Ban a user · **SHR**',
+      '`/unban` — Unban a user · **SHR**',
+      '`/kick` — Kick a user · **SHR**',
+      '`/softban` — Softban a user · **SHR**',
+      '`/tempban` — Temporarily ban a user · **SHR**',
+      '`/mute` — Mute a user · **Staff**',
+      '`/unmute` — Unmute a user · **Staff**',
+      '`/warn` — Warn a user · **Staff**',
+      '`/warnings` — View warnings · **Staff**',
+      '`/clearwarnings` — Clear warnings · **SHR**',
+      '`/note` — Add a note · **SHR**',
+      '`/notes` — View notes · **SHR**',
+    ]),
+    section('🎭 Roles', [
+      '`/addrole` — Add a role · **See role permissions**',
+      '`/removerole` — Remove a role · **See role permissions**',
+      '`/giveroles` — Add multiple roles · **See role permissions**',
+      '`/promote` — Promote a user · **SHR**',
+      '`/demote` — Demote a user · **SHR**',
+    ]),
+    section('🎟️ Tickets', [
+      '`/setup tickets` — Configure tickets · **Setup Role**',
+    ]),
+    section('📋 Applications', [
+      '`/setup applications` — Configure applications · **Setup Role**',
+    ]),
+    section('🟢 Sessions', [
+      '`/session start` — Start a session · **Staff**',
+      '`/session vote` — Start a vote · **Staff**',
+      '`/session shutdown` — End a session · **Staff**',
+    ]),
+    section('🎓 Training', [
+      '`/trainrequest` — Request a trainer · **Trial Staff**',
+    ]),
+    section('📋 Requests', [
+      '`/executiverequest` — Executive request · **Everyone**',
+      '`/foundationrequest` — Foundership request · **Everyone**',
+    ]),
+    section('✅ Verification', [
+      '`/verify` — Verify Roblox account · **Everyone**',
+      '`/unverify` — Unverify a user · **SHR**',
+    ]),
+    section('⚙️ Setup', [
+      '`/setup` — Configure bot features · **Setup Role**',
+      '`/erlcconfig` — Set ERLC key · **Setup Role**',
+      '`/send` — Send a message · **Setup Role**',
+    ]),
+  ];
+
+  return new EmbedBuilder()
+    .setTitle('📜 Command List')
+    .setColor(0x5865F2)
+    .addFields(...fields)
+    .setFooter({ text: 'Last updated' })
+    .setTimestamp();
+}
+
+async function updateCommandListEmbed(guild) {
+  try {
+    const cl = getCommandListConfig(guild.id);
+    if (!cl.channel) return;
+    const ch = guild.channels.cache.get(cl.channel);
+    if (!ch) return;
+    const embed = buildCommandListEmbed(guild.id);
+    if (cl.messageId) {
+      const msg = await ch.messages.fetch(cl.messageId).catch(() => null);
+      if (msg) { await msg.edit({ embeds: [embed] }); return; }
+    }
+    const msg = await ch.send({ embeds: [embed] });
+    cl.messageId = msg.id;
+    await saveConfig(config);
+  } catch {}
+}
+
+function buildCommandListSetupPayload(guildId) {
+  const cl = getCommandListConfig(guildId);
+  const embed = new EmbedBuilder().setTitle('📜 Command List Setup').setColor(0x5865F2)
+    .addFields(
+      { name: '📢 Channel', value: cl.channel ? `<#${cl.channel}>` : '*Not set*', inline: true },
+      { name: '📌 Message', value: cl.messageId ? `✅ Deployed` : '❌ Not deployed', inline: true },
+    )
+    .setDescription('The command list auto-updates whenever settings change.');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('cmdlist__channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('cmdlist__deploy').setLabel('Deploy / Update Now').setStyle(ButtonStyle.Success).setEmoji('🚀'),
+  );
+  return { embeds: [embed], components: [row], ephemeral: true };
+}
+
+function buildRequestSetupPayload(guildId, type) {
+  const cfg = type === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+  const label = type === 'exec' ? 'Executive' : 'Foundership';
+  const embed = new EmbedBuilder()
+    .setTitle(`📋 ${label} Request Setup`)
+    .setColor(type === 'exec' ? 0x5865F2 : 0xFEE75C)
+    .addFields(
+      { name: '📢 Channel', value: cfg.channel ? `<#${cfg.channel}>` : '*Not set*', inline: true },
+      { name: '🔑 Approval Roles', value: cfg.approvalRoles?.length ? cfg.approvalRoles.map(r => `<@&${r}>`).join(', ') : '*Not set (setup only)*', inline: true },
+      { name: '✅ Required Approvals', value: `${cfg.requiredApprovals ?? 2}`, inline: true },
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`reqsetup__channel__${type}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId(`reqsetup__roles__${type}`).setLabel('Approval Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
+    new ButtonBuilder().setCustomId(`reqsetup__approvals__${type}`).setLabel('Required Approvals').setStyle(ButtonStyle.Primary).setEmoji('✅'),
+  );
+  return { embeds: [embed], components: [row], ephemeral: true };
+}
+
 function buildErlcLogSetupPayload(guildId) {
   const ec = getErlcLogConfig(guildId);
   const embed = new EmbedBuilder().setTitle('📋 ERLC Log Setup').setColor(0x5865F2)
@@ -449,6 +586,34 @@ async function getRobloxDescription(userId) {
   if (!res.ok) throw new Error('Roblox API error');
   const data = await res.json();
   return data.description ?? '';
+}
+
+function getRolePermConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.rolePerms) gc.rolePerms = {}; // roleId → { addRoles: [], removeRoles: [] }
+  return gc.rolePerms;
+}
+
+function getCommandListConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.commandList) gc.commandList = { channel: null, messageId: null };
+  return gc.commandList;
+}
+
+function getExecRequestConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.execRequest) gc.execRequest = { channel: null, approvalRoles: [], requiredApprovals: 2 };
+  return gc.execRequest;
+}
+
+function getFounderRequestConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.founderRequest) gc.founderRequest = { channel: null, approvalRoles: [], requiredApprovals: 2 };
+  return gc.founderRequest;
 }
 
 const pendingVerifications = new Map(); // discordUserId → { code, robloxUsername, robloxId, expires }
@@ -936,13 +1101,18 @@ const commands = [
   { name: 'softban', description: '[SHR] Softban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'tempban', description: '[SHR] Temp ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'hours', type: 4, description: 'Hours', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'kick', description: '[SHR] Kick user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
-  { name: 'addrole', description: '[SHR] Add role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
-  { name: 'removerole', description: '[SHR] Remove role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
+  { name: 'addrole', description: 'Add a role to a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
+  { name: 'removerole', description: 'Remove a role from a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
+  { name: 'giveroles', description: 'Add multiple roles to a user', options: [
+    { name: 'user', type: 6, description: 'Who?', required: true },
+    { name: 'roles', type: 3, description: 'Role IDs or mentions separated by spaces', required: true },
+  ]},
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
   { name: 'promote', description: '[SHR] Promote a user to a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to promote to', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'demote', description: '[SHR] Demote a user from a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to demote from', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'unverify', description: '[SHR] Unverify a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'removeverifiedroles', description: '[SHR] Remove verified role from all members' },
+  { name: 'executiverequest', description: 'Submit an executive request (demotion/termination)' },
+  { name: 'foundationrequest', description: 'Submit a foundership team request' },
   { name: 'Roblox Profile', type: 2 },
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
@@ -981,6 +1151,10 @@ const commands = [
     { name: 'counters', type: 1, description: 'Member counter channels' },
     { name: 'training', type: 1, description: 'Training request system' },
     { name: 'erlclogs', type: 1, description: 'ERLC log channels' },
+    { name: 'execrequest', type: 1, description: 'Executive request system' },
+    { name: 'founderrequest', type: 1, description: 'Foundership request system' },
+    { name: 'roleperms', type: 1, description: 'Role permission system' },
+    { name: 'commandlist', type: 1, description: 'Auto-updating command list' },
   ]},
 ];
 
@@ -1481,8 +1655,48 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'softban')  { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); await interaction.guild.members.ban(user, { reason, deleteMessageSeconds: 604800 }); await interaction.guild.members.unban(user.id, 'Softban'); return interaction.reply(`🪃 **${user.tag}** softbanned.`); }
       if (cmd === 'tempban')  { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const hours = interaction.options.getInteger('hours'); await interaction.guild.members.ban(user, { reason }); setTimeout(async () => { await interaction.guild.members.unban(user.id, 'Tempban expired').catch(() => {}); }, hours * 3600000); return interaction.reply(`⏱️ **${user.tag}** banned for **${hours} hours**.`); }
       if (cmd === 'kick')     { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); await member.kick(reason); return interaction.reply(`👢 **${user.tag}** kicked.`); }
-      if (cmd === 'addrole')  { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.add(role); return interaction.reply(`✅ Added **${role.name}** to **${user.tag}**.`); }
-      if (cmd === 'removerole') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const role = interaction.options.getRole('role'); await member.roles.remove(role); return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`); }
+      if (cmd === 'addrole') {
+        const role = interaction.options.getRole('role');
+        const rp = getRolePermConfig(guildId);
+        const perms = rp[role.id];
+        const canAdd = perms?.addRoles?.length ? perms.addRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member) : hasSHR(interaction.member);
+        if (!canAdd) return interaction.reply({ content: `❌ You do not have permission to add **${role.name}**.`, ephemeral: true });
+        await member.roles.add(role);
+        await updateCommandListEmbed(interaction.guild);
+        return interaction.reply(`✅ Added **${role.name}** to **${user.tag}**.`);
+      }
+      if (cmd === 'removerole') {
+        const role = interaction.options.getRole('role');
+        const rp = getRolePermConfig(guildId);
+        const perms = rp[role.id];
+        const canRemove = perms?.removeRoles?.length ? perms.removeRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member) : hasSHR(interaction.member);
+        if (!canRemove) return interaction.reply({ content: `❌ You do not have permission to remove **${role.name}**.`, ephemeral: true });
+        await member.roles.remove(role);
+        await updateCommandListEmbed(interaction.guild);
+        return interaction.reply(`✅ Removed **${role.name}** from **${user.tag}**.`);
+      }
+      if (cmd === 'giveroles') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
+        const rolesInput = interaction.options.getString('roles');
+        const roleIds = rolesInput.match(/\d{17,20}/g) ?? [];
+        if (!roleIds.length) return interaction.reply({ content: '❌ No valid role IDs or mentions found.', ephemeral: true });
+        const rp = getRolePermConfig(guildId);
+        const added = [], denied = [], notFound = [];
+        for (const roleId of roleIds) {
+          const role = interaction.guild.roles.cache.get(roleId);
+          if (!role) { notFound.push(roleId); continue; }
+          const perms = rp[roleId];
+          const canAdd = perms?.addRoles?.length ? perms.addRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member) : hasSHR(interaction.member);
+          if (!canAdd) { denied.push(role.name); continue; }
+          await member.roles.add(role).catch(() => {});
+          added.push(role.name);
+        }
+        let msg = '';
+        if (added.length)    msg += `✅ Added: **${added.join(', ')}**\n`;
+        if (denied.length)   msg += `❌ No permission: **${denied.join(', ')}**\n`;
+        if (notFound.length) msg += `⚠️ Not found: **${notFound.join(', ')}**`;
+        return interaction.reply({ content: msg.trim(), ephemeral: false });
+      }
       if (cmd === 'nickname') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true }); const nick = interaction.options.getString('nickname') ?? null; await member.setNickname(nick); return interaction.reply(nick ? `✅ Nickname set to **${nick}**.` : `✅ Nickname reset.`); }
       if (cmd === 'promote') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', ephemeral: true });
@@ -1498,6 +1712,30 @@ client.on('interactionCreate', async interaction => {
         await member.roles.remove(role, reason);
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬇️ User Demoted').setColor(0xED4245).addFields({ name: '👤 User', value: user.tag, inline: true }, { name: '🎭 Role', value: role.name, inline: true }, { name: '📝 Reason', value: reason, inline: false }, { name: '👮 By', value: interaction.user.tag, inline: true }).setTimestamp()] });
       }
+      if (cmd === 'executiverequest') {
+        const ec = getExecRequestConfig(guildId);
+        if (!ec.channel) return interaction.reply({ content: '❌ Executive request channel not set up. Ask an admin to configure it.', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_execrequest').setTitle('Executive Request');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('exec_action').setLabel('Action (e.g. Demotion / Termination)').setStyle(TextInputStyle.Short).setPlaceholder('Demotion').setRequired(true).setMaxLength(100)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('exec_person').setLabel('Person concerned (name + rank)').setStyle(TextInputStyle.Short).setPlaceholder('John Doe — Senior Executive').setRequired(true).setMaxLength(200)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('exec_reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setPlaceholder('Explain why this action is needed...').setRequired(true).setMaxLength(1000)),
+        );
+        return interaction.showModal(modal);
+      }
+
+      if (cmd === 'foundationrequest') {
+        const fc = getFounderRequestConfig(guildId);
+        if (!fc.channel) return interaction.reply({ content: '❌ Foundership request channel not set up. Ask an admin to configure it.', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_founderrequest').setTitle('Foundership Request');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('founder_action').setLabel('Action (e.g. Demotion / Termination)').setStyle(TextInputStyle.Short).setPlaceholder('Demotion').setRequired(true).setMaxLength(100)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('founder_person').setLabel('Person concerned (name + rank)').setStyle(TextInputStyle.Short).setPlaceholder('John Doe — Co-Founder').setRequired(true).setMaxLength(200)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('founder_reason').setLabel('Reason').setStyle(TextInputStyle.Paragraph).setPlaceholder('Explain why this action is needed...').setRequired(true).setMaxLength(1000)),
+        );
+        return interaction.showModal(modal);
+      }
+
       if (cmd === 'removeverifiedroles') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
         const vc = getVerificationConfig(guildId);
@@ -1639,12 +1877,77 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'counters')      return interaction.reply(buildCounterSetupPayload(guildId));
         if (sub === 'training')      return interaction.reply(buildTrainingSetupPayload(guildId));
         if (sub === 'erlclogs')      return interaction.reply(buildErlcLogSetupPayload(guildId));
+        if (sub === 'execrequest')   return interaction.reply(buildRequestSetupPayload(guildId, 'exec'));
+        if (sub === 'founderrequest') return interaction.reply(buildRequestSetupPayload(guildId, 'founder'));
+        if (sub === 'roleperms')      return interaction.reply(buildRolePermsSetupPayload(guildId));
+        if (sub === 'commandlist')    return interaction.reply(buildCommandListSetupPayload(guildId));
       }
     }
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      // ════ EXECUTIVE / FOUNDERSHIP REQUEST APPROVE/DENY ════
+      if (id.startsWith('req__approve__') || id.startsWith('req__deny__')) {
+        const parts = id.split('__');
+        const action = parts[1]; // approve or deny
+        const prefix = parts[2]; // exec or founder
+        const cfg = prefix === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        const required = cfg.requiredApprovals ?? 2;
+
+        // Check of de gebruiker de juiste rol heeft
+        const canVote = cfg.approvalRoles?.length
+          ? cfg.approvalRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
+          : hasSetup(interaction.member);
+        if (!canVote) return interaction.reply({ content: '❌ You do not have permission to approve or deny this request.', ephemeral: true });
+
+        const embed = interaction.message.embeds[0];
+        if (!embed) return interaction.reply({ content: '❌ Could not find embed.', ephemeral: true });
+
+        // Check of al afgehandeld
+        const statusField = embed.fields.find(f => f.name === '📊 Status');
+        if (statusField?.value !== '⏳ Pending') return interaction.reply({ content: '❌ This request has already been decided.', ephemeral: true });
+
+        const approvalsField = embed.fields.find(f => f.name?.startsWith('✅ Approvals'));
+        const denialsField   = embed.fields.find(f => f.name?.startsWith('❌ Denials'));
+
+        const currentApprovals = approvalsField?.value === '*No approvals yet*' ? [] : approvalsField?.value.split('\n') ?? [];
+        const currentDenials   = denialsField?.value   === '*No denials yet*'   ? [] : denialsField?.value.split('\n')   ?? [];
+
+        // Check of al gestemd
+        const userTag = `${interaction.user.tag} (<@${interaction.user.id}>)`;
+        if ([...currentApprovals, ...currentDenials].some(v => v.includes(interaction.user.id))) {
+          return interaction.reply({ content: '❌ You have already voted on this request.', ephemeral: true });
+        }
+
+        let newApprovals = currentApprovals;
+        let newDenials   = currentDenials;
+        if (action === 'approve') newApprovals = [...currentApprovals, userTag];
+        if (action === 'deny')    newDenials   = [...currentDenials,   userTag];
+
+        const approved = newApprovals.length >= required;
+        const denied   = newDenials.length   >= required;
+        const newStatus = approved ? '✅ Approved' : denied ? '❌ Denied' : '⏳ Pending';
+        const newColor  = approved ? 0x57F287 : denied ? 0xED4245 : (prefix === 'exec' ? 0x5865F2 : 0xFEE75C);
+
+        const updatedEmbed = EmbedBuilder.from(embed)
+          .setColor(newColor)
+          .spliceFields(embed.fields.findIndex(f => f.name?.startsWith('✅ Approvals')), 1, { name: `✅ Approvals (${newApprovals.length}/${required})`, value: newApprovals.join('\n') || '*No approvals yet*', inline: false })
+          .spliceFields(embed.fields.findIndex(f => f.name?.startsWith('❌ Denials')),   1, { name: `❌ Denials (${newDenials.length})`,                  value: newDenials.join('\n')   || '*No denials yet*',   inline: false })
+          .spliceFields(embed.fields.findIndex(f => f.name === '📊 Status'),             1, { name: '📊 Status', value: newStatus, inline: false });
+
+        const disabledRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`req__approve__${prefix}__done`).setLabel('✅ Approve').setStyle(ButtonStyle.Success).setDisabled(approved || denied),
+          new ButtonBuilder().setCustomId(`req__deny__${prefix}__done`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger).setDisabled(approved || denied),
+        );
+
+        await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
+
+        if (approved) await interaction.followUp({ content: `✅ **Request approved!** Required ${required} approvals reached.`, ephemeral: false }).catch(() => {});
+        if (denied)   await interaction.followUp({ content: `❌ **Request denied!** Required ${required} denials reached.`,   ephemeral: false }).catch(() => {});
+        return;
+      }
 
       // ════ TRAINING CLAIM BUTTONS ════
       if (id.startsWith('tr__claim__') || id.startsWith('tr__unclaim__')) {
@@ -1722,6 +2025,52 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
+      }
+
+      // ════ ROLE PERMS SETUP BUTTONS ════
+      if (id.startsWith('rperms__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
+        const action = id.replace('rperms__', '');
+        if (action === 'clear') {
+          config[guildId].rolePerms = {};
+          await saveConfig(config);
+          return interaction.update(buildRolePermsSetupPayload(guildId));
+        }
+        if (action === 'add') {
+          return interaction.reply({
+            content: '### 🔐 Select the role you want to configure permissions for',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('rperms_select_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],
+            ephemeral: true,
+          });
+        }
+      }
+
+      // ════ COMMANDLIST SETUP BUTTONS ════
+      if (id.startsWith('cmdlist__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
+        const action = id.replace('cmdlist__', '');
+        if (action === 'channel') return interaction.reply({ content: '### 📢 Select the channel for the command list', components: [channelDropdown('cmdlist_channel', 'Select channel...')], ephemeral: true });
+        if (action === 'deploy') {
+          await updateCommandListEmbed(interaction.guild);
+          return interaction.reply({ content: '✅ Command list deployed/updated!', ephemeral: true });
+        }
+      }
+
+      // ════ REQUEST SETUP BUTTONS ════
+      if (id.startsWith('reqsetup__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
+        const parts = id.split('__');
+        const action = parts[1];
+        const type   = parts[2];
+        const cfg = type === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        const label = type === 'exec' ? 'Executive' : 'Foundership';
+        if (action === 'channel') return interaction.reply({ content: `### 📢 Select channel for **${label}** requests`, components: [channelDropdown(`reqsetup_channel__${type}`, 'Select channel...')], ephemeral: true });
+        if (action === 'roles')   return interaction.reply({ content: `### 🔑 Select roles that can approve **${label}** requests`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`reqsetup_roles__${type}`).setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))], ephemeral: true });
+        if (action === 'approvals') {
+          const modal = new ModalBuilder().setCustomId(`modal_reqapprovals__${type}`).setTitle(`Required Approvals — ${label}`);
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('approvals_count').setLabel('How many approvals are required?').setStyle(TextInputStyle.Short).setValue(`${cfg.requiredApprovals ?? 2}`).setRequired(true).setMinLength(1).setMaxLength(2)));
+          return interaction.showModal(modal);
+        }
       }
 
       // ════ ERLC LOG SETUP BUTTONS ════
@@ -2583,6 +2932,49 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Accept roles for **${appType.label}** set to: ${roleNames}`, ephemeral: true });
       }
 
+      // ════ ROLE PERMS ROLE SELECTS ════
+      if (interaction.customId === 'rperms_select_role') {
+        const roleId = ids[0];
+        const role = interaction.guild.roles.cache.get(roleId);
+        return interaction.reply({
+          content: `### 🔐 Configure permissions for **${role?.name ?? roleId}**\nSelect which roles can **add** this role:`,
+          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`rperms_add_roles__${roleId}`).setPlaceholder('Select roles that can ADD this role (0 = everyone)...').setMinValues(0).setMaxValues(10))],
+          ephemeral: true,
+        });
+      }
+      if (interaction.customId.startsWith('rperms_add_roles__')) {
+        const roleId = interaction.customId.replace('rperms_add_roles__', '');
+        const rp = getRolePermConfig(guildId);
+        if (!rp[roleId]) rp[roleId] = { addRoles: [], removeRoles: [] };
+        rp[roleId].addRoles = ids;
+        await saveConfig(config);
+        await updateCommandListEmbed(interaction.guild);
+        const role = interaction.guild.roles.cache.get(roleId);
+        return interaction.reply({
+          content: `✅ Saved! Now select which roles can **remove** <@&${roleId}>:`,
+          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`rperms_remove_roles__${roleId}`).setPlaceholder('Select roles that can REMOVE this role (0 = everyone)...').setMinValues(0).setMaxValues(10))],
+          ephemeral: true,
+        });
+      }
+      if (interaction.customId.startsWith('rperms_remove_roles__')) {
+        const roleId = interaction.customId.replace('rperms_remove_roles__', '');
+        const rp = getRolePermConfig(guildId);
+        if (!rp[roleId]) rp[roleId] = { addRoles: [], removeRoles: [] };
+        rp[roleId].removeRoles = ids;
+        await saveConfig(config);
+        await updateCommandListEmbed(interaction.guild);
+        return interaction.reply({ content: `✅ Role permissions saved for <@&${roleId}>!`, ephemeral: true });
+      }
+
+      // ════ REQUEST SETUP ROLE SELECTS ════
+      if (interaction.customId.startsWith('reqsetup_roles__')) {
+        const type = interaction.customId.replace('reqsetup_roles__', '');
+        const cfg = type === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        cfg.approvalRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Approval roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+
       // ════ TRAINING ROLE SELECTS ════
       if (interaction.customId === 'tr_setup_trainer_roles') {
         const tc = getTrainingConfig(guildId);
@@ -2648,12 +3040,28 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({ content: `✅ Review channel for **${appType.label}** set to <#${chId}>!`, ephemeral: true });
       }
+      // ════ REQUEST SETUP CHANNEL SELECTS ════
+      if (interaction.customId.startsWith('reqsetup_channel__')) {
+        const type = interaction.customId.replace('reqsetup_channel__', '');
+        const cfg = type === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        cfg.channel = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true });
+      }
+
       // ════ ERLC CHANNEL SELECTS ════
       if (interaction.customId.startsWith('erlcd_')) {
         const ec = getErlcLogConfig(guildId);
         const map = { erlcd_kickbans: 'kickBans', erlcd_joinleave: 'joinLeave', erlcd_cmds: 'cmds', erlcd_modcall: 'modCall', erlcd_kills: 'kills' };
         const key = map[interaction.customId];
         if (key) { ec[key] = chId; await saveConfig(config); return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true }); }
+      }
+
+      if (interaction.customId === 'cmdlist_channel') {
+        const cl = getCommandListConfig(guildId);
+        cl.channel = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Command list channel set to <#${chId}>! Use the **Deploy** button to post it.`, ephemeral: true });
       }
 
       // ════ TRAINING CHANNEL SELECT ════
@@ -3139,6 +3547,56 @@ client.on('interactionCreate', async interaction => {
             components: [confirmRow],
           });
         } catch (e) { return interaction.editReply({ content: `❌ Could not reach Roblox. Try again later.` }); }
+      }
+
+      if (mid.startsWith('modal_reqapprovals__')) {
+        const type = mid.replace('modal_reqapprovals__', '');
+        const cfg = type === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        const count = parseInt(interaction.fields.getTextInputValue('approvals_count'));
+        if (isNaN(count) || count < 1 || count > 10) return interaction.reply({ content: '❌ Please enter a number between 1 and 10.', ephemeral: true });
+        cfg.requiredApprovals = count;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Required approvals set to **${count}**.`, ephemeral: true });
+      }
+
+      if (mid === 'modal_execrequest' || mid === 'modal_founderrequest') {
+        const isExec = mid === 'modal_execrequest';
+        const cfg = isExec ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
+        const ch = interaction.guild.channels.cache.get(cfg.channel);
+        if (!ch) return interaction.reply({ content: '❌ Request channel not found. Contact an admin.', ephemeral: true });
+
+        const prefix = isExec ? 'exec' : 'founder';
+        const action = interaction.fields.getTextInputValue(`${prefix}_action`).trim();
+        const person = interaction.fields.getTextInputValue(`${prefix}_person`).trim();
+        const reason = interaction.fields.getTextInputValue(`${prefix}_reason`).trim();
+        const reqId = genId();
+        const type = isExec ? 'Executive' : 'Foundership';
+        const required = cfg.requiredApprovals ?? 2;
+
+        const embed = new EmbedBuilder()
+          .setTitle(`📋 ${type} Request`)
+          .setColor(isExec ? 0x5865F2 : 0xFEE75C)
+          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+          .addFields(
+            { name: '👤 Submitted By', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true },
+            { name: '⚡ Action', value: action, inline: true },
+            { name: '🎯 Person Concerned', value: person, inline: false },
+            { name: '📝 Reason', value: reason, inline: false },
+            { name: `✅ Approvals (0/${required})`, value: '*No approvals yet*', inline: false },
+            { name: '❌ Denials (0)', value: '*No denials yet*', inline: false },
+            { name: '📊 Status', value: '⏳ Pending', inline: false },
+          )
+          .setFooter({ text: `Request ID: ${reqId} • Requires ${required} approvals` })
+          .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`req__approve__${prefix}__${reqId}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`req__deny__${prefix}__${reqId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
+        );
+
+        const ping = cfg.approvalRoles?.length ? cfg.approvalRoles.map(r => `<@&${r}>`).join(' ') : null;
+        await ch.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
+        return interaction.reply({ content: `✅ Your **${type} Request** has been submitted!`, ephemeral: true });
       }
 
       // ── Ticket ──
