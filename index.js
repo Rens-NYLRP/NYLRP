@@ -2322,6 +2322,26 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Accept roles for **${appType.label}** set to: ${roleNames}`, ephemeral: true });
       }
 
+      // ════ TRAINING ROLE SELECTS ════
+      if (interaction.customId === 'tr_setup_trainer_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.trainerRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Trainer roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+      if (interaction.customId === 'tr_setup_request_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.requestRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Request roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
+      }
+      if (interaction.customId === 'tr_setup_ping_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.pingRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Ping roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+
       if (interaction.customId.startsWith('srr__add__')) {
         const panelId = interaction.customId.replace('srr__add__', '');
         const src = getSelfRoleConfig(guildId); const panel = src.panels[panelId];
@@ -2367,30 +2387,12 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({ content: `✅ Review channel for **${appType.label}** set to <#${chId}>!`, ephemeral: true });
       }
-      // ════ TRAINING SETUP SELECTS ════
+      // ════ TRAINING CHANNEL SELECT ════
       if (interaction.customId === 'tr_setup_channel') {
         const tc = getTrainingConfig(guildId);
         tc.channel = chId;
         await saveConfig(config);
         return interaction.reply({ content: `✅ Training request channel set to <#${chId}>!`, ephemeral: true });
-      }
-      if (interaction.customId === 'tr_setup_trainer_roles') {
-        const tc = getTrainingConfig(guildId);
-        tc.trainerRoles = ids;
-        await saveConfig(config);
-        return interaction.reply({ content: `✅ Trainer roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
-      }
-      if (interaction.customId === 'tr_setup_request_roles') {
-        const tc = getTrainingConfig(guildId);
-        tc.requestRoles = ids;
-        await saveConfig(config);
-        return interaction.reply({ content: `✅ Request roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
-      }
-      if (interaction.customId === 'tr_setup_ping_roles') {
-        const tc = getTrainingConfig(guildId);
-        tc.pingRoles = ids;
-        await saveConfig(config);
-        return interaction.reply({ content: `✅ Ping roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
       }
 
       // Application panel channel
