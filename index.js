@@ -453,13 +453,6 @@ async function getRobloxDescription(userId) {
 
 const pendingVerifications = new Map(); // discordUserId → { code, robloxUsername, robloxId, expires }
 
-function getBloxlinkConfig(guildId) {
-  if (!config[guildId]) config[guildId] = {};
-  const gc = config[guildId];
-  if (!gc.bloxlink) gc.bloxlink = { apiKey: null };
-  return gc.bloxlink;
-}
-
 const ERLC_BASE = 'https://api.policeroleplay.community/v1';
 async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
   const key = guildId ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY) : process.env.ERLC_API_KEY;
@@ -949,8 +942,7 @@ const commands = [
   { name: 'promote', description: '[SHR] Promote a user to a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to promote to', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'demote', description: '[SHR] Demote a user from a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to demote from', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'unverify', description: '[SHR] Unverify a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'bloxlinkconfig', description: '[SHR] Set Bloxlink API key' },
-  { name: 'bloxlinkimport', description: '[SHR] Import verified users from Bloxlink' },
+  { name: 'removeverifiedroles', description: '[SHR] Remove verified role from all members' },
   { name: 'Roblox Profile', type: 2 },
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
@@ -1506,49 +1498,24 @@ client.on('interactionCreate', async interaction => {
         await member.roles.remove(role, reason);
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬇️ User Demoted').setColor(0xED4245).addFields({ name: '👤 User', value: user.tag, inline: true }, { name: '🎭 Role', value: role.name, inline: true }, { name: '📝 Reason', value: reason, inline: false }, { name: '👮 By', value: interaction.user.tag, inline: true }).setTimestamp()] });
       }
-      if (cmd === 'bloxlinkconfig') {
+      if (cmd === 'removeverifiedroles') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
-        const modal = new ModalBuilder().setCustomId('modal_bloxlinkconfig').setTitle('Bloxlink API Key');
-        modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('bloxlink_key').setLabel('Bloxlink API Key').setStyle(TextInputStyle.Short).setPlaceholder('Paste your Bloxlink API key...').setRequired(true)));
-        return interaction.showModal(modal);
-      }
-
-      if (cmd === 'bloxlinkimport') {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
-        const bc = getBloxlinkConfig(guildId);
-        if (!bc.apiKey) return interaction.reply({ content: '❌ No Bloxlink API key set. Use `/bloxlinkconfig` first.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
         const vc = getVerificationConfig(guildId);
-        if (!vc.verifiedUsers) vc.verifiedUsers = {};
+        if (!vc.verifiedRole) return interaction.reply({ content: '❌ No verified role set up.', ephemeral: true });
+        await interaction.deferReply({ ephemeral: true });
+        const role = interaction.guild.roles.cache.get(vc.verifiedRole);
+        if (!role) return interaction.editReply('❌ Verified role not found.');
         const members = await interaction.guild.members.fetch().catch(() => null);
         if (!members) return interaction.editReply('❌ Could not fetch members.');
-        let imported = 0, failed = 0;
-        for (const [memberId, member] of members) {
+        let removed = 0, failed = 0;
+        for (const [, member] of members) {
           if (member.user.bot) continue;
-          if (vc.verifiedUsers[memberId]) continue; // al geimporteerd
-          try {
-            const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/discord-to-roblox/${memberId}`, {
-              headers: { 'Authorization': bc.apiKey }
-            });
-            if (!res.ok) { failed++; continue; }
-            const data = await res.json();
-            if (!data.robloxID) { failed++; continue; }
-            // Haal Roblox username op
-            const robloxRes = await fetch(`https://users.roblox.com/v1/users/${data.robloxID}`);
-            const robloxData = await robloxRes.json();
-            vc.verifiedUsers[memberId] = {
-              robloxUsername: robloxData.name ?? 'Unknown',
-              robloxId: data.robloxID,
-              verifiedAt: Date.now(),
-              importedFrom: 'bloxlink',
-            };
-            imported++;
-          } catch { failed++; }
-          // Kleine delay om rate limits te vermijden
+          if (!member.roles.cache.has(vc.verifiedRole)) continue;
+          try { await member.roles.remove(vc.verifiedRole, 'Mass unverify by staff'); removed++; }
+          catch { failed++; }
           await new Promise(r => setTimeout(r, 300));
         }
-        await saveConfig(config);
-        return interaction.editReply({ content: `✅ Import done!\n**Imported:** ${imported}\n**Failed/Not found:** ${failed}` });
+        return interaction.editReply({ content: `✅ Done!\n**Removed:** ${removed}\n**Failed:** ${failed}` });
       }
 
       if (cmd === 'erlcconfig') {
