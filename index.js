@@ -279,6 +279,24 @@ async function deleteCounterChannel(guild, type, cc) {
 }
 setInterval(async () => { for (const guild of client.guilds.cache.values()) { await updateCounters(guild).catch(console.error); } }, 5 * 60 * 1000);
 
+function buildTrainingSetupPayload(guildId) {
+  const tc = getTrainingConfig(guildId);
+  const embed = new EmbedBuilder().setTitle('🎓 Training Request Setup').setColor(0x5865F2)
+    .addFields(
+      { name: '📢 Request Channel', value: tc.channel ? `<#${tc.channel}>` : '*Not set*', inline: true },
+      { name: '🔑 Trainer Roles', value: tc.trainerRoles.length ? tc.trainerRoles.map(r => `<@&${r}>`).join(', ') : '*Not set (setup only)*', inline: true },
+      { name: '📋 Request Roles', value: tc.requestRoles.length ? tc.requestRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*', inline: true },
+      { name: '🔔 Ping Roles', value: tc.pingRoles.length ? tc.pingRoles.map(r => `<@&${r}>`).join(', ') : '*None*', inline: true },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tr_setup__channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('tr_setup__trainer_roles').setLabel('Trainer Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
+    new ButtonBuilder().setCustomId('tr_setup__request_roles').setLabel('Request Roles').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+    new ButtonBuilder().setCustomId('tr_setup__ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
+  );
+  return { embeds: [embed], components: [r1], ephemeral: true };
+}
+
 function buildCounterSetupPayload(guildId) {
   const cc = getCounterConfig(guildId);
   const typeLabels = { members: '👥 Members', bots: '🤖 Bots', online: '🟢 Online', channels: '💬 Channels', roles: '🎭 Roles' };
@@ -325,7 +343,19 @@ const hasSHR      = m => m.roles.cache.some(r => r.name === SHR_ROLE);
 const hasSetup    = m => m.roles.cache.has(SETUP_ROLE_ID) || m.permissions.has('Administrator');
 const hasAnyStaff = m => hasStaff(m) || hasSHR(m);
 
-function canRunSession(member, guildId) {
+const trainRequestCooldowns = new Map(); // userId → timestamp
+
+function getTrainingConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.training) gc.training = { channel: null, trainerRoles: [], requestRoles: [], pingRoles: [] };
+  if (!gc.training.trainerRoles) gc.training.trainerRoles = [];
+  if (!gc.training.requestRoles) gc.training.requestRoles = [];
+  if (!gc.training.pingRoles)    gc.training.pingRoles    = [];
+  return gc.training;
+}
+
+
   if (hasSHR(member)) return true;
   const sc = getSessionConfig(guildId);
   if (!sc.allowedRoles?.length) return hasAnyStaff(member);
@@ -850,10 +880,7 @@ const commands = [
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
-  { name: 'send', description: 'Send a custom message to a channel', options: [
-    { name: 'channel', type: 7, description: 'Channel to send to', required: true },
-    { name: 'message', type: 3, description: 'Message content', required: true },
-  ]},
+  { name: 'send', description: 'Send a custom message to this channel' },
   { name: 'session', description: 'Session commands', options: [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
@@ -892,6 +919,7 @@ const commands = [
   { name: 'serverstatus', description: '[SHR] ERLC server status' },
   { name: 'erlckick', description: '[SHR] Kick ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'erlcban', description: '[SHR] Ban ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'trainrequest', description: 'Request a trainer (Trial Staff only)' },
   { name: 'setup', description: '[SHR] Setup bot features', options: [
     { name: 'tickets', type: 1, description: 'Ticket system' },
     { name: 'sessions', type: 1, description: 'Session system' },
@@ -904,6 +932,7 @@ const commands = [
     { name: 'savedmessages', type: 1, description: 'Saved messages system' },
     { name: 'automod', type: 1, description: 'Automod keyword filter' },
     { name: 'counters', type: 1, description: 'Member counter channels' },
+    { name: 'training', type: 1, description: 'Training request system' },
   ]},
 ];
 
@@ -1205,13 +1234,40 @@ client.on('interactionCreate', async interaction => {
         pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, messageId: msg.id });
       }
 
+      if (cmd === 'trainrequest') {
+        const tc = getTrainingConfig(guildId);
+        // Check of gebruiker de juiste rol heeft
+        if (tc.requestRoles.length && !tc.requestRoles.some(r => interaction.member.roles.cache.has(r)) && !hasSetup(interaction.member)) {
+          return interaction.reply({ content: '❌ You do not have permission to request a trainer.', ephemeral: true });
+        }
+        // Cooldown check (1 uur)
+        const cdKey = `${guildId}:${interaction.user.id}`;
+        const lastUsed = trainRequestCooldowns.get(cdKey);
+        if (lastUsed) {
+          const remaining = 60 * 60 * 1000 - (Date.now() - lastUsed);
+          if (remaining > 0) {
+            const mins = Math.ceil(remaining / 60000);
+            return interaction.reply({ content: `⏳ You can request a trainer again in **${mins} minute${mins !== 1 ? 's' : ''}**.`, ephemeral: true });
+          }
+        }
+        if (!tc.channel) return interaction.reply({ content: '❌ Training request channel not set up. Ask an admin to run `/setup training`.', ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_trainrequest').setTitle('Training Request');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_times').setLabel('When are you available? (times/timezone)').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. Monday 5-8PM EST, Wednesday 6-9PM EST').setRequired(true).setMaxLength(500)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_notes').setLabel('Anything else the trainer should know?').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. I have done 2 ride-alongs already').setRequired(false).setMaxLength(500)),
+        );
+        return interaction.showModal(modal);
+      }
+
       if (cmd === 'send') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
-        const channel = interaction.options.getChannel('channel');
-        const message = interaction.options.getString('message');
-        if (!channel.isTextBased()) return interaction.reply({ content: '❌ That is not a text channel.', ephemeral: true });
-        await channel.send({ content: message });
-        return interaction.reply({ content: `✅ Message sent to <#${channel.id}>!`, ephemeral: true });
+        const modal = new ModalBuilder().setCustomId('modal_send').setTitle('Send Message');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('send_content').setLabel('Message').setStyle(TextInputStyle.Paragraph).setPlaceholder('Paste your ad here...').setRequired(true).setMaxLength(4000)
+          )
+        );
+        return interaction.showModal(modal);
       }
 
       if (cmd === 'sendmessage') {
@@ -1336,7 +1392,14 @@ client.on('interactionCreate', async interaction => {
           );
           const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [voteRow] });
           activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null, voters: [] });
-          return interaction.editReply({ content: `✅ Vote posted! Auto-starts at **${threshold}** votes.` });
+          // Auto-delete vote bericht na 30 minuten als het niet geslaagd is
+          setTimeout(async () => {
+            if (activeVotes.get(guildId)?.messageId === msg.id) {
+              activeVotes.delete(guildId);
+              await msg.delete().catch(() => {});
+            }
+          }, 30 * 60 * 1000);
+          return interaction.editReply({ content: `✅ Vote posted! Auto-starts at **${threshold}** votes. Deletes in 30 minutes if not reached.` });
         }
         if (sub === 'shutdown') {
           activeVotes.delete(guildId);
@@ -1361,12 +1424,54 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'savedmessages') return interaction.reply(buildSavedMessagesPayload(guildId));
         if (sub === 'automod')       return interaction.reply(buildAutomodSetupPayload(guildId));
         if (sub === 'counters')      return interaction.reply(buildCounterSetupPayload(guildId));
+        if (sub === 'training')      return interaction.reply(buildTrainingSetupPayload(guildId));
       }
     }
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      // ════ TRAINING CLAIM BUTTONS ════
+      if (id.startsWith('tr__claim__') || id.startsWith('tr__unclaim__')) {
+        const parts = id.split('__');
+        const action = parts[1];
+        const tc = getTrainingConfig(guildId);
+        // Check trainer rol
+        const isTrainer = tc.trainerRoles.length
+          ? tc.trainerRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
+          : hasSetup(interaction.member);
+        if (!isTrainer) return interaction.reply({ content: '❌ Only trainers can claim training requests.', ephemeral: true });
+
+        const embed = interaction.message.embeds[0];
+        if (!embed) return interaction.reply({ content: '❌ Could not find embed.', ephemeral: true });
+        const claimedField = embed.fields.find(f => f.name === '✅ Claimed By');
+        const currentClaims = claimedField?.value === '*No one yet*' ? [] : claimedField?.value.split('\n') ?? [];
+
+        if (action === 'claim') {
+          if (currentClaims.some(c => c.includes(interaction.user.id))) {
+            return interaction.reply({ content: '❌ You have already claimed this request.', ephemeral: true });
+          }
+          currentClaims.push(`<@${interaction.user.id}> (${interaction.user.tag})`);
+          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(
+            embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1,
+            { name: '✅ Claimed By', value: currentClaims.join('\n'), inline: false }
+          );
+          await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
+          return;
+        }
+
+        if (action === 'unclaim') {
+          const newClaims = currentClaims.filter(c => !c.includes(interaction.user.id));
+          if (newClaims.length === currentClaims.length) return interaction.reply({ content: '❌ You have not claimed this request.', ephemeral: true });
+          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(
+            embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1,
+            { name: '✅ Claimed By', value: newClaims.length ? newClaims.join('\n') : '*No one yet*', inline: false }
+          );
+          await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
+          return;
+        }
+      }
 
       // ════ SESSION VOTE BUTTON ════
       if (id === 'session__vote') {
@@ -1403,6 +1508,41 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
+      }
+
+      // ════ TRAINING SETUP BUTTONS ════
+      if (id.startsWith('tr_setup__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', ephemeral: true });
+        const action = id.replace('tr_setup__', '');
+        const tc = getTrainingConfig(guildId);
+        if (action === 'channel') {
+          return interaction.reply({
+            content: '### 📢 Select the channel where training requests will be posted.',
+            components: [channelDropdown('tr_setup_channel', 'Select channel...')],
+            ephemeral: true,
+          });
+        }
+        if (action === 'trainer_roles') {
+          return interaction.reply({
+            content: '### 🔑 Select roles that can **claim** training requests.',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('tr_setup_trainer_roles').setPlaceholder('Select trainer roles...').setMinValues(0).setMaxValues(10))],
+            ephemeral: true,
+          });
+        }
+        if (action === 'request_roles') {
+          return interaction.reply({
+            content: '### 📋 Select roles that can **request** a trainer. Leave empty for everyone.',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('tr_setup_request_roles').setPlaceholder('Select request roles...').setMinValues(0).setMaxValues(10))],
+            ephemeral: true,
+          });
+        }
+        if (action === 'ping_roles') {
+          return interaction.reply({
+            content: '### 🔔 Select roles to ping when a training request is posted.',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('tr_setup_ping_roles').setPlaceholder('Select ping roles...').setMinValues(0).setMaxValues(10))],
+            ephemeral: true,
+          });
+        }
       }
 
       // ════ COUNTER BUTTONS ════
@@ -2227,6 +2367,32 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({ content: `✅ Review channel for **${appType.label}** set to <#${chId}>!`, ephemeral: true });
       }
+      // ════ TRAINING SETUP SELECTS ════
+      if (interaction.customId === 'tr_setup_channel') {
+        const tc = getTrainingConfig(guildId);
+        tc.channel = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Training request channel set to <#${chId}>!`, ephemeral: true });
+      }
+      if (interaction.customId === 'tr_setup_trainer_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.trainerRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Trainer roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+      if (interaction.customId === 'tr_setup_request_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.requestRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Request roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
+      }
+      if (interaction.customId === 'tr_setup_ping_roles') {
+        const tc = getTrainingConfig(guildId);
+        tc.pingRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Ping roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+
       // Application panel channel
       if (interaction.customId.startsWith('appe_channel__')) {
         const panelId = interaction.customId.replace('appe_channel__', '');
@@ -2670,6 +2836,44 @@ client.on('interactionCreate', async interaction => {
 
       // ── Session ──
       if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', ephemeral: true }); getSessionConfig(guildId).joinLink = rawLink; await saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, ephemeral: true }); }
+      if (mid === 'modal_trainrequest') {
+        const tc = getTrainingConfig(guildId);
+        const ch = interaction.guild.channels.cache.get(tc.channel);
+        if (!ch) return interaction.reply({ content: '❌ Training channel not found. Contact an admin.', ephemeral: true });
+        const times = interaction.fields.getTextInputValue('tr_times');
+        const notes = interaction.fields.getTextInputValue('tr_notes').trim();
+        const reqId = genId();
+        const embed = new EmbedBuilder()
+          .setTitle('📋 Training Request')
+          .setColor(0x5865F2)
+          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+          .addFields(
+            { name: '👤 Requester', value: `${interaction.user.tag} (<@${interaction.user.id}>)`, inline: true },
+            { name: '🆔 User ID', value: interaction.user.id, inline: true },
+            { name: '🕐 Available Times', value: times, inline: false },
+            { name: '📝 Notes', value: notes || '*None*', inline: false },
+            { name: '✅ Claimed By', value: '*No one yet*', inline: false },
+          )
+          .setFooter({ text: `Request ID: ${reqId}` })
+          .setTimestamp();
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`tr__claim__${interaction.user.id}__${reqId}`).setLabel('🙋 Claim Training').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`tr__unclaim__${interaction.user.id}__${reqId}`).setLabel('❌ Unclaim').setStyle(ButtonStyle.Secondary),
+        );
+        const ping = tc.pingRoles.length ? tc.pingRoles.map(r => `<@&${r}>`).join(' ') : null;
+        await ch.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
+        // Sla cooldown op
+        const cdKey = `${guildId}:${interaction.user.id}`;
+        trainRequestCooldowns.set(cdKey, Date.now());
+        return interaction.reply({ content: `✅ Your training request has been posted! A trainer will claim it soon.`, ephemeral: true });
+      }
+
+      if (mid === 'modal_send') {
+        const content = interaction.fields.getTextInputValue('send_content');
+        await interaction.channel.send({ content });
+        return interaction.reply({ content: '✅ Message sent!', ephemeral: true });
+      }
+
       if (mid === 'modal_s_desc')      { const sc = getSessionConfig(guildId); const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim(); if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh; await saveConfig(config); return interaction.reply({ content: '✅ Descriptions saved!', ephemeral: true }); }
       if (mid === 'modal_s_images')    { const sc = getSessionConfig(guildId); const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim(); if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi; await saveConfig(config); return interaction.reply({ content: '✅ Images saved!', ephemeral: true }); }
       if (mid === 'modal_s_threshold') { const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10); if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number 1-999.', ephemeral: true }); getSessionConfig(guildId).voteThreshold = num; await saveConfig(config); return interaction.reply({ content: `✅ Vote threshold: **${num}**.`, ephemeral: true }); }
