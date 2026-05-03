@@ -941,7 +941,8 @@ const commands = [
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
   { name: 'promote', description: '[SHR] Promote a user to a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to promote to', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'demote', description: '[SHR] Demote a user from a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to demote from', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
-  { name: 'erlcconfig', description: '[SHR] Set ERLC server key for this server' },
+  { name: 'unverify', description: '[SHR] Unverify a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
+  { name: 'Roblox Profile', type: 2 }, // User context menu (type 2 = USER)
   { name: 'clearwarnings', description: '[SHR] Clear warnings', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
   { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
@@ -1324,6 +1325,25 @@ client.on('interactionCreate', async interaction => {
   try {
 
     // ══ SLASH COMMANDS ══
+    if (interaction.isUserContextMenuCommand() && interaction.commandName === 'Roblox Profile') {
+      const targetUser = interaction.targetUser;
+      const vc = getVerificationConfig(guildId);
+      const data = vc.verifiedUsers?.[targetUser.id];
+      if (!data) return interaction.reply({ content: `❌ **${targetUser.username}** has not verified their Roblox account.`, ephemeral: true });
+      return interaction.reply({ embeds: [new EmbedBuilder()
+        .setTitle('🎮 Roblox Profile')
+        .setColor(0x5865F2)
+        .setThumbnail(`https://www.roblox.com/headshot-thumbnail/image?userId=${data.robloxId}&width=420&height=420&format=png`)
+        .addFields(
+          { name: '👤 Discord', value: `<@${targetUser.id}>`, inline: true },
+          { name: '🎮 Roblox', value: data.robloxUsername, inline: true },
+          { name: '🆔 Roblox ID', value: `${data.robloxId}`, inline: true },
+          { name: '📅 Verified', value: new Date(data.verifiedAt).toUTCString(), inline: false },
+          { name: '🔗 Profile', value: `[Click here](https://www.roblox.com/users/${data.robloxId}/profile)`, inline: true },
+        ).setTimestamp()
+      ], ephemeral: true });
+    }
+
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
       const user = interaction.options.getUser('user') ?? null;
@@ -2268,6 +2288,10 @@ client.on('interactionCreate', async interaction => {
           const nickname = `(${interaction.user.username}) | ${pending.robloxUsername}`.slice(0, 32);
           try { await interaction.member.setNickname(nickname, 'Roblox verification'); } catch {}
           if (vc.verifiedRole) { const role = interaction.guild.roles.cache.get(vc.verifiedRole); if (role) await interaction.member.roles.add(role); }
+          // Sla verificatie op in config
+          if (!vc.verifiedUsers) vc.verifiedUsers = {};
+          vc.verifiedUsers[interaction.user.id] = { robloxUsername: pending.robloxUsername, robloxId: pending.robloxId, verifiedAt: Date.now() };
+          await saveConfig(config);
           pendingVerifications.delete(interaction.user.id);
           return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields(
             { name: '🎮 Roblox Username', value: pending.robloxUsername, inline: true },
