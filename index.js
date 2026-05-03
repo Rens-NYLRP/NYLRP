@@ -355,7 +355,7 @@ function getTrainingConfig(guildId) {
   return gc.training;
 }
 
-
+function canRunSession(member, guildId) {
   if (hasSHR(member)) return true;
   const sc = getSessionConfig(guildId);
   if (!sc.allowedRoles?.length) return hasAnyStaff(member);
