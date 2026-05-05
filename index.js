@@ -117,11 +117,21 @@ async function gracefulShutdown(signal) {
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', async (err) => {
+  // Negeer bekende Discord API errors die geen crash rechtvaardigen
+  if (err?.code === 10062 || err?.code === 40060 || err?.code === 10008 || err?.code === 50013) {
+    console.warn('⚠️ Discord API warning (ignored):', err.message);
+    return;
+  }
   console.error('❌ Uncaught Exception:', err);
   await saveAllConfigs().catch(() => {});
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
+  // Negeer bekende Discord API errors
+  if (reason?.code === 10062 || reason?.code === 40060 || reason?.code === 10008 || reason?.code === 50013) {
+    console.warn('⚠️ Discord API warning (ignored):', reason.message);
+    return;
+  }
   console.error('❌ Unhandled Rejection:', reason);
   saveAllConfigs().catch(() => {});
 });
@@ -504,14 +514,21 @@ function buildTrainingSetupPayload(guildId) {
       { name: '🔑 Trainer Roles', value: tc.trainerRoles.length ? tc.trainerRoles.map(r => `<@&${r}>`).join(', ') : '*Not set (setup only)*', inline: true },
       { name: '📋 Request Roles', value: tc.requestRoles.length ? tc.requestRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*', inline: true },
       { name: '🔔 Ping Roles', value: tc.pingRoles.length ? tc.pingRoles.map(r => `<@&${r}>`).join(', ') : '*None*', inline: true },
-    );
+      { name: '📣 Announce Channel', value: tc.announceChannel ? `<#${tc.announceChannel}>` : '*Not set*', inline: true },
+      { name: '💬 Announce Message', value: tc.announceMessage ? `\`${tc.announceMessage.slice(0, 80)}...\`` : '*Default*', inline: false },
+    )
+    .setDescription('Variables: `{user}` `{role}` `{promotedBy}` `{server}`');
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('tr_setup__channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId('tr_setup__trainer_roles').setLabel('Trainer Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
     new ButtonBuilder().setCustomId('tr_setup__request_roles').setLabel('Request Roles').setStyle(ButtonStyle.Primary).setEmoji('📋'),
     new ButtonBuilder().setCustomId('tr_setup__ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
   );
-  return { embeds: [embed], components: [r1], flags: MessageFlags.Ephemeral };
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('tr_setup__announce_channel').setLabel('Announce Channel').setStyle(ButtonStyle.Primary).setEmoji('📣'),
+    new ButtonBuilder().setCustomId('tr_setup__announce_message').setLabel('Announce Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
+  );
+  return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
 }
 
 function buildCounterSetupPayload(guildId) {
@@ -565,11 +582,35 @@ const trainRequestCooldowns = new Map(); // userId → timestamp
 function getTrainingConfig(guildId) {
   if (!config[guildId]) config[guildId] = {};
   const gc = config[guildId];
-  if (!gc.training) gc.training = { channel: null, trainerRoles: [], requestRoles: [], pingRoles: [] };
-  if (!gc.training.trainerRoles) gc.training.trainerRoles = [];
-  if (!gc.training.requestRoles) gc.training.requestRoles = [];
-  if (!gc.training.pingRoles)    gc.training.pingRoles    = [];
+  if (!gc.training) gc.training = { channel: null, trainerRoles: [], requestRoles: [], pingRoles: [], announceChannel: null, announceMessage: null };
+  if (!gc.training.trainerRoles)    gc.training.trainerRoles    = [];
+  if (!gc.training.requestRoles)    gc.training.requestRoles    = [];
+  if (!gc.training.pingRoles)       gc.training.pingRoles       = [];
+  if (!gc.training.announceChannel) gc.training.announceChannel = null;
+  if (!gc.training.announceMessage) gc.training.announceMessage = null;
   return gc.training;
+}
+
+async function sendPromotionAnnounce(guild, targetUser, roleName, promotedBy, source = 'promotion') {
+  const tc = getTrainingConfig(guild.id);
+  if (!tc.announceChannel) return;
+  const ch = guild.channels.cache.get(tc.announceChannel);
+  if (!ch) return;
+  const defaultMsg = source === 'training'
+    ? `🎉 Congratulations <@{user}>! You have **passed your training** and have been promoted to **{role}**! Well done!`
+    : `🎉 Congratulations <@{user}>! You have been promoted to **{role}**!`;
+  const msg = (tc.announceMessage || defaultMsg)
+    .replace(/{user}/g, targetUser.id)
+    .replace(/{role}/g, roleName)
+    .replace(/{promotedBy}/g, promotedBy?.tag ?? 'Staff')
+    .replace(/{server}/g, guild.name);
+  const embed = new EmbedBuilder()
+    .setTitle(source === 'training' ? '🎓 Training Passed!' : '⬆️ Promotion!')
+    .setColor(0x57F287)
+    .setDescription(msg)
+    .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+    .setTimestamp();
+  await ch.send({ embeds: [embed] }).catch(() => {});
 }
 
 function canRunSession(member, guildId) {
@@ -1761,6 +1802,7 @@ client.on('interactionCreate', async interaction => {
         const role = interaction.options.getRole('role');
         if (member.roles.cache.has(role.id)) return interaction.reply({ content: `❌ Already has **${role.name}**.`, flags: MessageFlags.Ephemeral });
         await member.roles.add(role, reason);
+        await sendPromotionAnnounce(interaction.guild, user, role.name, interaction.user, 'promotion');
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⬆️ User Promoted').setColor(0x57F287).addFields({ name: '👤 User', value: user.tag, inline: true }, { name: '🎭 Role', value: role.name, inline: true }, { name: '📝 Reason', value: reason, inline: false }, { name: '👮 By', value: interaction.user.tag, inline: true }).setTimestamp()] });
       }
       if (cmd === 'demote') {
@@ -2009,30 +2051,32 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ════ TRAINING CLAIM BUTTONS ════
-      if (id.startsWith('tr__claim__') || id.startsWith('tr__unclaim__')) {
+      if (id.startsWith('tr__claim__') || id.startsWith('tr__unclaim__') || id.startsWith('tr__pass__') || id.startsWith('tr__fail__')) {
         const parts = id.split('__');
         const action = parts[1];
+        const requestUserId = parts[2];
         const tc = getTrainingConfig(guildId);
-        // Check trainer rol
         const isTrainer = tc.trainerRoles.length
           ? tc.trainerRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
           : hasSetup(interaction.member);
-        if (!isTrainer) return interaction.reply({ content: '❌ Only trainers can claim training requests.', flags: MessageFlags.Ephemeral });
+        if (!isTrainer) return interaction.reply({ content: '❌ Only trainers can interact with training requests.', flags: MessageFlags.Ephemeral });
 
         const embed = interaction.message.embeds[0];
         if (!embed) return interaction.reply({ content: '❌ Could not find embed.', flags: MessageFlags.Ephemeral });
-        const claimedField = embed.fields.find(f => f.name === '✅ Claimed By');
-        const currentClaims = claimedField?.value === '*No one yet*' ? [] : claimedField?.value.split('\n') ?? [];
+
+        // Check of al afgehandeld
+        const statusField = embed.fields?.find(f => f.name === '📊 Status');
+        if (statusField && (statusField.value === '✅ Passed' || statusField.value === '❌ Failed')) {
+          return interaction.reply({ content: '❌ This training has already been completed.', flags: MessageFlags.Ephemeral });
+        }
+
+        const claimedField = embed.fields?.find(f => f.name === '✅ Claimed By');
+        const currentClaims = claimedField?.value === '*No one yet*' ? [] : claimedField?.value?.split('\n') ?? [];
 
         if (action === 'claim') {
-          if (currentClaims.some(c => c.includes(interaction.user.id))) {
-            return interaction.reply({ content: '❌ You have already claimed this request.', flags: MessageFlags.Ephemeral });
-          }
+          if (currentClaims.some(c => c.includes(interaction.user.id))) return interaction.reply({ content: '❌ You have already claimed this request.', flags: MessageFlags.Ephemeral });
           currentClaims.push(`<@${interaction.user.id}> (${interaction.user.tag})`);
-          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(
-            embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1,
-            { name: '✅ Claimed By', value: currentClaims.join('\n'), inline: false }
-          );
+          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1, { name: '✅ Claimed By', value: currentClaims.join('\n'), inline: false });
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
           return;
         }
@@ -2040,11 +2084,49 @@ client.on('interactionCreate', async interaction => {
         if (action === 'unclaim') {
           const newClaims = currentClaims.filter(c => !c.includes(interaction.user.id));
           if (newClaims.length === currentClaims.length) return interaction.reply({ content: '❌ You have not claimed this request.', flags: MessageFlags.Ephemeral });
-          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(
-            embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1,
-            { name: '✅ Claimed By', value: newClaims.length ? newClaims.join('\n') : '*No one yet*', inline: false }
-          );
+          const updatedEmbed = EmbedBuilder.from(embed).spliceFields(embed.fields.findIndex(f => f.name === '✅ Claimed By'), 1, { name: '✅ Claimed By', value: newClaims.length ? newClaims.join('\n') : '*No one yet*', inline: false });
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
+          return;
+        }
+
+        if (action === 'pass' || action === 'fail') {
+          const passed = action === 'pass';
+          // Disable alle knoppen
+          const disabledRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`tr__claim__${requestUserId}__done`).setLabel('🙋 Claim Training').setStyle(ButtonStyle.Primary).setDisabled(true),
+            new ButtonBuilder().setCustomId(`tr__unclaim__${requestUserId}__done`).setLabel('↩️ Unclaim').setStyle(ButtonStyle.Secondary).setDisabled(true),
+            new ButtonBuilder().setCustomId(`tr__pass__${requestUserId}__done`).setLabel('✅ Pass').setStyle(ButtonStyle.Success).setDisabled(true),
+            new ButtonBuilder().setCustomId(`tr__fail__${requestUserId}__done`).setLabel('❌ Fail').setStyle(ButtonStyle.Danger).setDisabled(true),
+          );
+          // Update embed met status
+          let updatedEmbed = EmbedBuilder.from(embed).setColor(passed ? 0x57F287 : 0xED4245);
+          const statusIdx = embed.fields?.findIndex(f => f.name === '📊 Status');
+          if (statusIdx !== undefined && statusIdx >= 0) {
+            updatedEmbed = updatedEmbed.spliceFields(statusIdx, 1, { name: '📊 Status', value: passed ? '✅ Passed' : '❌ Failed', inline: false });
+          } else {
+            updatedEmbed = updatedEmbed.addFields({ name: '📊 Status', value: passed ? '✅ Passed' : '❌ Failed', inline: false });
+          }
+          updatedEmbed = updatedEmbed.addFields({ name: passed ? '🎓 Passed By' : '❌ Failed By', value: `<@${interaction.user.id}> (${interaction.user.tag})`, inline: true });
+          await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
+
+          // Stuur promotion announce als passed
+          if (passed) {
+            const targetUser = await client.users.fetch(requestUserId).catch(() => null);
+            if (targetUser) await sendPromotionAnnounce(interaction.guild, targetUser, 'their training', interaction.user, 'training');
+          }
+
+          // Stuur DM naar de aanvrager
+          const targetUser = await client.users.fetch(requestUserId).catch(() => null);
+          if (targetUser) {
+            const dmEmbed = new EmbedBuilder()
+              .setTitle(passed ? '🎓 Training Passed!' : '❌ Training Failed')
+              .setColor(passed ? 0x57F287 : 0xED4245)
+              .setDescription(passed
+                ? `Congratulations! **${interaction.user.tag}** has marked your training as **passed**! 🎉`
+                : `**${interaction.user.tag}** has marked your training as **failed**. Don't give up — keep practicing!`)
+              .setTimestamp();
+            await targetUser.send({ embeds: [dmEmbed] }).catch(() => {});
+          }
           return;
         }
       }
@@ -2097,7 +2179,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ════ HANDBOOK SETUP BUTTONS ════
-      if (id.startsWith('hb__') || id === 'hb__select_panel') {
+      if (id.startsWith('hb__') && id !== 'hb__select_panel') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', flags: MessageFlags.Ephemeral });
         const parts = id.split('__');
         const action = parts[1];
@@ -2138,20 +2220,6 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ content: `✅ Handbook panel deployed in <#${panel.channel}>!` });
         }
         if (action === 'delete_panel') { delete hc.panels[panelId]; await saveConfig(config); return interaction.update(buildHandbookSetupPayload(guildId)); }
-      }
-
-      // ════ HANDBOOK DROPDOWN (public) ════
-      if (id.startsWith('hbp__select__')) {
-        const panelId = id.replace('hbp__select__', '');
-        const hc = getHandbookConfig(guildId);
-        const panel = hc.panels[panelId];
-        if (!panel) return interaction.reply({ content: '❌ Panel not found.', flags: MessageFlags.Ephemeral });
-        const book = panel.books?.find(b => b.id === val);
-        if (!book) return interaction.reply({ content: '❌ Handbook not found.', flags: MessageFlags.Ephemeral });
-        if (book.requiredRoles?.length && !book.requiredRoles.some(r => interaction.member.roles.cache.has(r))) {
-          return interaction.reply({ content: `❌ You need one of the following roles: ${book.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, flags: MessageFlags.Ephemeral });
-        }
-        return interaction.reply({ content: `📖 **${book.label}**\n${book.url}`, flags: MessageFlags.Ephemeral });
       }
 
       // ════ ROLE PERMS SETUP BUTTONS ════
@@ -2241,6 +2309,15 @@ client.on('interactionCreate', async interaction => {
             components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('tr_setup_request_roles').setPlaceholder('Select request roles...').setMinValues(0).setMaxValues(10))],
             flags: MessageFlags.Ephemeral,
           });
+        }
+        if (action === 'announce_channel') {
+          return interaction.reply({ content: '### 📣 Select the channel for promotion announcements.', components: [channelDropdown('tr_setup_announce_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'announce_message') {
+          const tc = getTrainingConfig(guildId);
+          const modal = new ModalBuilder().setCustomId('modal_tr_announce_msg').setTitle('Promotion Announce Message');
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('announce_msg').setLabel('Message (variables: {user} {role} {promotedBy})').setStyle(TextInputStyle.Paragraph).setValue(tc.announceMessage || '').setPlaceholder('🎉 Congratulations <@{user}>! You have been promoted to **{role}**!').setRequired(false).setMaxLength(1000)));
+          return interaction.showModal(modal);
         }
         if (action === 'ping_roles') {
           return interaction.reply({
@@ -3298,6 +3375,13 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ════ TRAINING CHANNEL SELECT ════
+      if (interaction.customId === 'tr_setup_announce_channel') {
+        const tc = getTrainingConfig(guildId);
+        tc.announceChannel = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Announce channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+
       if (interaction.customId === 'tr_setup_channel') {
         const tc = getTrainingConfig(guildId);
         tc.channel = chId;
@@ -3372,6 +3456,18 @@ client.on('interactionCreate', async interaction => {
       if (id === 'sr_sel_delete')   { delete getSelfRoleConfig(guildId).panels[val]; await saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
       if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); await saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, flags: MessageFlags.Ephemeral }); }
       if (id === 'hb__select_panel') { return interaction.update(buildHandbookPanelEditor(guildId, val)); }
+      if (id.startsWith('hbp__select__')) {
+        const panelId = id.replace('hbp__select__', '');
+        const hc = getHandbookConfig(guildId);
+        const panel = hc.panels[panelId];
+        if (!panel) return interaction.reply({ content: '❌ Panel not found.', flags: MessageFlags.Ephemeral });
+        const book = panel.books?.find(b => b.id === val);
+        if (!book) return interaction.reply({ content: '❌ Handbook not found.', flags: MessageFlags.Ephemeral });
+        if (book.requiredRoles?.length && !book.requiredRoles.some(r => interaction.member.roles.cache.has(r))) {
+          return interaction.reply({ content: `❌ You need one of the following roles: ${book.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, flags: MessageFlags.Ephemeral });
+        }
+        return interaction.reply({ content: `📖 **${book.label}**\n${book.url}`, flags: MessageFlags.Ephemeral });
+      }
       if (id.startsWith('hb__remove_book__')) {
         const panelId = id.replace('hb__remove_book__', '');
         const hc = getHandbookConfig(guildId);
@@ -3446,8 +3542,9 @@ client.on('interactionCreate', async interaction => {
             { name: '🔑 Review Roles', value: appType.reviewRoles?.length ? appType.reviewRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone with setup*', inline: true },
             { name: '🔗 Group Link', value: appType.groupLink ? `[Click here](${appType.groupLink})` : '*Not set*', inline: true },
             { name: '🏷️ Nickname Format', value: appType.nicknameFormat ? `\`${appType.nicknameFormat}\`` : '*Disabled*', inline: true },
-            { name: '✅ Accept Bericht', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
-            { name: '❌ Deny Bericht', value: appType.denyMessage ? `\`\`\`${appType.denyMessage.slice(0, 100)}\`\`\`` : '*Standaard*', inline: false },
+            { name: '✅ Accept Message', value: appType.acceptMessage ? `\`\`\`${appType.acceptMessage.slice(0, 100)}\`\`\`` : '*Default*', inline: false },
+            { name: '❌ Deny Message', value: appType.denyMessage ? `\`\`\`${appType.denyMessage.slice(0, 100)}\`\`\`` : '*Default*', inline: false },
+            { name: '🔒 Required Roles', value: appType.requiredRoles?.length ? appType.requiredRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*', inline: true },
             { name: '❓ Questions preview', value: appType.questions.slice(0, 5).map((q, i) => `${i + 1}. ${q.slice(0, 80)}`).join('\n') || '*None*', inline: false },
           );
         const r1 = new ActionRowBuilder().addComponents(
@@ -3458,6 +3555,7 @@ client.on('interactionCreate', async interaction => {
           new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
         );
         const r2 = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM Messages').setStyle(ButtonStyle.Primary).setEmoji('💬'),
           new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Group Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
           new ButtonBuilder().setCustomId(`apte__set_nickname__${val}`).setLabel('Nickname').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
           new ButtonBuilder().setCustomId(`apte__back__${val}`).setLabel('← Back').setStyle(ButtonStyle.Secondary),
@@ -3867,7 +3965,7 @@ client.on('interactionCreate', async interaction => {
         const panelId = genId();
         hc.panels[panelId] = { title, description, channel: null, messageId: null, books: [] };
         await saveConfig(config);
-        return interaction.reply({ content: `✅ Panel **${title}** created!`, ...buildHandbookPanelEditor(guildId, panelId) });
+        return interaction.reply({ content: `✅ Panel **${title}** created! Configure it below.`, flags: MessageFlags.Ephemeral, ...buildHandbookPanelEditor(guildId, panelId) });
       }
 
       if (mid.startsWith('modal_hb_add_book__')) {
@@ -3896,6 +3994,13 @@ client.on('interactionCreate', async interaction => {
 
       // ── Session ──
       if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', flags: MessageFlags.Ephemeral }); getSessionConfig(guildId).joinLink = rawLink; await saveConfig(config); return interaction.reply({ content: `✅ Join link saved!`, flags: MessageFlags.Ephemeral }); }
+      if (mid === 'modal_tr_announce_msg') {
+        const tc = getTrainingConfig(guildId);
+        tc.announceMessage = interaction.fields.getTextInputValue('announce_msg').trim() || null;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Announce message saved!`, flags: MessageFlags.Ephemeral });
+      }
+
       if (mid === 'modal_trainrequest') {
         const tc = getTrainingConfig(guildId);
         const ch = interaction.guild.channels.cache.get(tc.channel);
@@ -3917,8 +4022,10 @@ client.on('interactionCreate', async interaction => {
           .setFooter({ text: `Request ID: ${reqId}` })
           .setTimestamp();
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`tr__claim__${interaction.user.id}__${reqId}`).setLabel('🙋 Claim Training').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`tr__unclaim__${interaction.user.id}__${reqId}`).setLabel('❌ Unclaim').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`tr__claim__${interaction.user.id}__${reqId}`).setLabel('🙋 Claim Training').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`tr__unclaim__${interaction.user.id}__${reqId}`).setLabel('↩️ Unclaim').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId(`tr__pass__${interaction.user.id}__${reqId}`).setLabel('✅ Pass').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`tr__fail__${interaction.user.id}__${reqId}`).setLabel('❌ Fail').setStyle(ButtonStyle.Danger),
         );
         const ping = tc.pingRoles.length ? tc.pingRoles.map(r => `<@&${r}>`).join(' ') : null;
         await ch.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
