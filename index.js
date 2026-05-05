@@ -135,9 +135,20 @@ function getGuildConfig(guildId) {
   return config[guildId];
 }
 
+function getHandbookConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.handbooks) gc.handbooks = { panels: {} }; // panelId → { title, description, color, channel, messageId, books: [{ id, label, url, requiredRoles[] }] }
+  return gc.handbooks;
+}
+
 function getTicketConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.ticket) gc.ticket = { pingRoles: [], transcriptChannel: null, ticketChannel: null, ticketCategory: null, panelTitle: '🎫 Support Tickets', panelDescription: 'Click a button below to open a support ticket.', panelColor: '#5865F2', panelThumbnail: null, welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [] };
+  // Patch bestaande types
+  for (const t of gc.ticket.ticketTypes) {
+    if (!t.requiredRoles) t.requiredRoles = [];
+    if (!t.viewRoles)     t.viewRoles     = [];
+  }
   return gc.ticket;
 }
 function getSessionConfig(guildId) {
@@ -184,6 +195,7 @@ function getApplicationConfig(guildId) {
     if (t.nicknameFormat === undefined) t.nicknameFormat = null;
     if (t.reviewChannel  === undefined) t.reviewChannel  = null;
     if (t.reviewRoles    === undefined) t.reviewRoles    = [];
+    if (t.requiredRoles  === undefined) t.requiredRoles  = [];
   }
   // Patch elk bestaand panel met ontbrekende velden
   for (const p of gc.applications.panels) {
@@ -380,6 +392,49 @@ async function updateCommandListEmbed(guild) {
     cl.messageId = msg.id;
     await saveConfig(config);
   } catch {}
+}
+
+function buildHandbookSetupPayload(guildId) {
+  const hc = getHandbookConfig(guildId);
+  const panels = Object.entries(hc.panels);
+  const embed = new EmbedBuilder().setTitle('📚 Handbook Setup').setColor(0x5865F2)
+    .setDescription(panels.length
+      ? panels.map(([id, p]) => `**${p.title}** — ${p.books?.length ?? 0} book(s) — ${p.channel ? `<#${p.channel}>` : '*No channel*'}`).join('\n')
+      : '*No handbook panels yet*');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hb__create').setLabel('➕ New Panel').setStyle(ButtonStyle.Success),
+  );
+  if (panels.length) {
+    const sel = new StringSelectMenuBuilder().setCustomId('hb__select_panel').setPlaceholder('Select panel to edit...').addOptions(panels.slice(0, 25).map(([id, p]) => ({ label: p.title, value: id })));
+    return { embeds: [embed], components: [new ActionRowBuilder().addComponents(sel), row], ephemeral: true };
+  }
+  return { embeds: [embed], components: [row], ephemeral: true };
+}
+
+function buildHandbookPanelEditor(guildId, panelId) {
+  const hc = getHandbookConfig(guildId);
+  const panel = hc.panels[panelId];
+  const embed = new EmbedBuilder().setTitle(`📚 Editing: ${panel.title}`).setColor(0x5865F2)
+    .addFields(
+      { name: '📢 Channel', value: panel.channel ? `<#${panel.channel}>` : '*Not set*', inline: true },
+      { name: '📌 Status', value: panel.messageId ? '✅ Deployed' : '❌ Not deployed', inline: true },
+      { name: '📖 Books', value: panel.books?.length
+        ? panel.books.map((b, i) => `${i+1}. **${b.label}** ${b.requiredRoles?.length ? `— ${b.requiredRoles.map(r => `<@&${r}>`).join(', ')}` : '— Everyone'}`).join('\n')
+        : '*No books yet*', inline: false },
+    );
+  const rows = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`hb__add_book__${panelId}`).setLabel('➕ Add Book').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`hb__set_channel__${panelId}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+      new ButtonBuilder().setCustomId(`hb__deploy__${panelId}`).setLabel('🚀 Deploy').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`hb__delete_panel__${panelId}`).setLabel('🗑️ Delete Panel').setStyle(ButtonStyle.Danger),
+    ),
+  ];
+  if (panel.books?.length) {
+    const sel = new StringSelectMenuBuilder().setCustomId(`hb__remove_book__${panelId}`).setPlaceholder('Remove a book...').addOptions(panel.books.slice(0, 25).map(b => ({ label: b.label, value: b.id })));
+    rows.push(new ActionRowBuilder().addComponents(sel));
+  }
+  return { embeds: [embed], components: rows, ephemeral: true };
 }
 
 function buildCommandListSetupPayload(guildId) {
@@ -950,6 +1005,7 @@ function buildTicketSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('t_welcome').setLabel('Welcome Text').setStyle(ButtonStyle.Primary).setEmoji('💬'),
     new ButtonBuilder().setCustomId('t_add_type').setLabel('Add Type').setStyle(ButtonStyle.Success).setEmoji('➕'),
     new ButtonBuilder().setCustomId('t_remove_type').setLabel('Remove Type').setStyle(ButtonStyle.Danger).setEmoji('➖'),
+    new ButtonBuilder().setCustomId('t_type_roles').setLabel('Type Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
   );
   const r3 = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('t_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'));
   return { embeds: [embed], components: [r1, r2, r3], ephemeral: true };
@@ -1155,6 +1211,7 @@ const commands = [
     { name: 'founderrequest', type: 1, description: 'Foundership request system' },
     { name: 'roleperms', type: 1, description: 'Role permission system' },
     { name: 'commandlist', type: 1, description: 'Auto-updating command list' },
+    { name: 'handbooks', type: 1, description: 'Handbook panel system' },
   ]},
 ];
 
@@ -1881,6 +1938,7 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'founderrequest') return interaction.reply(buildRequestSetupPayload(guildId, 'founder'));
         if (sub === 'roleperms')      return interaction.reply(buildRolePermsSetupPayload(guildId));
         if (sub === 'commandlist')    return interaction.reply(buildCommandListSetupPayload(guildId));
+        if (sub === 'handbooks')      return interaction.reply(buildHandbookSetupPayload(guildId));
       }
     }
 
@@ -2025,6 +2083,63 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
+      }
+
+      // ════ HANDBOOK SETUP BUTTONS ════
+      if (id.startsWith('hb__') || id === 'hb__select_panel') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
+        const parts = id.split('__');
+        const action = parts[1];
+        const panelId = parts[2];
+        const hc = getHandbookConfig(guildId);
+
+        if (action === 'create') {
+          const modal = new ModalBuilder().setCustomId('modal_hb_create').setTitle('Create Handbook Panel');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('hb_title').setLabel('Panel Title').setStyle(TextInputStyle.Short).setPlaceholder('📚 Server Handbooks').setRequired(true).setMaxLength(100)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('hb_description').setLabel('Panel Description').setStyle(TextInputStyle.Paragraph).setPlaceholder('Select a handbook from the dropdown below.').setRequired(false).setMaxLength(500)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (action === 'add_book') {
+          const modal = new ModalBuilder().setCustomId(`modal_hb_add_book__${panelId}`).setTitle('Add Handbook');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('hb_book_label').setLabel('Label (shown in dropdown)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('hb_book_url').setLabel('URL (Google Docs, etc.)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(500)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (action === 'set_channel') return interaction.reply({ content: `### 📢 Select channel for this handbook panel`, components: [channelDropdown(`hb_channel__${panelId}`, 'Select channel...')], ephemeral: true });
+        if (action === 'deploy') {
+          const panel = hc.panels[panelId];
+          if (!panel?.channel) return interaction.reply({ content: '❌ Set a channel first.', ephemeral: true });
+          if (!panel.books?.length) return interaction.reply({ content: '❌ Add at least one book first.', ephemeral: true });
+          const ch = interaction.guild.channels.cache.get(panel.channel);
+          if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
+          const embed = new EmbedBuilder().setTitle(panel.title).setDescription(panel.description || 'Select a handbook below.').setColor(0x5865F2).setTimestamp();
+          const options = panel.books.map(b => ({ label: b.label, value: b.id, description: b.requiredRoles?.length ? '🔒 Restricted' : '🌐 Everyone' }));
+          const sel = new StringSelectMenuBuilder().setCustomId(`hbp__select__${panelId}`).setPlaceholder('Select a handbook...').addOptions(options.slice(0, 25));
+          const existing = panel.messageId ? await ch.messages.fetch(panel.messageId).catch(() => null) : null;
+          if (existing) { await existing.edit({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] }); }
+          else { const msg = await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] }); panel.messageId = msg.id; }
+          await saveConfig(config);
+          return interaction.reply({ content: `✅ Handbook panel deployed in <#${panel.channel}>!`, ephemeral: true });
+        }
+        if (action === 'delete_panel') { delete hc.panels[panelId]; await saveConfig(config); return interaction.update(buildHandbookSetupPayload(guildId)); }
+      }
+
+      // ════ HANDBOOK DROPDOWN (public) ════
+      if (id.startsWith('hbp__select__')) {
+        const panelId = id.replace('hbp__select__', '');
+        const hc = getHandbookConfig(guildId);
+        const panel = hc.panels[panelId];
+        if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
+        const book = panel.books?.find(b => b.id === val);
+        if (!book) return interaction.reply({ content: '❌ Handbook not found.', ephemeral: true });
+        if (book.requiredRoles?.length && !book.requiredRoles.some(r => interaction.member.roles.cache.has(r))) {
+          return interaction.reply({ content: `❌ You need one of the following roles: ${book.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, ephemeral: true });
+        }
+        return interaction.reply({ content: `📖 **${book.label}**\n${book.url}`, ephemeral: true });
       }
 
       // ════ ROLE PERMS SETUP BUTTONS ════
@@ -2335,6 +2450,13 @@ client.on('interactionCreate', async interaction => {
         const appType = ac.appTypes.find(t => t.id === typeId);
         if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
 
+        if (action === 'set_required_roles') {
+          return interaction.reply({
+            content: `### 🔒 Select required roles for **${appType.label}**\nOnly members with these roles can apply.`,
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`apte_required_roles__${typeId}`).setPlaceholder('Select required roles (0 = everyone)...').setMinValues(0).setMaxValues(10))],
+            ephemeral: true,
+          });
+        }
         if (action === 'set_review_roles') {
           return interaction.reply({
             content: `### 🔑 Select review roles for **${appType.label}**\nOnly members with these roles can accept or deny applications of this type.\n*Select multiple roles — send each one separately or use the dropdown.*`,
@@ -2399,6 +2521,10 @@ client.on('interactionCreate', async interaction => {
         if (!appType) return interaction.reply({ content: '❌ This application type no longer exists.', ephemeral: true });
         if (!appType.questions || appType.questions.length === 0) return interaction.reply({ content: '❌ No questions configured for this type.', ephemeral: true });
         if (activeAppSessions.has(interaction.user.id)) return interaction.reply({ content: '❌ You already have an active application. Check your DMs!\n\nType `cancel` in the DM to cancel it.', ephemeral: true });
+        // Required roles check
+        if (appType.requiredRoles?.length && !appType.requiredRoles.some(r => interaction.member.roles.cache.has(r)) && !hasSetup(interaction.member)) {
+          return interaction.reply({ content: `❌ You need one of the following roles to apply: ${appType.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, ephemeral: true });
+        }
 
         await interaction.deferReply({ ephemeral: true });
 
@@ -2705,6 +2831,12 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
+        if (id === 't_type_roles') {
+          const tc = getTicketConfig(guildId);
+          if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No ticket types yet.', ephemeral: true });
+          const sel = new StringSelectMenuBuilder().setCustomId('td_select_type_roles').setPlaceholder('Select type to configure roles...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id })));
+          return interaction.reply({ content: '### 🔑 Select ticket type to configure roles', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true });
+        }
         if (id === 't_remove_type') { const tc = getTicketConfig(guildId); if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types.', ephemeral: true }); const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id }))); return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], ephemeral: true }); }
         if (id === 't_deploy') {
           const tc = getTicketConfig(guildId);
@@ -2847,6 +2979,10 @@ client.on('interactionCreate', async interaction => {
         const tc = getTicketConfig(guildId);
         const type = tc.ticketTypes.find(t => t.id === typeId);
         if (!type) return interaction.reply({ content: '❌ Ticket type not found.', ephemeral: true });
+        // Required roles check
+        if (type.requiredRoles?.length && !type.requiredRoles.some(r => interaction.member.roles.cache.has(r)) && !hasSetup(interaction.member)) {
+          return interaction.reply({ content: `❌ You need one of the following roles to open this ticket: ${type.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, ephemeral: true });
+        }
         if (openTickets.has(interaction.user.id)) {
           const existing = interaction.guild.channels.cache.get(openTickets.get(interaction.user.id));
           if (existing) return interaction.reply({ content: `❌ You already have a ticket: <#${existing.id}>`, ephemeral: true });
@@ -2859,6 +2995,7 @@ client.on('interactionCreate', async interaction => {
           { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
         ];
         for (const rid of tc.pingRoles) { perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }); }
+        if (type.viewRoles?.length) { for (const rid of type.viewRoles) { perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory] }); } }
         const ticketCh = await interaction.guild.channels.create({ name: `ticket-${type.label.toLowerCase().replace(/\s+/g, '-')}-${interaction.user.username}`, type: ChannelType.GuildText, parent: category ?? null, permissionOverwrites: perms, topic: `Ticket by ${interaction.user.tag} | ${type.label}` });
         openTickets.set(interaction.user.id, ticketCh.id);
         const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag };
@@ -2975,6 +3112,37 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Approval roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
       }
 
+      if (interaction.customId.startsWith('hb_book_roles__')) {
+        const parts = interaction.customId.replace('hb_book_roles__', '').split('__');
+        const panelId = parts[0], bookId = parts[1];
+        const hc = getHandbookConfig(guildId);
+        const book = hc.panels[panelId]?.books?.find(b => b.id === bookId);
+        if (!book) return interaction.reply({ content: '❌ Book not found.', ephemeral: true });
+        book.requiredRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Roles set for **${book.label}**: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
+      }
+
+      if (interaction.customId.startsWith('tkt_required_roles__')) {
+        const typeId = interaction.customId.replace('tkt_required_roles__', '');
+        const tc = getTicketConfig(guildId);
+        const type = tc.ticketTypes.find(t => t.id === typeId);
+        if (!type) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        type.requiredRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Required roles for **${type.label}** set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
+      }
+
+      if (interaction.customId.startsWith('apte_required_roles__')) {
+        const typeId = interaction.customId.replace('apte_required_roles__', '');
+        const ac = getApplicationConfig(guildId);
+        const appType = ac.appTypes.find(t => t.id === typeId);
+        if (!appType) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        appType.requiredRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Required roles for **${appType.label}** set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
+      }
+
       // ════ TRAINING ROLE SELECTS ════
       if (interaction.customId === 'tr_setup_trainer_roles') {
         const tc = getTrainingConfig(guildId);
@@ -3057,6 +3225,15 @@ client.on('interactionCreate', async interaction => {
         if (key) { ec[key] = chId; await saveConfig(config); return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true }); }
       }
 
+      if (interaction.customId.startsWith('hb_channel__')) {
+        const panelId = interaction.customId.replace('hb_channel__', '');
+        const hc = getHandbookConfig(guildId);
+        if (!hc.panels[panelId]) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
+        hc.panels[panelId].channel = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true });
+      }
+
       if (interaction.customId === 'cmdlist_channel') {
         const cl = getCommandListConfig(guildId);
         cl.channel = chId;
@@ -3121,7 +3298,7 @@ client.on('interactionCreate', async interaction => {
         pendingSendMsgChannel.delete(interaction.user.id);
         const targetCh = targetChannelId ? interaction.guild.channels.cache.get(targetChannelId) : interaction.channel;
         if (!targetCh) return interaction.reply({ content: '❌ Target channel not found.', ephemeral: true });
-        const embed = new EmbedBuilder().setTitle(msg.title).setDescription(msg.description).setColor(hexToInt(msg.color));
+        const embed = new EmbedBuilder().setTitle(msg.title || 'Message').setDescription(msg.description || '\u200b').setColor(hexToInt(msg.color));
         if (msg.image) embed.setImage(msg.image);
         if (msg.footer) embed.setFooter({ text: msg.footer });
         await targetCh.send({ embeds: [embed] });
@@ -3138,6 +3315,27 @@ client.on('interactionCreate', async interaction => {
       if (id === 'sr_sel_edit')     { return interaction.update(buildPanelEditor(guildId, val)); }
       if (id === 'sr_sel_delete')   { delete getSelfRoleConfig(guildId).panels[val]; await saveConfig(config); return interaction.update(buildSelfRoleOverview(guildId)); }
       if (id.startsWith('sr_sel_rmrole__')) { const panelId = id.replace('sr_sel_rmrole__', ''); const panel = getSelfRoleConfig(guildId).panels[panelId]; panel.roles = panel.roles.filter(r => r.id !== val); await saveConfig(config); return interaction.reply({ content: `✅ Role removed.`, ephemeral: true }); }
+      if (id === 'hb__select_panel') { return interaction.update(buildHandbookPanelEditor(guildId, val)); }
+      if (id.startsWith('hb__remove_book__')) {
+        const panelId = id.replace('hb__remove_book__', '');
+        const hc = getHandbookConfig(guildId);
+        const panel = hc.panels[panelId];
+        if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
+        panel.books = panel.books.filter(b => b.id !== val);
+        await saveConfig(config);
+        return interaction.update(buildHandbookPanelEditor(guildId, panelId));
+      }
+
+      if (id === 'td_select_type_roles') {
+        const tc = getTicketConfig(guildId);
+        const type = tc.ticketTypes.find(t => t.id === val);
+        if (!type) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        return interaction.reply({
+          content: `### 🔒 Required roles for **${type.label}**\nOnly members with these roles can open this ticket:`,
+          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_required_roles__${val}`).setPlaceholder('Select required roles (0 = everyone)...').setMinValues(0).setMaxValues(10))],
+          ephemeral: true,
+        });
+      }
       if (id === 'td_remove_type')  { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); await saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
 
       // Self role dropdown
@@ -3192,9 +3390,9 @@ client.on('interactionCreate', async interaction => {
         const r1 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`apte__edit_questions__${val}`).setLabel('Edit Questions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
           new ButtonBuilder().setCustomId(`apte__set_roles__${val}`).setLabel('Accept Roles').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`apte__set_required_roles__${val}`).setLabel('Required Roles').setStyle(ButtonStyle.Primary).setEmoji('🔒'),
           new ButtonBuilder().setCustomId(`apte__set_review_roles__${val}`).setLabel('Review Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
           new ButtonBuilder().setCustomId(`apte__set_review_channel__${val}`).setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-          new ButtonBuilder().setCustomId(`apte__set_messages__${val}`).setLabel('DM Messages').setStyle(ButtonStyle.Primary).setEmoji('💬'),
         );
         const r2 = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`apte__set_grouplink__${val}`).setLabel('Group Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
@@ -3597,6 +3795,35 @@ client.on('interactionCreate', async interaction => {
         const ping = cfg.approvalRoles?.length ? cfg.approvalRoles.map(r => `<@&${r}>`).join(' ') : null;
         await ch.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
         return interaction.reply({ content: `✅ Your **${type} Request** has been submitted!`, ephemeral: true });
+      }
+
+      if (mid === 'modal_hb_create') {
+        const hc = getHandbookConfig(guildId);
+        const title = interaction.fields.getTextInputValue('hb_title').trim();
+        const description = interaction.fields.getTextInputValue('hb_description').trim() || null;
+        const panelId = genId();
+        hc.panels[panelId] = { title, description, channel: null, messageId: null, books: [] };
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Panel **${title}** created!`, ...buildHandbookPanelEditor(guildId, panelId) });
+      }
+
+      if (mid.startsWith('modal_hb_add_book__')) {
+        const panelId = mid.replace('modal_hb_add_book__', '');
+        const hc = getHandbookConfig(guildId);
+        const panel = hc.panels[panelId];
+        if (!panel) return interaction.reply({ content: '❌ Panel not found.', ephemeral: true });
+        const label = interaction.fields.getTextInputValue('hb_book_label').trim();
+        const url   = interaction.fields.getTextInputValue('hb_book_url').trim();
+        const bookId = genId();
+        if (!panel.books) panel.books = [];
+        panel.books.push({ id: bookId, label, url, requiredRoles: [] });
+        await saveConfig(config);
+        // Ask for required roles
+        return interaction.reply({
+          content: `✅ Book **${label}** added!\n\n### 🔒 Select required roles for this book (leave empty = everyone can see it):`,
+          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`hb_book_roles__${panelId}__${bookId}`).setPlaceholder('Select roles (0 = everyone)...').setMinValues(0).setMaxValues(10))],
+          ephemeral: true,
+        });
       }
 
       // ── Ticket ──
