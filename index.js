@@ -148,6 +148,7 @@ function getTicketConfig(guildId) {
   for (const t of gc.ticket.ticketTypes) {
     if (!t.requiredRoles) t.requiredRoles = [];
     if (!t.viewRoles)     t.viewRoles     = [];
+    if (!t.category)      t.category      = null;
   }
   return gc.ticket;
 }
@@ -2085,6 +2086,16 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
+      // ════ TICKET TYPE CONFIG BUTTONS ════
+      if (id.startsWith('tkt_type_cfg__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', ephemeral: true });
+        const parts = id.split('__');
+        const action = parts[1], typeId = parts[2];
+        if (action === 'required') return interaction.reply({ content: `### 🔒 Select required roles`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_required_roles__${typeId}`).setPlaceholder('Select required roles (0 = everyone)...').setMinValues(0).setMaxValues(10))], ephemeral: true });
+        if (action === 'view')     return interaction.reply({ content: `### 👁️ Select view roles`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_view_roles__${typeId}`).setPlaceholder('Select view roles (0 = none)...').setMinValues(0).setMaxValues(10))], ephemeral: true });
+        if (action === 'category') return interaction.reply({ content: `### 📁 Select category for this ticket type`, components: [channelDropdown(`tkt_type_category__${typeId}`, 'Select category...')], ephemeral: true });
+      }
+
       // ════ HANDBOOK SETUP BUTTONS ════
       if (id.startsWith('hb__') || id === 'hb__select_panel') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission.', ephemeral: true });
@@ -2117,7 +2128,7 @@ client.on('interactionCreate', async interaction => {
           const ch = interaction.guild.channels.cache.get(panel.channel);
           if (!ch) return interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
           const embed = new EmbedBuilder().setTitle(panel.title).setDescription(panel.description || 'Select a handbook below.').setColor(0x5865F2).setTimestamp();
-          const options = panel.books.map(b => ({ label: b.label, value: b.id, description: b.requiredRoles?.length ? '🔒 Restricted' : '🌐 Everyone' }));
+          const options = panel.books.map(b => ({ label: b.label, value: b.id, description: b.requiredRoles?.length ? '🔒 Role Required' : '🟢 Open' }));
           const sel = new StringSelectMenuBuilder().setCustomId(`hbp__select__${panelId}`).setPlaceholder('Select a handbook...').addOptions(options.slice(0, 25));
           const existing = panel.messageId ? await ch.messages.fetch(panel.messageId).catch(() => null) : null;
           if (existing) { await existing.edit({ embeds: [embed], components: [new ActionRowBuilder().addComponents(sel)] }); }
@@ -2989,7 +3000,8 @@ client.on('interactionCreate', async interaction => {
           openTickets.delete(interaction.user.id);
         }
         await interaction.deferReply({ ephemeral: true });
-        const category = tc.ticketCategory ? interaction.guild.channels.cache.get(tc.ticketCategory) : null;
+        const category = (type.category ? interaction.guild.channels.cache.get(type.category) : null)
+          ?? (tc.ticketCategory ? interaction.guild.channels.cache.get(tc.ticketCategory) : null);
         const perms = [
           { id: interaction.guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
           { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
@@ -3000,12 +3012,35 @@ client.on('interactionCreate', async interaction => {
         openTickets.set(interaction.user.id, ticketCh.id);
         const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: interaction.user.tag };
         const embed = new EmbedBuilder().setTitle(`${type.emoji || '🎫'} Ticket — ${type.label}`).setDescription(`${replaceVars(tc.welcomeText || 'Hello {user}!', vars)}\n\n**Type:** ${type.label}`).setColor(hexToInt(tc.panelColor)).setTimestamp().setFooter({ text: `By ${interaction.user.tag}` });
-        const closeRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'));
+        const closeRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('tkt__claim').setLabel('Claim Ticket').setStyle(ButtonStyle.Primary).setEmoji('🙋'),
+          new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'),
+        );
         await ticketCh.send({ content: `<@${interaction.user.id}>${tc.pingRoles.map(id => ` <@&${id}>`).join('')}`, embeds: [embed], components: [closeRow] });
         return interaction.editReply({ content: `✅ Ticket created: <#${ticketCh.id}>` });
       }
 
       // ════ TICKET CLOSE BUTTON ════
+      if (id === 'tkt__claim') {
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
+        // Update channel name met claimer
+        const embed = interaction.message.embeds[0];
+        const alreadyClaimed = embed?.description?.includes('**Claimed by**');
+        if (alreadyClaimed) return interaction.reply({ content: '❌ This ticket is already claimed.', ephemeral: true });
+        // Update embed met claimer info
+        const updatedEmbed = embed
+          ? EmbedBuilder.from(embed).setDescription(`${embed.description || ''}\n\n**Claimed by:** ${interaction.user.tag} (<@${interaction.user.id}>)`)
+          : new EmbedBuilder().setDescription(`**Claimed by:** ${interaction.user.tag} (<@${interaction.user.id}>)`);
+        // Disable claim knop, houd close knop
+        const updatedRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('tkt__claim').setLabel(`Claimed by ${interaction.user.username}`).setStyle(ButtonStyle.Primary).setEmoji('🙋').setDisabled(true),
+          new ButtonBuilder().setCustomId('tkt__close').setLabel('Close Ticket').setStyle(ButtonStyle.Danger).setEmoji('🔒'),
+        );
+        await interaction.message.edit({ embeds: [updatedEmbed], components: [updatedRow] });
+        await interaction.reply({ content: `✅ You have claimed this ticket!`, ephemeral: false });
+        return;
+      }
+
       if (id === 'tkt__close') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', ephemeral: true });
         const ch = interaction.channel; const tc = getTicketConfig(guildId);
@@ -3123,6 +3158,16 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Roles set for **${book.label}**: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*Everyone*'}`, ephemeral: true });
       }
 
+      if (interaction.customId.startsWith('tkt_view_roles__')) {
+        const typeId = interaction.customId.replace('tkt_view_roles__', '');
+        const tc = getTicketConfig(guildId);
+        const type = tc.ticketTypes.find(t => t.id === typeId);
+        if (!type) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        type.viewRoles = ids;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ View roles for **${type.label}** set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, ephemeral: true });
+      }
+
       if (interaction.customId.startsWith('tkt_required_roles__')) {
         const typeId = interaction.customId.replace('tkt_required_roles__', '');
         const tc = getTicketConfig(guildId);
@@ -3223,6 +3268,16 @@ client.on('interactionCreate', async interaction => {
         const map = { erlcd_kickbans: 'kickBans', erlcd_joinleave: 'joinLeave', erlcd_cmds: 'cmds', erlcd_modcall: 'modCall', erlcd_kills: 'kills' };
         const key = map[interaction.customId];
         if (key) { ec[key] = chId; await saveConfig(config); return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, ephemeral: true }); }
+      }
+
+      if (interaction.customId.startsWith('tkt_type_category__')) {
+        const typeId = interaction.customId.replace('tkt_type_category__', '');
+        const tc = getTicketConfig(guildId);
+        const type = tc.ticketTypes.find(t => t.id === typeId);
+        if (!type) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
+        type.category = chId;
+        await saveConfig(config);
+        return interaction.reply({ content: `✅ Category for **${type.label}** set to <#${chId}>!`, ephemeral: true });
       }
 
       if (interaction.customId.startsWith('hb_channel__')) {
@@ -3330,11 +3385,18 @@ client.on('interactionCreate', async interaction => {
         const tc = getTicketConfig(guildId);
         const type = tc.ticketTypes.find(t => t.id === val);
         if (!type) return interaction.reply({ content: '❌ Type not found.', ephemeral: true });
-        return interaction.reply({
-          content: `### 🔒 Required roles for **${type.label}**\nOnly members with these roles can open this ticket:`,
-          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_required_roles__${val}`).setPlaceholder('Select required roles (0 = everyone)...').setMinValues(0).setMaxValues(10))],
-          ephemeral: true,
-        });
+        const embed = new EmbedBuilder().setTitle(`🔧 Configure: ${type.label}`).setColor(0x5865F2)
+          .addFields(
+            { name: '🔒 Required Roles', value: type.requiredRoles?.length ? type.requiredRoles.map(r => `<@&${r}>`).join(', ') : '*Everyone*', inline: true },
+            { name: '👁️ View Roles', value: type.viewRoles?.length ? type.viewRoles.map(r => `<@&${r}>`).join(', ') : '*Ping roles only*', inline: true },
+            { name: '📁 Category', value: type.category ? `<#${type.category}>` : '*Global category*', inline: true },
+          );
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`tkt_type_cfg__required__${val}`).setLabel('Required Roles').setStyle(ButtonStyle.Primary).setEmoji('🔒'),
+          new ButtonBuilder().setCustomId(`tkt_type_cfg__view__${val}`).setLabel('View Roles').setStyle(ButtonStyle.Primary).setEmoji('👁️'),
+          new ButtonBuilder().setCustomId(`tkt_type_cfg__category__${val}`).setLabel('Category').setStyle(ButtonStyle.Primary).setEmoji('📁'),
+        );
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
       }
       if (id === 'td_remove_type')  { const tc = getTicketConfig(guildId); tc.ticketTypes = tc.ticketTypes.filter(t => t.id !== val); await saveConfig(config); return interaction.reply({ content: '✅ Ticket type removed.', ephemeral: true }); }
 
