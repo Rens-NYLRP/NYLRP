@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express         = require('express');
 const session         = require('express-session');
+const MongoStore      = require('connect-mongo');
 const passport        = require('passport');
 const DiscordStrategy = require('passport-discord').Strategy;
 const mongoose        = require('mongoose');
