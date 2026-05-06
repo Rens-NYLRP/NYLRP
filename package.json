@@ -5,16 +5,23 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node index.js",
+    "dashboard": "node dashboard.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "connect-mongo": "^6.0.0",
     "discord.js": "^14.26.3",
     "dotenv": "^17.4.2",
+    "ejs": "^3.1.9",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
     "mongodb": "^7.2.0",
-    "mongoose": "^9.6.1"
+    "mongoose": "^9.6.1",
+    "passport": "^0.6.0",
+    "passport-discord": "^0.1.4"
   }
 }
