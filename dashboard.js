@@ -625,11 +625,15 @@ async function acSearchWarn(q){
     const d=await r.json();
     const all=[...(d.ingame||[]).map(p=>({name:p.name,sub:p.team,ingame:true})),...(d.db||[]).filter(n=>!(d.ingame||[]).find(p=>p.name===n)).map(n=>({name:n,sub:'in logs',ingame:false}))];
     if(!all.length){list.classList.remove('open');return;}
-    list.innerHTML=all.map(p=>`<div class="ac-item${p.ingame?' ac-item-ingame':''}" onclick="document.getElementById('warn-player').value='${p.name}';document.getElementById('ac-warn').classList.remove('open')">${p.ingame?'🟢':'📋'} <span><b>${p.name}</b> <small style="color:var(--muted)">${p.sub}</small></span></div>`).join('');
+    list.innerHTML=all.map(function(p){
+      var cls='ac-item'+(p.ingame?' ac-item-ingame':'');
+      var icon=p.ingame?'🟢':'📋';
+      return '<div class="'+cls+'" onclick="document.getElementById(\'warn-player\').value=\''+p.name.replace(/'/g,"\\'")+"';document.getElementById('ac-warn').classList.remove('open')\">"+icon+' <span><b>'+p.name+'</b> <small style="color:var(--muted)">'+p.sub+'</small></span></div>';
+    }).join('');
     list.classList.add('open');
   },200);
 }
-document.addEventListener('click',e=>{if(!e.target.closest('.ac-wrap'))document.getElementById('ac-warn').classList.remove('open');});
+document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-warn').classList.remove('open');});
 </script>`;
 
   res.send(layout(req.user, 'warnings', content, flash(req)));
@@ -736,11 +740,11 @@ async function acBolo(q){
     const d=await r.json();
     const all=[...(d.ingame||[]).map(p=>({name:p.name,sub:p.team,ingame:true})),...(d.db||[]).filter(n=>!(d.ingame||[]).find(p=>p.name===n)).map(n=>({name:n,sub:'in logs',ingame:false}))];
     if(!all.length){list.classList.remove('open');return;}
-    list.innerHTML=all.map(p=>`<div class="ac-item${p.ingame?' ac-item-ingame':''}" onclick="document.getElementById('bolo-player').value='${p.name}';document.getElementById('ac-bolo').classList.remove('open')">${p.ingame?'🟢':'📋'} <b>${p.name}</b> <small style="color:var(--muted)">${p.sub}</small></div>`).join('');
+    list.innerHTML=all.map(function(p){var cls='ac-item'+(p.ingame?' ac-item-ingame':'');var icon=p.ingame?'🟢':'📋';return '<div class="'+cls+'" onclick="document.getElementById(\'bolo-player\').value=\''+p.name.replace(/'/g,"\\'")+'\';document.getElementById(\'ac-bolo\').classList.remove(\'open\')">'+icon+' <b>'+p.name+'</b> <small style="color:var(--muted)">'+p.sub+'</small></div>';}).join('');
     list.classList.add('open');
   },200);
 }
-document.addEventListener('click',e=>{if(!e.target.closest('.ac-wrap'))document.getElementById('ac-bolo').classList.remove('open');});
+document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-bolo').classList.remove('open');});
 </script>`;
 
   res.send(layout(req.user, 'bolo', content, flash(req)));
@@ -1334,11 +1338,11 @@ async function acMainSearch(q){
     const d=await r.json();
     const all=[...(d.ingame||[]).map(p=>({name:p.name,sub:'🟢 In-Game · '+p.team,ingame:true})),...(d.db||[]).filter(n=>!(d.ingame||[]).find(p=>p.name===n)).map(n=>({name:n,sub:'📋 In logs',ingame:false}))];
     if(!all.length){list.classList.remove('open');return;}
-    list.innerHTML=all.map(p=>`<div class="ac-item${p.ingame?' ac-item-ingame':''}" onclick="window.location.href='/search?q='+encodeURIComponent('${p.name}')">${p.ingame?'🟢':'📋'} <span><b>${p.name}</b> <small style="color:var(--muted)">${p.sub}</small></span></div>`).join('');
+    list.innerHTML=all.map(function(p){var cls='ac-item'+(p.ingame?' ac-item-ingame':'');var icon=p.ingame?'🟢':'📋';return '<div class="'+cls+'" onclick="window.location.href=\'/search?q=\'+encodeURIComponent(\''+p.name.replace(/'/g,"\\'")+'\')">'+icon+' <span><b>'+p.name+'</b> <small style="color:var(--muted)">'+p.sub+'</small></span></div>';}).join('');
     list.classList.add('open');
   },200);
 }
-document.addEventListener('click',e=>{if(!e.target.closest('.ac-wrap'))document.getElementById('ac-main').classList.remove('open');});
+document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-main').classList.remove('open');});
 </script>`;
 
   res.send(layout(req.user, 'search', content));
