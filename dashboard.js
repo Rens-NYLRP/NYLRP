@@ -1269,21 +1269,107 @@ app.post('/api/punishment', isAuth, async (req, res) => {
   res.redirect('/punishments?success=Punishment+logged');
 });
 
+// ── Roblox profile helper ─────────────────────────────────
+async function getRobloxProfile(username) {
+  try {
+    const r = await fetch('https://users.roblox.com/v1/usernames/users', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ usernames: [username], excludeBannedUsers: false }) });
+    const d = await r.json();
+    const user = d.data?.[0];
+    if (!user) return null;
+    const [details, avatar, friends] = await Promise.allSettled([
+      fetch('https://users.roblox.com/v1/users/' + user.id).then(r=>r.json()),
+      fetch('https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=' + user.id + '&size=150x150&format=Png').then(r=>r.json()),
+      fetch('https://friends.roblox.com/v1/users/' + user.id + '/friends/count').then(r=>r.json()),
+    ]);
+    return {
+      id: user.id,
+      name: user.name,
+      displayName: details.value?.displayName || user.name,
+      description: details.value?.description || '',
+      created: details.value?.created,
+      isBanned: details.value?.isBanned || false,
+      avatarUrl: avatar.value?.data?.[0]?.imageUrl || null,
+      friendCount: friends.value?.count ?? null,
+    };
+  } catch(e) { return null; }
+}
+
+// ── API: Roblox profile lookup ────────────────────────────
+app.get('/api/roblox/profile', isAuth, async (req, res) => {
+  const username = req.query.username || '';
+  if (!username) return res.json(null);
+  const profile = await getRobloxProfile(username);
+  res.json(profile);
+});
+
 // ── Search ────────────────────────────────────────────────
 app.get('/search', isAuth, async (req, res) => {
   const q = req.query.q || '';
   let results = [], robloxUser = null;
   if (q) {
     results = await Punishment.find({ guildId: GUILD_ID, $or: [{ targetUsername: { $regex: q, $options: 'i' } }, { targetRobloxId: q }] }).sort({ createdAt: -1 });
-    try { const r = await fetch(`https://users.roblox.com/v1/usernames/users`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ usernames: [q], excludeBannedUsers: false }) }); const d = await r.json(); robloxUser = d.data?.[0] ?? null; } catch {}
+    robloxUser = await getRobloxProfile(q);
   }
 
-  // Get in-game players for autocomplete header
+  const warnings = q ? await Warning.find({ guildId: GUILD_ID, targetUsername: { $regex: q, $options: 'i' } }) : [];
   const cfg = await getConfig();
   const key = cfg?.erlcLogs?.serverKey || ERLC_API_KEY;
   let ingamePlayers = [];
   try { const p = await erlc('/server/players', 'GET', null, key); ingamePlayers = Object.values(p).map(p=>p.Player); } catch {}
   const ingameMatch = q ? ingamePlayers.filter(n => n.toLowerCase().includes(q.toLowerCase())) : [];
+  const isIngame = ingamePlayers.some(n => n.toLowerCase() === q.toLowerCase());
+  const accountAge = robloxUser?.created ? Math.floor((Date.now() - new Date(robloxUser.created)) / (1000*60*60*24)) : null;
+
+  const profileCard = robloxUser ? `
+<div class="panel" style="margin:0">
+  <div style="background:linear-gradient(135deg,var(--surface2),var(--surface3));padding:24px;display:flex;flex-direction:column;align-items:center;text-align:center;border-bottom:1px solid var(--border)">
+    <div style="position:relative;margin-bottom:14px">
+      <img src="${robloxUser.avatarUrl||''}" onerror="this.src='https://cdn.discordapp.com/embed/avatars/0.png'" style="width:90px;height:90px;border-radius:50%;border:3px solid ${robloxUser.isBanned?'var(--danger)':'var(--accent)'};background:var(--surface3)">
+      ${isIngame ? '<span style="position:absolute;bottom:2px;right:2px;width:18px;height:18px;background:var(--success);border-radius:50%;border:2px solid var(--surface)"></span>' : ''}
+    </div>
+    <div style="font-size:20px;font-weight:800;letter-spacing:-.3px">${robloxUser.displayName}</div>
+    ${robloxUser.displayName !== robloxUser.name ? '<div style="font-size:12px;color:var(--muted);margin-top:2px">@'+robloxUser.name+'</div>' : ''}
+    <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap;justify-content:center">
+      ${robloxUser.isBanned ? '<span class="badge br">🔨 Banned</span>' : '<span class="badge bg">✅ Active</span>'}
+      ${isIngame ? '<span class="badge ba">🟢 In-Game</span>' : ''}
+      ${results.length ? '<span class="badge br">⚠️ '+results.length+' log'+(results.length!==1?'s':'')+'</span>' : '<span class="badge bg">✅ Clean</span>'}
+    </div>
+  </div>
+  <div style="padding:16px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
+      <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-weight:700">Roblox ID</div>
+        <div style="font-size:13px;font-weight:700;margin-top:3px;font-family:'JetBrains Mono',monospace">${robloxUser.id}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-weight:700">Friends</div>
+        <div style="font-size:13px;font-weight:700;margin-top:3px">${robloxUser.friendCount ?? '—'}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-weight:700">Account Age</div>
+        <div style="font-size:13px;font-weight:700;margin-top:3px">${accountAge !== null ? accountAge+'d' : '—'}</div>
+      </div>
+      <div style="background:var(--surface2);border-radius:8px;padding:10px;text-align:center">
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-weight:700">Joined</div>
+        <div style="font-size:12px;font-weight:700;margin-top:3px">${robloxUser.created ? new Date(robloxUser.created).toLocaleDateString() : '—'}</div>
+      </div>
+    </div>
+    ${robloxUser.description ? '<div style="font-size:11px;color:var(--muted);background:var(--surface2);border-radius:8px;padding:10px;margin-bottom:12px;max-height:60px;overflow:hidden">'+robloxUser.description.slice(0,120)+(robloxUser.description.length>120?'...':'')+'</div>' : ''}
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <a href="https://www.roblox.com/users/${robloxUser.id}/profile" target="_blank" class="btn btn-ghost btn-block">🔗 Roblox Profile</a>
+      <a href="/punishments" class="btn btn-ghost btn-block">🔨 Log Punishment</a>
+    </div>
+  </div>
+</div>` : '';
+
+  const historyPanel = `
+<div>
+  <div class="panel" style="margin-bottom:14px">
+    <div class="panel-header"><div class="panel-title">🔨 Punishment History <span class="badge ${results.length?'br':'bg'}">${results.length}</span></div></div>
+    ${results.length ? '<div class="table-wrap"><table><thead><tr><th>Type</th><th>Reason</th><th>By</th><th>Date</th></tr></thead><tbody>'+results.map(p=>'<tr><td><span class="badge '+(p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':'by')+'">'+p.type+'</span></td><td class="wrap" style="max-width:180px">'+(p.reason||'—')+'</td><td>'+(p.moderatorTag||'—')+'</td><td>'+new Date(p.createdAt).toLocaleDateString()+'</td></tr>').join('')+'</tbody></table></div>' : '<div class="empty">No punishments ✅</div>'}
+  </div>
+  ${warnings.length ? '<div class="panel"><div class="panel-header"><div class="panel-title">⚠️ Warnings <span class="badge by">'+warnings.length+'</span></div></div><div class="table-wrap"><table><thead><tr><th>Reason</th><th>By</th><th>Date</th><th>DM</th></tr></thead><tbody>'+warnings.map(w=>'<tr><td class="wrap">'+(w.reason||'—')+'</td><td>'+(w.issuedBy||'—')+'</td><td>'+new Date(w.createdAt).toLocaleDateString()+'</td><td>'+(w.dmSent?'<span class="badge bg">✓</span>':'—')+'</td></tr>').join('')+'</tbody></table></div></div>' : ''}
+</div>`;
 
   const content = `
 <div class="panel">
@@ -1292,7 +1378,7 @@ app.get('/search', isAuth, async (req, res) => {
     <form method="GET" class="form-row">
       <div class="fg" style="flex:1;margin:0">
         <div class="ac-wrap">
-          <input name="q" value="${q}" placeholder="Enter Roblox username or ID..." id="search-input" autocomplete="off" oninput="acMainSearch(this.value)" required>
+          <input name="q" value="${q}" placeholder="Enter Roblox username or ID..." id="search-input" autocomplete="off" oninput="acMainSearch(this.value)">
           <div class="ac-list" id="ac-main"></div>
         </div>
       </div>
@@ -1301,53 +1387,30 @@ app.get('/search', isAuth, async (req, res) => {
   </div>
 </div>
 
-${ingameMatch.length && q ? `
-<div class="alert alert-w">🟢 <b>In-Game Matches:</b> ${ingameMatch.slice(0,5).map(n=>`<a href="/search?q=${n}" style="color:var(--warn);margin-left:8px;font-weight:700">${n}</a>`).join('')}</div>` : ''}
+${ingameMatch.length && q ? '<div class="alert alert-w">🟢 <b>In-Game:</b> '+ingameMatch.slice(0,5).map(n=>'<a href="/search?q='+encodeURIComponent(n)+'" style="color:var(--warn);margin-left:8px;font-weight:700">'+n+'</a>').join('')+'</div>' : ''}
 
-${q ? `
-${robloxUser ? `
-<div class="panel">
-  <div class="panel-header"><div class="panel-title">👤 Roblox Profile</div></div>
-  <div class="panel-body" style="display:flex;align-items:center;gap:16px">
-    <img src="https://www.roblox.com/headshot-thumbnail/image?userId=${robloxUser.id}&width=100&height=100&format=png" style="width:60px;height:60px;border-radius:10px;background:var(--surface2)">
-    <div>
-      <div style="font-size:18px;font-weight:800">${robloxUser.name}</div>
-      <div style="color:var(--muted);font-size:12px;margin-top:2px">ID: ${robloxUser.id}</div>
-      <a href="https://www.roblox.com/users/${robloxUser.id}/profile" target="_blank" class="btn btn-ghost btn-sm" style="margin-top:8px">View Profile →</a>
-    </div>
-    <div style="margin-left:auto;text-align:center">
-      <div style="font-size:32px;font-weight:800;color:${results.length?'var(--danger)':'var(--success)'}">${results.length}</div>
-      <div style="font-size:11px;color:var(--muted)">Punishment${results.length!==1?'s':''}</div>
-    </div>
-  </div>
-</div>` : ''}
-<div class="panel">
-  <div class="panel-header"><div class="panel-title">📋 Punishment History for "${q}" <span class="badge ${results.length?'br':'bg'}">${results.length}</span></div></div>
-  ${results.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>Reason</th><th>By</th><th>Date</th></tr></thead><tbody>
-    ${results.map(p=>`<tr><td><span class="badge ${p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':'by'}">${p.type}</span></td><td class="wrap">${p.reason||'—'}</td><td>${p.moderatorTag||'—'}</td><td>${new Date(p.createdAt).toLocaleDateString()}</td></tr>`).join('')}
-  </tbody></table></div>` : '<div class="empty">No punishments found for this player ✅</div>'}
-</div>` : ''}
+${q && robloxUser ? '<div class="g12">'+profileCard+historyPanel+'</div>' : ''}
+${q && !robloxUser ? '<div class="panel"><div class="empty"><div class="empty-icon">👤</div>No Roblox user found for "'+q+'"</div></div>' : ''}
 
 <script>
-let smt;
-async function acMainSearch(q){
-  clearTimeout(smt);const list=document.getElementById('ac-main');
+var smt;
+function acMainSearch(q){
+  clearTimeout(smt);var list=document.getElementById('ac-main');
   if(!q||q.length<2){list.classList.remove('open');return;}
-  smt=setTimeout(async()=>{
-    const r=await fetch('/api/players/search?q='+encodeURIComponent(q));
-    const d=await r.json();
-    const all=[...(d.ingame||[]).map(p=>({name:p.name,sub:'🟢 In-Game · '+p.team,ingame:true})),...(d.db||[]).filter(n=>!(d.ingame||[]).find(p=>p.name===n)).map(n=>({name:n,sub:'📋 In logs',ingame:false}))];
-    if(!all.length){list.classList.remove('open');return;}
-    list.innerHTML=all.map(function(p){var cls='ac-item'+(p.ingame?' ac-item-ingame':'');var icon=p.ingame?'🟢':'📋';return '<div class="'+cls+'" onclick="window.location.href=\'/search?q=\'+encodeURIComponent(\''+p.name.replace(/'/g,"\\'")+'\')">'+icon+' <span><b>'+p.name+'</b> <small style="color:var(--muted)">'+p.sub+'</small></span></div>';}).join('');
-    list.classList.add('open');
-  },200);
+  smt=setTimeout(function(){
+    fetch('/api/players/search?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
+      var all=(d.ingame||[]).map(function(p){return{name:p.name,sub:'In-Game: '+p.team,ingame:true};}).concat((d.db||[]).filter(function(n){return!(d.ingame||[]).find(function(p){return p.name===n;});}).map(function(n){return{name:n,sub:'In logs',ingame:false};}));
+      if(!all.length){list.classList.remove('open');return;}
+      list.innerHTML=all.map(function(p){return '<div class="ac-item'+(p.ingame?' ac-item-ingame':'')+'" onclick="window.location.href=\'?q='+encodeURIComponent(p.name)+'\'">'+( p.ingame?'🟢':'📋')+' <b>'+p.name+'</b> <small style=\'color:var(--muted)\'>'+p.sub+'</small></div>';}).join('');
+      list.classList.add('open');
+    });
+  },250);
 }
 document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-main').classList.remove('open');});
 </script>`;
 
   res.send(layout(req.user, 'search', content));
 });
-
 // ── Infractions ───────────────────────────────────────────
 app.get('/infractions', isAuth, async (req, res) => {
   const cfg = await getConfig();
