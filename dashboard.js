@@ -73,7 +73,7 @@ async function sendChannelMessage(channelId, content, embed = null) {
 // ── Express ───────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(session({ secret: SESSION_SECRET, resave: false, saveUninitialized: false, cookie: { maxAge: 604800000 }, store: MongoStore.create({ mongoUrl: process.env.MONGODB_URI, ttl: 7 * 24 * 60 * 60 }) }));
+app.use(session({ secret: SESSION_SECRET, resave: false, saveUninitialized: false, cookie: { maxAge: 604800000 }, store: new MongoStore({ mongoUrl: process.env.MONGODB_URI, ttl: 7 * 24 * 60 * 60 }) }));
 app.use(passport.initialize());
 app.use(passport.session());
 
