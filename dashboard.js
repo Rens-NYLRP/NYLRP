@@ -423,22 +423,14 @@ app.get('/moderator', isAuth, async (req, res) => {
 
     <div class="panel" style="flex:1">
       <div class="panel-header">
-        <div class="panel-title">📋 Punishment Logs</div>
-        <div class="search-bar" style="margin:0;padding:4px 8px;font-size:11px">🔍 <input placeholder="Search..." oninput="filterPun(this.value)" style="font-size:11px"></div>
+        <div class="panel-title" id="player-log-title">📋 Player Logs</div>
+        <a href="/punishments" class="btn btn-ghost btn-sm">All Logs →</a>
       </div>
-      <div style="max-height:420px;overflow-y:auto" id="pun-list">
-        ${recentPunishments.map(p=>`
-          <div class="puncard" style="margin:8px;border-radius:8px" data-pun="${p.targetUsername.toLowerCase()}">
-            <div class="puncard-header">
-              <span class="puncard-user">${p.targetUsername}</span>
-              <span class="badge ${p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':p.type==='bolo'?'br':'by'}">${p.type}</span>
-            </div>
-            <div class="puncard-meta">
-              ${p.reason||'No reason'}<br>
-              <span>By ${p.moderatorTag||'?'} · ${timeAgo(p.createdAt)}</span>
-              ${p.targetRobloxId?`<br>Roblox ID: <code>${p.targetRobloxId}</code>`:''}
-            </div>
-          </div>`).join('')}
+      <div style="max-height:500px;overflow-y:auto" id="player-log-panel">
+        <div style="padding:40px;text-align:center;color:var(--muted);font-size:13px">
+          <div style="font-size:28px;margin-bottom:10px;opacity:.4">👤</div>
+          Select a player to view their logs
+        </div>
       </div>
     </div>
   </div>
@@ -460,45 +452,125 @@ app.get('/moderator', isAuth, async (req, res) => {
 </div>
 
 <script>
-function filterPlayers(q){document.querySelectorAll('.player-row').forEach(r=>{r.style.display=r.dataset.name.includes(q.toLowerCase())?'':'none'});}
-function filterPun(q){document.querySelectorAll('[data-pun]').forEach(r=>{r.style.display=r.dataset.pun.includes(q.toLowerCase())?'':'none'});}
+function filterPlayers(q){document.querySelectorAll('.player-row').forEach(function(r){r.style.display=r.dataset.name.includes(q.toLowerCase())?'':'none';});}
 function openPM(name){document.getElementById('pm-modal').style.display='flex';document.getElementById('pm-player').value=name;}
 function closePM(){document.getElementById('pm-modal').style.display='none';}
 document.getElementById('pm-modal').addEventListener('click',function(e){if(e.target===this)closePM();});
-// Keyboard shortcut Ctrl+I to focus player input
 document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='i'){e.preventDefault();document.getElementById('mod-player-input').focus();}});
-// Autocomplete
-let acTimeout;
-async function acSearch(q){
+
+var acTimeout;
+function acSearch(q){
   clearTimeout(acTimeout);
-  const list=document.getElementById('ac-list');
+  var list=document.getElementById('ac-list');
   if(!q||q.length<2){list.classList.remove('open');return;}
-  acTimeout=setTimeout(async()=>{
-    const r=await fetch('/api/players/search?q='+encodeURIComponent(q));
-    const d=await r.json();
-    const ingame=d.ingame||[],db=d.db||[];
-    if(!ingame.length&&!db.length){list.classList.remove('open');return;}
-    list.innerHTML='';
-    ingame.forEach(p=>{
-      const el=document.createElement('div');
-      el.className='ac-item ac-item-ingame';
-      el.innerHTML='🟢 <span><b>'+p.name+'</b> <small style="color:var(--muted)">'+p.team+'</small></span>';
-      el.onclick=()=>{document.getElementById('mod-player-input').value=p.name;list.classList.remove('open');};
-      list.appendChild(el);
+  acTimeout=setTimeout(function(){
+    fetch('/api/players/search?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
+      var ingame=d.ingame||[], db=d.db||[];
+      if(!ingame.length&&!db.length){list.classList.remove('open');return;}
+      list.innerHTML='';
+      ingame.forEach(function(p){
+        var el=document.createElement('div');
+        el.className='ac-item ac-item-ingame';
+        el.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;';
+        var img=document.createElement('img');
+        img.src='https://cdn.discordapp.com/embed/avatars/0.png';
+        img.style.cssText='width:36px;height:36px;border-radius:50%;background:var(--surface3);flex-shrink:0;border:2px solid var(--accent)';
+        fetch('/api/roblox/profile?username='+encodeURIComponent(p.name)).then(function(r){return r.json();}).then(function(prof){if(prof&&prof.avatarUrl)img.src=prof.avatarUrl;});
+        var info=document.createElement('div');
+        info.innerHTML='<div style="font-weight:700;font-size:13px">'+p.name+'</div><div style="font-size:11px;color:var(--success)">🟢 In-Game &middot; '+p.team+'</div>';
+        el.appendChild(img);el.appendChild(info);
+        el.addEventListener('click',function(){selectPlayer(p.name);});
+        list.appendChild(el);
+      });
+      db.filter(function(n){return!ingame.find(function(p){return p.name===n;});}).forEach(function(n){
+        var el=document.createElement('div');
+        el.className='ac-item';
+        el.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;';
+        var img=document.createElement('img');
+        img.src='https://cdn.discordapp.com/embed/avatars/0.png';
+        img.style.cssText='width:36px;height:36px;border-radius:50%;background:var(--surface3);flex-shrink:0;';
+        fetch('/api/roblox/profile?username='+encodeURIComponent(n)).then(function(r){return r.json();}).then(function(prof){if(prof&&prof.avatarUrl)img.src=prof.avatarUrl;});
+        var info=document.createElement('div');
+        info.innerHTML='<div style="font-weight:700;font-size:13px">'+n+'</div><div style="font-size:11px;color:var(--muted)">📋 In logs</div>';
+        el.appendChild(img);el.appendChild(info);
+        el.addEventListener('click',function(){selectPlayer(n);});
+        list.appendChild(el);
+      });
+      list.classList.add('open');
     });
-    db.filter(n=>!ingame.find(p=>p.name===n)).forEach(n=>{
-      const el=document.createElement('div');
-      el.className='ac-item';
-      el.innerHTML='📋 <span>'+n+' <small style="color:var(--muted)">in logs</small></span>';
-      el.onclick=()=>{document.getElementById('mod-player-input').value=n;list.classList.remove('open');};
-      list.appendChild(el);
-    });
-    list.classList.add('open');
-  },200);
+  },250);
 }
+
+function selectPlayer(name){
+  document.getElementById('mod-player-input').value=name;
+  document.getElementById('ac-list').classList.remove('open');
+  loadPlayerPanel(name);
+}
+
+function loadPlayerPanel(username){
+  var panel=document.getElementById('player-log-panel');
+  var title=document.getElementById('player-log-title');
+  title.textContent=username+"'s Logs";
+  panel.innerHTML='<div style="padding:30px;text-align:center;color:var(--muted);font-size:13px">Loading...</div>';
+  Promise.all([
+    fetch('/api/roblox/profile?username='+encodeURIComponent(username)).then(function(r){return r.json();}),
+    fetch('/api/player/logs?username='+encodeURIComponent(username)).then(function(r){return r.json();})
+  ]).then(function(results){
+    var prof=results[0], logs=results[1];
+    var html='';
+    if(prof){
+      var age=prof.created?Math.floor((Date.now()-new Date(prof.created))/(86400000)):null;
+      html+='<div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--surface2)">'
+        +'<img src="'+(prof.avatarUrl||'https://cdn.discordapp.com/embed/avatars/0.png')+'" style="width:52px;height:52px;border-radius:50%;border:2px solid '+(prof.isBanned?'var(--danger)':'var(--accent)')+';flex-shrink:0">'
+        +'<div style="flex:1;min-width:0">'
+          +'<div style="font-size:15px;font-weight:800">'+prof.displayName+'</div>'
+          +(prof.displayName!==prof.name?'<div style="font-size:11px;color:var(--muted)">@'+prof.name+'</div>':'')
+          +'<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">'
+            +(prof.isBanned?'<span class="badge br">🔨 Banned</span>':'<span class="badge bg">✅ Active</span>')
+            +(age!==null?'<span class="badge ba">'+age+'d old</span>':'')
+            +(prof.friendCount!==null?'<span class="badge bb">'+prof.friendCount+' friends</span>':'')
+          +'</div>'
+        +'</div>'
+        +'<div style="text-align:right;flex-shrink:0">'
+          +'<div style="font-size:26px;font-weight:800;color:'+(logs.total?'var(--danger)':'var(--success)')+'">'+logs.total+'</div>'
+          +'<div style="font-size:10px;color:var(--muted)">log'+(logs.total!==1?'s':'')+'</div>'
+        +'</div>'
+      +'</div>';
+    }
+    if(logs.punishments&&logs.punishments.length){
+      html+='<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Punishments ('+logs.punishments.length+')</div>';
+      logs.punishments.forEach(function(p){
+        var bc=p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':'by';
+        html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+            +'<span class="badge '+bc+'">'+p.type+'</span>'
+            +'<span style="font-size:10px;color:var(--muted)">'+new Date(p.createdAt).toLocaleDateString()+'</span>'
+          +'</div>'
+          +'<div style="font-size:12px;color:var(--text2)">'+(p.reason||'No reason')+'</div>'
+          +'<div style="font-size:11px;color:var(--muted);margin-top:2px">By '+(p.moderatorTag||'?')+'</div>'
+        +'</div>';
+      });
+    }
+    if(logs.warnings&&logs.warnings.length){
+      html+='<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Warnings ('+logs.warnings.length+')</div>';
+      logs.warnings.forEach(function(w){
+        html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
+            +'<span class="badge by">⚠️ warning</span>'
+            +'<span style="font-size:10px;color:var(--muted)">'+new Date(w.createdAt).toLocaleDateString()+'</span>'
+          +'</div>'
+          +'<div style="font-size:12px;color:var(--text2)">'+(w.reason||'No reason')+'</div>'
+          +'<div style="font-size:11px;color:var(--muted);margin-top:2px">By '+(w.issuedBy||'?')+'</div>'
+        +'</div>';
+      });
+    }
+    if(!logs.total) html+='<div style="padding:30px;text-align:center;color:var(--muted);font-size:13px">✅ No logs found</div>';
+    panel.innerHTML=html;
+  }).catch(function(){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Failed to load</div>';});
+}
+
 document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-list').classList.remove('open');});
-// Shift timer
-setInterval(()=>{document.querySelectorAll('[data-start]').forEach(el=>{const s=parseInt(el.dataset.start);if(!s)return;const d=Date.now()-s;const h=Math.floor(d/3600000),m=Math.floor((d%3600000)/60000),sec=Math.floor((d%60000)/1000);el.textContent=(h>0?h+'h ':'')+m+'m '+sec+'s';});},1000);
+setInterval(function(){document.querySelectorAll('[data-start]').forEach(function(el){var s=parseInt(el.dataset.start);if(!s)return;var d=Date.now()-s;var h=Math.floor(d/3600000),m=Math.floor((d%3600000)/60000),sec=Math.floor((d%60000)/1000);el.textContent=(h>0?h+'h ':'')+m+'m '+sec+'s';});},1000);
 </script>`;
 
   res.send(layout(req.user, 'moderator', content, flash(req)));
@@ -1357,6 +1429,16 @@ app.get('/api/roblox/profile', isAuth, async (req, res) => {
 });
 
 // ── Search ────────────────────────────────────────────────
+app.get('/api/player/logs', isAuth, async (req, res) => {
+  const username = req.query.username || '';
+  if (!username) return res.json({ punishments: [], warnings: [], total: 0 });
+  const [punishments, warnings] = await Promise.all([
+    Punishment.find({ guildId: GUILD_ID, targetUsername: { $regex: username, $options: 'i' } }).sort({ createdAt: -1 }).limit(20),
+    Warning.find({ guildId: GUILD_ID, targetUsername: { $regex: username, $options: 'i' } }).sort({ createdAt: -1 }).limit(10),
+  ]);
+  res.json({ punishments, warnings, total: punishments.length + warnings.length });
+});
+
 app.get('/search', isAuth, async (req, res) => {
   const q = req.query.q || '';
   let results = [], robloxUser = null;
