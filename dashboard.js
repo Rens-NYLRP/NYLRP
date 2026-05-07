@@ -19,7 +19,7 @@ const ERLC_API_KEY   = process.env.ERLC_API_KEY;
 const ERLC_BASE      = 'https://api.policeroleplay.community/v1';
 const GUILD_ID       = '1379173469132030062';
 const DISCORD_BASE   = 'https://discord.com/api/v10';
-const BOT_TOKEN      = process.env.DISCORD_BOT_TOKEN;
+const BOT_TOKEN      = process.env.TOKEN;
 
 // ── DB ────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI).then(() => console.log('✅ Dashboard DB connected')).catch(console.error);
@@ -67,6 +67,59 @@ async function sendChannelMessage(channelId, content, embed = null) {
   const body = { content };
   if (embed) body.embeds = [embed];
   return discordApi(`/channels/${channelId}/messages`, 'POST', body);
+}
+
+// ── Discord Guild helpers ─────────────────────────────────
+async function getGuildRoles() {
+  try { const r = await discordApi('/guilds/'+GUILD_ID+'/roles'); return (r||[]).sort((a,b)=>b.position-a.position).filter(r=>r.name!=='@everyone'); } catch { return []; }
+}
+async function getGuildChannels() {
+  try { const c = await discordApi('/guilds/'+GUILD_ID+'/channels'); return (c||[]).filter(c=>c.type===0||c.type===5).sort((a,b)=>a.position-b.position); } catch { return []; }
+}
+async function getMemberRoles(userId) {
+  try { const m = await discordApi('/guilds/'+GUILD_ID+'/members/'+userId); return m?.roles||[]; } catch { return []; }
+}
+
+// ── Permission definitions ────────────────────────────────
+const ALL_PERMS = [
+  { key:'viewPanel',         label:'View Panel & In-Game',      icon:'🖥️' },
+  { key:'viewLogs',          label:'View Logs & Audit Trail',   icon:'📋' },
+  { key:'viewMembers',       label:'View Members',               icon:'👥' },
+  { key:'manageShifts',      label:'Manage Shifts',              icon:'⏱️' },
+  { key:'createPunishments', label:'Create Punishments',         icon:'🔨' },
+  { key:'deletePunishments', label:'Delete Punishments & Logs',  icon:'🗑️' },
+  { key:'manageLOA',         label:'Approve / Deny LOA',         icon:'🏖️' },
+  { key:'manageSettings',    label:'Manage Settings',            icon:'⚙️' },
+  { key:'viewErlcPanel',     label:'View ER:LC Panel',           icon:'📡' },
+  { key:'runCommands',       label:'Run ER:LC Commands',         icon:'▶️' },
+  { key:'manageRoles',       label:'Manage Dashboard Roles',     icon:'🔐' },
+  { key:'manageRoster',      label:'Manage Staff Roster',        icon:'📋' },
+  { key:'sendAnnouncements', label:'Send Announcements',         icon:'📢' },
+  { key:'manageBolo',        label:'Manage BOLOs',               icon:'👁️' },
+  { key:'manageWarnings',    label:'Issue / Delete Warnings',    icon:'⚠️' },
+  { key:'viewChatlogs',      label:'View Chat Logs',             icon:'💬' },
+  { key:'manageSessions',    label:'Manage Sessions',            icon:'📈' },
+  { key:'administrator',     label:'Administrator (all perms)',  icon:'👑' },
+];
+
+// Check if user has a permission
+async function hasPerm(userId, perm) {
+  const memberRoleIds = await getMemberRoles(userId);
+  const dashRoles = await DashRole.find({ guildId: GUILD_ID, discordRoleId: { $in: memberRoleIds } });
+  for (const dr of dashRoles) {
+    if (dr.permissions?.administrator || dr.permissions?.[perm]) return true;
+  }
+  return false;
+}
+
+// Middleware: require a permission
+function requirePerm(perm) {
+  return async (req, res, next) => {
+    if (!req.isAuthenticated()) return res.redirect('/login');
+    const ok = await hasPerm(req.user.id, perm);
+    if (ok) return next();
+    res.status(403).send('<html><body style="background:#0a0a0b;color:#f0f0f5;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:12px"><div style="font-size:48px">🔒</div><div style="font-size:20px;font-weight:700">Access Denied</div><div style="color:#666;font-size:13px">You do not have the <b style="color:#00e5a0">'+perm+'</b> permission</div><a href="/panel" style="margin-top:12px;background:#00e5a0;color:#000;padding:8px 20px;border-radius:8px;text-decoration:none;font-weight:700">← Back to Panel</a></body></html>');
+  };
 }
 
 // ── Express ───────────────────────────────────────────────
@@ -1206,14 +1259,15 @@ app.get('/punishments', isAuth, async (req, res) => {
     <div class="search-bar">🔍 <input placeholder="Search player name..." value="${search}" onchange="window.location.href='/punishments?q='+this.value"></div>
     <div class="panel">
       <div class="panel-header"><div class="panel-title">📋 Punishment Logs <span class="badge ba">${punishments.length}</span></div></div>
-      ${punishments.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>Player</th><th>Roblox ID</th><th>Reason</th><th>By</th><th>Date</th></tr></thead><tbody>
+      ${punishments.length ? `<div class="table-wrap"><table><thead><tr><th>Type</th><th>Player</th><th>Roblox ID</th><th>Reason</th><th>By</th><th>Date</th><th></th></tr></thead><tbody>
         ${punishments.map(p=>`<tr>
           <td><span class="badge ${p.type==='ban'?'br':p.type==='kick'?'by':p.type==='tempban'?'bp':p.type==='bolo'?'br':p.type==='note'?'bb':'by'}">${p.type}</span></td>
-          <td><b>${p.targetUsername}</b></td>
+          <td><b><a href="/search?q=${p.targetUsername}" style="color:var(--accent)">${p.targetUsername}</a></b></td>
           <td>${p.targetRobloxId?`<code>${p.targetRobloxId}</code>`:'—'}</td>
           <td class="wrap" style="max-width:200px">${p.reason||'—'}</td>
           <td>${p.moderatorTag||'—'}</td>
           <td>${new Date(p.createdAt).toLocaleDateString()}</td>
+          <td><form action="/api/punishment/delete/${p._id}" method="POST" onsubmit="return confirm('Delete this log?')"><button class="btn btn-danger btn-sm">🗑️</button></form></td>
         </tr>`).join('')}
       </tbody></table></div>` : '<div class="empty">No punishment logs found</div>'}
     </div>
@@ -1566,18 +1620,47 @@ app.get('/logs', isAuth, async (req, res) => {
 
 // ── Dashboard Roles ───────────────────────────────────────
 app.get('/roles', isAuth, async (req, res) => {
-  const dashRoles = await DashRole.find({ guildId: GUILD_ID });
-  const PERMS = [
-    { key: 'viewPanel',         label: 'View Panel & In-Game' },
-    { key: 'viewLogs',          label: 'View Logs' },
-    { key: 'viewMembers',       label: 'View Members' },
-    { key: 'manageShifts',      label: 'Manage Shifts' },
-    { key: 'createPunishments', label: 'Create Punishments' },
-    { key: 'manageLOA',         label: 'Approve/Deny LOA' },
-    { key: 'manageSettings',    label: 'Manage Settings' },
-    { key: 'viewErlcPanel',     label: 'View ER:LC Panel' },
-    { key: 'runCommands',       label: 'Run ER:LC Commands' },
-  ];
+  const [dashRoles, guildRoles] = await Promise.all([
+    DashRole.find({ guildId: GUILD_ID }),
+    getGuildRoles(),
+  ]);
+
+  const roleOptions = guildRoles.map(r =>
+    '<option value="'+r.id+'" data-color="'+r.color+'">'+r.name+'</option>'
+  ).join('');
+
+  const permGrid = ALL_PERMS.map(p =>
+    '<div class="perm-check"><input type="checkbox" name="'+p.key+'" id="p_'+p.key+'"><label for="p_'+p.key+'">'+p.icon+' '+p.label+'</label></div>'
+  ).join('');
+
+  const existingRoles = dashRoles.map(r => {
+    const gRole = guildRoles.find(g => g.id === r.discordRoleId);
+    const color = gRole?.color ? '#'+gRole.color.toString(16).padStart(6,'0') : '#5865F2';
+    const permBadges = ALL_PERMS.filter(p => r.permissions?.[p.key] || r.permissions?.administrator)
+      .map(p => '<span class="badge bb" style="font-size:9px">'+p.icon+' '+p.label+'</span>').join('');
+    return '<div class="panel">'+
+      '<div class="panel-header">'+
+        '<div class="panel-title">'+
+          '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:'+color+';margin-right:6px"></span>'+
+          r.roleName+
+          ' <code style="font-size:10px">'+r.discordRoleId+'</code>'+
+        '</div>'+
+        '<form action="/api/roles/delete/'+r._id+'" method="POST" style="display:inline">'+
+          '<button type="submit" class="btn btn-danger btn-sm">🗑️ Remove</button>'+
+        '</form>'+
+      '</div>'+
+      '<div class="panel-body">'+
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">'+permBadges+'</div>'+
+        '<details><summary style="font-size:11px;color:var(--muted);cursor:pointer">Edit permissions</summary>'+
+        '<form action="/api/roles/update/'+r._id+'" method="POST" style="margin-top:12px">'+
+          '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px;margin-bottom:12px">'+
+            ALL_PERMS.map(p => '<div class="perm-check"><input type="checkbox" name="'+p.key+'" '+(r.permissions?.[p.key]?'checked':'')+' id="u_'+r._id+'_'+p.key+'"><label for="u_'+r._id+'_'+p.key+'">'+p.icon+' '+p.label+'</label></div>').join('')+
+          '</div>'+
+          '<button type="submit" class="btn btn-accent btn-sm">💾 Save Changes</button>'+
+        '</form></details>'+
+      '</div>'+
+    '</div>';
+  }).join('');
 
   const content = `
 <div class="panel">
@@ -1585,29 +1668,44 @@ app.get('/roles', isAuth, async (req, res) => {
   <div class="panel-body">
     <form action="/api/roles/add" method="POST">
       <div class="g2">
-        <div class="fg"><label>Discord Role ID</label><input name="discordRoleId" placeholder="Role ID from Discord" required></div>
-        <div class="fg"><label>Role Name (display)</label><input name="roleName" placeholder="e.g. Moderator" required></div>
+        <div class="fg">
+          <label>Discord Role</label>
+          <select name="discordRoleId" required id="role-select" onchange="updateRoleName(this)">
+            <option value="">— Select a role from your server —</option>
+            ${roleOptions}
+          </select>
+        </div>
+        <div class="fg">
+          <label>Display Name</label>
+          <input name="roleName" id="role-name-input" placeholder="Auto-filled from Discord" required>
+        </div>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px;margin-bottom:14px">
-        ${PERMS.map(p=>`<div class="perm-check"><input type="checkbox" name="${p.key}" id="p_${p.key}"><label for="p_${p.key}">${p.label}</label></div>`).join('')}
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px;margin-bottom:16px">
+        ${permGrid}
       </div>
-      <button type="submit" class="btn btn-accent">➕ Add Role</button>
+      <div style="display:flex;gap:8px">
+        <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllPerms(true)">✅ Select All</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllPerms(false)">❌ Clear All</button>
+        <button type="submit" class="btn btn-accent" style="margin-left:auto">➕ Add Role</button>
+      </div>
     </form>
   </div>
 </div>
 
-${dashRoles.length ? dashRoles.map(r=>`
-<div class="panel">
-  <div class="panel-header">
-    <div class="panel-title">🔐 ${r.roleName} <code style="font-size:10px">${r.discordRoleId}</code></div>
-    <form action="/api/roles/delete/${r._id}" method="POST"><button type="submit" class="btn btn-danger btn-sm">🗑️ Remove</button></form>
-  </div>
-  <div class="panel-body">
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:4px">
-      ${PERMS.map(p=>`<div class="perm-check"><input type="checkbox" ${r.permissions?.[p.key]?'checked':''} disabled><label style="${r.permissions?.[p.key]?'color:var(--accent)':''}">${p.label}</label></div>`).join('')}
-    </div>
-  </div>
-</div>`).join('') : '<div class="panel"><div class="empty">No dashboard roles configured yet</div></div>'}`;
+${existingRoles || '<div class="panel"><div class="empty">No dashboard roles configured yet</div></div>'}
+
+<script>
+var roleNames = {${guildRoles.map(r => '"'+r.id+'":"'+r.name.replace(/"/g,'\"')+'"').join(',')}};
+function updateRoleName(sel) {
+  var nameInput = document.getElementById('role-name-input');
+  if (sel.value && roleNames[sel.value]) nameInput.value = roleNames[sel.value];
+}
+function selectAllPerms(val) {
+  document.querySelectorAll('[name^="p_"],[id^="p_"]').forEach(function(cb){ if(cb.type==='checkbox') cb.checked=val; });
+  // also target by form checkboxes
+  document.querySelectorAll('form input[type=checkbox]').forEach(function(cb){ cb.checked=val; });
+}
+</script>`;
 
   res.send(layout(req.user, 'roles', content, flash(req)));
 });
@@ -1615,19 +1713,29 @@ ${dashRoles.length ? dashRoles.map(r=>`
 app.post('/api/roles/add', isAuth, async (req, res) => {
   const { discordRoleId, roleName, ...perms } = req.body;
   const permissions = {};
-  ['viewPanel','viewLogs','viewMembers','manageShifts','createPunishments','manageLOA','manageSettings','viewErlcPanel','runCommands'].forEach(k => { permissions[k] = !!perms[k]; });
+  ALL_PERMS.forEach(p => { permissions[p.key] = !!perms[p.key]; });
   await DashRole.create({ guildId: GUILD_ID, discordRoleId, roleName, permissions });
   res.redirect('/roles?success=Role+added');
 });
+
+app.post('/api/roles/update/:id', isAuth, async (req, res) => {
+  const permissions = {};
+  ALL_PERMS.forEach(p => { permissions[p.key] = !!req.body[p.key]; });
+  await DashRole.findByIdAndUpdate(req.params.id, { permissions });
+  res.redirect('/roles?success=Permissions+updated');
+});
+
 app.post('/api/roles/delete/:id', isAuth, async (req, res) => {
   await DashRole.findByIdAndDelete(req.params.id);
   res.redirect('/roles?success=Role+removed');
 });
-
 // ── Settings ──────────────────────────────────────────────
 app.get('/settings', isAuth, async (req, res) => {
   const cfg = await getConfig();
   const ec = cfg?.erlcLogs ?? {};
+  const [guildRoles, guildChannels] = await Promise.all([getGuildRoles(), getGuildChannels()]);
+
+  const channelOpts = '<option value="">— Select channel —</option>' + guildChannels.map(c=>'<option value="'+c.id+'">#'+c.name+'</option>').join('');
 
   const content = `
 <div class="g2">
@@ -1652,7 +1760,7 @@ app.get('/settings', isAuth, async (req, res) => {
           <div class="fg"><label>Server Full Name</label><input name="serverFullName" value="${process.env.SERVER_FULL_NAME||'New York Liberty Roleplay'}" placeholder="New York Liberty Roleplay"></div>
           <button type="submit" class="btn btn-accent">💾 Save Branding</button>
         </form>
-        <div style="margin-top:12px;font-size:12px;color:var(--muted)">Update these in your Render environment variables for permanent changes.</div>
+        <div style="margin-top:12px;font-size:12px;color:var(--muted)">Update these in Render environment variables for permanent changes.</div>
       </div>
     </div>
 
@@ -1661,7 +1769,7 @@ app.get('/settings', isAuth, async (req, res) => {
       <div class="panel-body">
         <form action="/api/settings/joinlink" method="POST">
           <div class="fg"><label>Join Link URL</label><input name="joinLink" placeholder="https://www.roblox.com/games/..." value="${cfg?.session?.joinLink||''}"></div>
-          <button type="submit" class="btn btn-accent">💾 Save Join Link</button>
+          <button type="submit" class="btn btn-accent">💾 Save</button>
         </form>
       </div>
     </div>
@@ -1670,25 +1778,40 @@ app.get('/settings', isAuth, async (req, res) => {
   <div>
     <div class="panel">
       <div class="panel-header"><div class="panel-title">📡 ER:LC Log Channels</div></div>
-      <div class="table-wrap"><table><thead><tr><th>Type</th><th>Status</th></tr></thead><tbody>
-        <tr><td>🔨 Kick/Ban</td><td>${ec.kickBans?'<span class="badge bg">✅ Set</span>':'<span class="badge br">Not set</span>'}</td></tr>
-        <tr><td>📥 Join/Leave</td><td>${ec.joinLeave?'<span class="badge bg">✅ Set</span>':'<span class="badge br">Not set</span>'}</td></tr>
-        <tr><td>⌨️ Commands</td><td>${ec.cmds?'<span class="badge bg">✅ Set</span>':'<span class="badge br">Not set</span>'}</td></tr>
-        <tr><td>🚨 Mod Calls</td><td>${ec.modCall?'<span class="badge bg">✅ Set</span>':'<span class="badge br">Not set</span>'}</td></tr>
-        <tr><td>💀 Kills</td><td>${ec.kills?'<span class="badge bg">✅ Set</span>':'<span class="badge br">Not set</span>'}</td></tr>
-      </tbody></table></div>
-      <div style="padding:12px 16px;font-size:12px;color:var(--muted)">Configure via <code>/setup erlclogs</code> in Discord</div>
+      <div class="panel-body">
+        <form action="/api/settings/erlcchannels" method="POST">
+          <div class="fg"><label>🔨 Kick/Ban Logs</label>
+            <select name="kickBans">${channelOpts.replace('value="'+ec.kickBans+'"','value="'+ec.kickBans+'" selected')}</select>
+          </div>
+          <div class="fg"><label>📥 Join/Leave Logs</label>
+            <select name="joinLeave">${channelOpts.replace('value="'+ec.joinLeave+'"','value="'+ec.joinLeave+'" selected')}</select>
+          </div>
+          <div class="fg"><label>⌨️ Command Logs</label>
+            <select name="cmds">${channelOpts.replace('value="'+ec.cmds+'"','value="'+ec.cmds+'" selected')}</select>
+          </div>
+          <div class="fg"><label>🚨 Mod Call Logs</label>
+            <select name="modCall">${channelOpts.replace('value="'+ec.modCall+'"','value="'+ec.modCall+'" selected')}</select>
+          </div>
+          <div class="fg"><label>💀 Kill Logs</label>
+            <select name="kills">${channelOpts.replace('value="'+ec.kills+'"','value="'+ec.kills+'" selected')}</select>
+          </div>
+          <div class="fg"><label>⚠️ Punishment Logs</label>
+            <select name="punishments">${channelOpts.replace('value="'+ec.punishments+'"','value="'+ec.punishments+'" selected')}</select>
+          </div>
+          <button type="submit" class="btn btn-accent btn-block">💾 Save Channels</button>
+        </form>
+      </div>
     </div>
 
     <div class="panel">
       <div class="panel-header"><div class="panel-title">⚙️ System Info</div></div>
       <div class="table-wrap"><table><tbody>
         <tr><td>Dashboard Version</td><td><span class="badge bg">v3.0</span></td></tr>
+        <tr><td>Discord Roles Loaded</td><td><span class="badge bg">${guildRoles.length} roles</span></td></tr>
+        <tr><td>Discord Channels Loaded</td><td><span class="badge bg">${guildChannels.length} channels</span></td></tr>
         <tr><td>Database</td><td><span class="badge bg">MongoDB Atlas</span></td></tr>
         <tr><td>Logs Retention</td><td><span class="badge bg">Forever ♾️</span></td></tr>
         <tr><td>Auto-DM on Warn</td><td><span class="badge bg">✅ Enabled</span></td></tr>
-        <tr><td>Chat Logs</td><td><span class="badge bg">✅ ERLC API</span></td></tr>
-        <tr><td>Player Autocomplete</td><td><span class="badge bg">✅ Live</span></td></tr>
       </tbody></table></div>
     </div>
   </div>
@@ -1696,7 +1819,6 @@ app.get('/settings', isAuth, async (req, res) => {
 
   res.send(layout(req.user, 'settings', content, flash(req)));
 });
-
 // ── API: ERLC Command ─────────────────────────────────────
 app.post('/api/erlc/command', isAuth, async (req, res) => {
   const cfg = await getConfig();
@@ -1739,6 +1861,50 @@ app.post('/api/erlc/key', isAuth, async (req, res) => {
 
 app.post('/api/settings/branding', isAuth, async (req, res) => {
   res.redirect('/settings?success=Update+SERVER_LOGO_URL+SERVER_NAME+and+SERVER_FULL_NAME+in+Render+env+vars');
+});
+
+app.post('/api/settings/erlcchannels', isAuth, async (req, res) => {
+  const { kickBans, joinLeave, cmds, modCall, kills, punishments } = req.body;
+  await mongoose.connection.db.collection('guildconfigs').updateOne(
+    { guildId: GUILD_ID },
+    { $set: {
+      'data.erlcLogs.kickBans': kickBans||null,
+      'data.erlcLogs.joinLeave': joinLeave||null,
+      'data.erlcLogs.cmds': cmds||null,
+      'data.erlcLogs.modCall': modCall||null,
+      'data.erlcLogs.kills': kills||null,
+      'data.erlcLogs.punishments': punishments||null,
+    }},
+    { upsert: true }
+  );
+  res.redirect('/settings?success=Log+channels+saved');
+});
+
+// ── Delete endpoints ──────────────────────────────────────
+app.post('/api/punishment/delete/:id', isAuth, async (req, res) => {
+  await Punishment.findByIdAndDelete(req.params.id);
+  await logActivity(req.user.id, req.user.username, 'punishment.delete', { id: req.params.id });
+  res.redirect((req.headers.referer||'/punishments')+'?success=Punishment+deleted');
+});
+
+app.post('/api/warnings/delete/:id', isAuth, async (req, res) => {
+  await Warning.findByIdAndDelete(req.params.id);
+  res.redirect((req.headers.referer||'/warnings')+'?success=Warning+deleted');
+});
+
+app.post('/api/erlclog/delete/:id', isAuth, async (req, res) => {
+  await ErlcLog.findByIdAndDelete(req.params.id);
+  res.redirect((req.headers.referer||'/erlclogs')+'?success=Log+deleted');
+});
+
+app.post('/api/activity/delete/:id', isAuth, async (req, res) => {
+  await Activity.findByIdAndDelete(req.params.id);
+  res.redirect((req.headers.referer||'/logs')+'?success=Log+deleted');
+});
+
+app.post('/api/shift/delete/:id', isAuth, async (req, res) => {
+  await Shift.findByIdAndDelete(req.params.id);
+  res.redirect((req.headers.referer||'/shift')+'?success=Shift+deleted');
 });
 
 // ── API: ERLC log ingestion (called by bot) ───────────────
