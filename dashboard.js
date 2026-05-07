@@ -169,6 +169,7 @@ app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/callback', passport.authenticate('discord', { failureRedirect: '/login' }), (req, res) => res.redirect('/panel'));
 app.get('/logout', (req, res) => req.logout(() => res.redirect('/login')));
 app.get('/', isAuth, (req, res) => res.redirect('/panel'));
+app.get('/ping', (req, res) => res.status(200).send('OK'));
 
 // ── API: Player search autocomplete ──────────────────────
 app.get('/api/players/search', isAuth, async (req, res) => {
