@@ -274,178 +274,257 @@ app.get('/moderator', isAuth, async (req, res) => {
   try { serverInfo = await erlc('/server', 'GET', null, key); } catch {}
   try { players = await erlc('/server/players', 'GET', null, key); } catch {}
   try { queue = await erlc('/server/queue', 'GET', null, key); } catch {}
-  try { kills = (await erlc('/server/killlogs', 'GET', null, key)).slice(0, 20); } catch {}
-  try { cmds = (await erlc('/server/commandlogs', 'GET', null, key)).slice(0, 25); } catch {}
+  try { kills = (await erlc('/server/killlogs', 'GET', null, key)).slice(0, 30); } catch {}
+  try { cmds = (await erlc('/server/commandlogs', 'GET', null, key)).slice(0, 30); } catch {}
   try { modcalls = (await erlc('/server/modcalls', 'GET', null, key)); } catch {}
-  try {
-    const raw = await erlc('/server/chatlogs', 'GET', null, key);
-    chatLogs = Array.isArray(raw) ? raw.slice(0, 30) : [];
-  } catch {}
+  try { const raw = await erlc('/server/chatlogs', 'GET', null, key); chatLogs = Array.isArray(raw) ? raw.slice(0, 30) : []; } catch {}
 
   const pl = Object.values(players);
-  const recentPunishments = await Punishment.find({ guildId: GUILD_ID }).sort({ createdAt: -1 }).limit(10);
   const activeShift = await Shift.findOne({ userId: req.user.id, guildId: GUILD_ID, endTime: null });
+  const allActiveShifts = await Shift.find({ guildId: GUILD_ID, endTime: null });
   const now = Date.now();
 
-  // Build the live feed (merged kills + cmds + joins sorted by time)
+  // Merge feed items
   const feedItems = [
-    ...kills.map(k => ({ type: 'kill', text: `<b>${k.Killer}</b> killed <b>${k.Killed}</b> with ${k.Weapon||'?'}`, time: k.Timestamp||0 })),
-    ...cmds.map(c => ({ type: 'cmd', text: `<b>${c.Player}</b> ran <code>${(c.Command||'?').slice(0,40)}</code>`, time: c.Timestamp||0 })),
-  ].sort((a,b)=>b.time-a.time).slice(0, 30);
-
-  const typeIcon = { kill: '💀', cmd: '⌨️', join: '📥', leave: '📤', modcall: '🚨' };
+    ...kills.map(k => ({ type: 'kill', icon: '💀', text: `<b>${k.Killer}</b> killed <b>${k.Killed}</b> with ${k.Weapon||'?'}`, time: k.Timestamp||0 })),
+    ...cmds.map(c => ({ type: 'cmd', icon: '⌨️', text: `<b>${c.Player}</b>: <code>${(c.Command||'?').slice(0,50)}</code>`, time: c.Timestamp||0 })),
+    ...chatLogs.map(c => ({ type: 'chat', icon: '💬', text: `<b>${c.Player||c.Username||'?'}</b>: ${c.Message||c.Content||''}`, time: c.Timestamp||0 })),
+  ].sort((a,b) => b.time - a.time).slice(0, 40);
 
   const content = `
-<div class="mod-grid">
-  <!-- LEFT: Player list + shift -->
+<style>
+.mod-layout{display:grid;grid-template-columns:260px 1fr 300px;gap:10px;height:calc(100vh - 90px);overflow:hidden;}
+.mod-col{display:flex;flex-direction:column;gap:8px;overflow:hidden;min-height:0;}
+.mod-panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;display:flex;flex-direction:column;min-height:0;}
+.mod-panel-header{padding:9px 13px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+.mod-panel-title{font-size:11.5px;font-weight:700;display:flex;align-items:center;gap:6px;}
+.mod-scroll{overflow-y:auto;flex:1;min-height:0;}
+.player-row-item{display:flex;align-items:center;gap:9px;padding:7px 12px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s;}
+.player-row-item:hover{background:var(--surface2);}
+.player-row-item.selected{background:var(--accent-dim);border-left:2px solid var(--accent);}
+.feed-row{padding:8px 12px;border-bottom:1px solid var(--border);font-size:11.5px;display:flex;gap:8px;align-items:flex-start;}
+.feed-row:last-child{border-bottom:none;}
+.tab-row{display:flex;gap:2px;padding:6px 8px;background:var(--surface2);flex-shrink:0;}
+.tab-btn{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;border:none;background:none;color:var(--muted);cursor:pointer;transition:all .15s;}
+.tab-btn.active{background:var(--surface3);color:var(--text);}
+.tab-content{display:none;}
+.tab-content.active{display:block;}
+.pun-row{padding:9px 12px;border-bottom:1px solid var(--border);font-size:12px;}
+.pun-row:last-child{border-bottom:none;}
+@media(max-width:1200px){.mod-layout{grid-template-columns:220px 1fr 260px;}}
+@media(max-width:900px){.mod-layout{grid-template-columns:1fr;height:auto;}}
+</style>
+
+<div class="mod-layout">
+
+  <!-- ═══ LEFT COL: Shift + Players ═══ -->
   <div class="mod-col">
-    <div class="panel" style="flex:0">
-      <div class="panel-header">
-        <div class="panel-title">
-          ${activeShift ? '<span class="badge bg">🟢 On Duty</span>' : '<span class="badge br">⚫ Off Duty</span>'}
-          <span style="color:var(--muted);font-weight:500;font-size:11px">${activeShift?`<span data-start="${activeShift.startTime}">${fmt(now-activeShift.startTime)}</span>`:''}</span>
+
+    <!-- Shift status -->
+    <div class="mod-panel" style="flex:0">
+      <div class="mod-panel-header">
+        <div class="mod-panel-title">
+          ${activeShift ? '<span class="badge bg" style="font-size:10px">🟢 On Duty</span>' : '<span class="badge br" style="font-size:10px">⚫ Off Duty</span>'}
+          ${activeShift ? `<span style="font-size:10px;color:var(--muted)" data-start="${activeShift.startTime}">${fmt(now-activeShift.startTime)}</span>` : ''}
         </div>
         ${activeShift
-          ? `<form action="/api/shift/end" method="POST"><button class="btn btn-danger btn-sm">⏹ End</button></form>`
-          : `<form action="/api/shift/start" method="POST"><button class="btn btn-accent btn-sm">▶ Start Shift</button></form>`}
+          ? `<form action="/api/shift/end" method="POST"><button class="btn btn-danger btn-sm" style="padding:3px 9px;font-size:10px">⏹ End</button></form>`
+          : `<form action="/api/shift/start" method="POST"><button class="btn btn-accent btn-sm" style="padding:3px 9px;font-size:10px">▶ Start</button></form>`}
+      </div>
+      <div style="padding:6px 10px;font-size:10px;color:var(--muted);display:flex;gap:10px">
+        <span>👮 ${allActiveShifts.length} staff on duty</span>
+        <span>🎮 ${pl.length} in-game</span>
+        <span>⏳ ${Array.isArray(queue)?queue.length:0} queue</span>
       </div>
     </div>
 
-    <div class="panel" style="flex:0">
-      <div class="panel-header">
-        <div class="panel-title">🎮 ${pl.length} Player${pl.length!==1?'s':''} In-Game</div>
-        <span class="badge ba">${Array.isArray(queue)?queue.length:0} queue</span>
+    <!-- Player search + list -->
+    <div class="mod-panel" style="flex:1">
+      <div class="mod-panel-header" style="flex-direction:column;align-items:stretch;gap:6px">
+        <div class="mod-panel-title">👥 Players In-Game <span class="badge ba" style="font-size:9px">${pl.length}</span></div>
+        <div style="position:relative">
+          <input id="player-search" placeholder="Search or type username... (Ctrl+I)" autocomplete="off"
+            style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit"
+            oninput="onPlayerSearch(this.value)" onkeydown="acKeyNav(event)">
+          <div id="ac-list" class="ac-list"></div>
+        </div>
       </div>
-      <div class="search-bar" style="margin:8px 10px 0;width:auto">🔍 <input placeholder="Search players..." oninput="filterPlayers(this.value)" id="player-search"></div>
-      <div style="max-height:320px;overflow-y:auto" id="player-list">
+      <div class="mod-scroll" id="player-list">
         ${pl.length ? pl.map(p=>`
-          <div class="shift-row player-row" data-name="${p.Player.toLowerCase()}">
-            <div class="player-icon" style="width:28px;height:28px;font-size:12px">👤</div>
+          <div class="player-row-item" data-name="${p.Player.toLowerCase()}" onclick="selectPlayerByName('${p.Player}')">
+            <img src="https://cdn.discordapp.com/embed/avatars/0.png" data-roblox="${p.Player}" style="width:28px;height:28px;border-radius:50%;background:var(--surface3);flex-shrink:0" class="roblox-av">
             <div style="flex:1;min-width:0">
-              <div class="shift-name">${p.Player}</div>
-              <div class="shift-time">${p.Team||'No Team'}</div>
+              <div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.Player}</div>
+              <div style="font-size:10px;color:var(--muted)">${p.Team||'No Team'}</div>
             </div>
-            <button class="btn btn-ghost btn-sm" onclick="openPM('${p.Player}')">PM</button>
-          </div>`).join('') : '<div class="empty" style="padding:20px">No players</div>'}
+            <button class="btn btn-ghost btn-sm" style="padding:2px 7px;font-size:10px" onclick="event.stopPropagation();openPM('${p.Player}')">PM</button>
+          </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No players in game</div>'}
       </div>
     </div>
 
-    <div class="panel" style="flex:0">
-      <div class="panel-header"><div class="panel-title">🚨 Mod Calls <span class="badge ${modcalls.filter(m=>!m.Responder).length?'by':'bg'}">${modcalls.length}</span></div></div>
-      <div style="max-height:200px;overflow-y:auto">
-        ${modcalls.length ? modcalls.map(m=>`
-          <div class="shift-row">
-            <span style="font-size:12px">🚨</span>
-            <div style="flex:1;min-width:0">
-              <div class="shift-name" style="font-size:12px">${m.Caller}</div>
-              <div class="shift-time">${m.Responder?'Responded by '+m.Responder:'Pending'}</div>
-            </div>
-            <span class="badge ${m.Responder?'bg':'by'}">${m.Responder?'✓':'⏳'}</span>
-          </div>`).join('') : '<div class="empty" style="padding:16px">No mod calls</div>'}
-      </div>
-    </div>
-
-    <div class="panel" style="flex:0">
-      <div class="panel-header"><div class="panel-title">🎮 Quick Command</div></div>
-      <div class="panel-body" style="padding:10px">
-        <form action="/api/erlc/command" method="POST" class="form-row">
-          <div class="fg" style="margin:0;flex:1"><input name="command" placeholder=":kick PlayerName Reason" required></div>
+    <!-- Quick command -->
+    <div class="mod-panel" style="flex:0">
+      <div class="mod-panel-header"><div class="mod-panel-title">⌨️ Quick Command</div></div>
+      <div style="padding:8px">
+        <form action="/api/erlc/command" method="POST" style="display:flex;gap:6px">
+          <input name="command" placeholder=":kick Name Reason" required style="flex:1;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit">
           <button type="submit" class="btn btn-accent btn-sm">▶</button>
         </form>
       </div>
     </div>
+
   </div>
 
-  <!-- MIDDLE: Live feed + chat logs -->
+  <!-- ═══ MIDDLE COL: Live Feed + Tabs ═══ -->
   <div class="mod-col">
-    <div class="panel" style="flex:0">
-      <div class="panel-header">
-        <div class="panel-title">📡 Live Feed</div>
-        <span class="live-pill"><span class="live-dot"></span>Auto-refresh 15s</span>
+    <div class="mod-panel" style="flex:1">
+      <div class="tab-row">
+        <button class="tab-btn active" onclick="switchTab('feed',this)">📡 Live Feed</button>
+        <button class="tab-btn" onclick="switchTab('chat',this)">💬 Chat</button>
+        <button class="tab-btn" onclick="switchTab('kills',this)">💀 Kills</button>
+        <button class="tab-btn" onclick="switchTab('cmds',this)">⌨️ Commands</button>
+        <button class="tab-btn" onclick="switchTab('modcalls',this)">🚨 Mod Calls</button>
+        <button class="tab-btn" onclick="switchTab('shifts',this)">👮 Shifts</button>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+          <span class="live-pill" style="font-size:9px"><span class="live-dot"></span>Live</span>
+        </div>
       </div>
-      <div style="max-height:280px;overflow-y:auto" id="live-feed">
-        ${feedItems.length ? feedItems.map(f=>`<div class="feed-item"><span class="feed-icon">${typeIcon[f.type]||'📋'}</span><span class="feed-text">${f.text}</span><span class="feed-time">${f.time?timeAgo(f.time*1000):'—'}</span></div>`).join('') : '<div class="empty" style="padding:20px">No recent activity</div>'}
-      </div>
-    </div>
+      <div class="mod-scroll">
 
-    <div class="panel" style="flex:1">
-      <div class="panel-header">
-        <div class="panel-title">💬 Chat Logs</div>
-        <a href="/chatlogs" class="btn btn-ghost btn-sm">Full View →</a>
-      </div>
-      <div style="max-height:380px;overflow-y:auto">
-        ${chatLogs.length ? chatLogs.map(c=>`
-          <div class="chat-msg">
-            <div class="chat-header">
-              <div style="display:flex;align-items:center;gap:6px">
-                <span class="chat-player">${c.Player||c.Username||'Unknown'}</span>
-                ${c.Team?`<span class="chat-team-tag badge ba">${c.Team}</span>`:''}
+        <!-- Feed tab -->
+        <div id="tab-feed" class="tab-content active">
+          ${feedItems.length ? feedItems.map(f=>`
+            <div class="feed-row">
+              <span style="font-size:13px;flex-shrink:0">${f.icon}</span>
+              <span style="flex:1;color:var(--text2)">${f.text}</span>
+              <span style="font-size:10px;color:var(--muted);flex-shrink:0;white-space:nowrap">${f.time?timeAgo(f.time*1000):'—'}</span>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No feed data</div>'}
+        </div>
+
+        <!-- Chat tab -->
+        <div id="tab-chat" class="tab-content">
+          ${chatLogs.length ? chatLogs.map(c=>`
+            <div class="feed-row" style="flex-direction:column;gap:3px">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <span style="font-size:12px;font-weight:700;color:var(--accent)">${c.Player||c.Username||'?'}</span>
+                <div style="display:flex;align-items:center;gap:6px">
+                  ${c.Team?`<span class="badge ba" style="font-size:9px">${c.Team}</span>`:''}
+                  <span style="font-size:10px;color:var(--muted)">${c.Timestamp?timeAgo(c.Timestamp*1000):'—'}</span>
+                </div>
               </div>
-              <span class="chat-time">${c.Timestamp?timeAgo(c.Timestamp*1000):'—'}</span>
-            </div>
-            <div class="chat-text">${c.Message||c.Content||'—'}</div>
-          </div>`).join('') : '<div class="empty" style="padding:20px">No chat logs available<br><span style="font-size:11px">Chat logging may not be enabled for this server</span></div>'}
+              <div style="font-size:12px;color:var(--text2)">${c.Message||c.Content||'—'}</div>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No chat logs</div>'}
+        </div>
+
+        <!-- Kills tab -->
+        <div id="tab-kills" class="tab-content">
+          ${kills.length ? kills.map(k=>`
+            <div class="feed-row">
+              <span style="font-size:13px">💀</span>
+              <span style="flex:1;color:var(--text2)"><b>${k.Killer}</b> killed <b>${k.Killed}</b> with <code>${k.Weapon||'?'}</code></span>
+              <span style="font-size:10px;color:var(--muted)">${k.Timestamp?timeAgo(k.Timestamp*1000):'—'}</span>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No kill logs</div>'}
+        </div>
+
+        <!-- Commands tab -->
+        <div id="tab-cmds" class="tab-content">
+          ${cmds.length ? cmds.map(c=>`
+            <div class="feed-row">
+              <span style="font-size:13px">⌨️</span>
+              <span style="flex:1;color:var(--text2)"><b>${c.Player}</b>: <code>${(c.Command||'?').slice(0,60)}</code></span>
+              <span style="font-size:10px;color:var(--muted)">${c.Timestamp?timeAgo(c.Timestamp*1000):'—'}</span>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No commands</div>'}
+        </div>
+
+        <!-- Mod calls tab -->
+        <div id="tab-modcalls" class="tab-content">
+          ${modcalls.length ? modcalls.map(m=>`
+            <div class="feed-row" style="align-items:center">
+              <span style="font-size:13px">🚨</span>
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:600">${m.Caller}</div>
+                <div style="font-size:11px;color:var(--muted)">${m.Responder?'Responded by '+m.Responder:'Pending'}</div>
+              </div>
+              <span class="badge ${m.Responder?'bg':'by'}" style="font-size:9px">${m.Responder?'✓':'⏳'}</span>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No mod calls</div>'}
+        </div>
+
+        <!-- Shifts tab -->
+        <div id="tab-shifts" class="tab-content">
+          ${allActiveShifts.length ? allActiveShifts.map(s=>`
+            <div class="feed-row" style="align-items:center">
+              <img src="https://cdn.discordapp.com/avatars/${s.userId}/${s.avatar}.png" onerror="this.src='https://cdn.discordapp.com/embed/avatars/0.png'" style="width:28px;height:28px;border-radius:50%;flex-shrink:0">
+              <div style="flex:1">
+                <div style="font-size:12px;font-weight:600">${s.username}</div>
+                <div style="font-size:10px;color:var(--muted)">Since ${new Date(s.startTime).toLocaleTimeString()}</div>
+              </div>
+              <span class="badge bg" style="font-size:9px" data-start="${s.startTime}">${fmt(now-s.startTime)}</span>
+            </div>`).join('') : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No staff on duty</div>'}
+        </div>
+
       </div>
     </div>
   </div>
 
-  <!-- RIGHT: Punishment logs + create punishment -->
+  <!-- ═══ RIGHT COL: Player Panel + Create Log ═══ -->
   <div class="mod-col">
-    <div class="panel" style="flex:0">
-      <div class="panel-header"><div class="panel-title">➕ Create Log</div></div>
-      <div class="panel-body">
+
+    <!-- Player profile panel -->
+    <div class="mod-panel" style="flex:1">
+      <div class="mod-panel-header">
+        <div class="mod-panel-title" id="player-panel-title">👤 Select a player</div>
+        <a href="/search" class="btn btn-ghost btn-sm" style="font-size:10px;padding:3px 8px">Full Search →</a>
+      </div>
+      <div class="mod-scroll" id="player-panel">
+        <div style="padding:30px;text-align:center;color:var(--muted);font-size:12px;opacity:.5">
+          <div style="font-size:32px;margin-bottom:8px">👤</div>
+          Type a name or click a player
+        </div>
+      </div>
+    </div>
+
+    <!-- Create log -->
+    <div class="mod-panel" style="flex:0">
+      <div class="mod-panel-header"><div class="mod-panel-title">➕ Create Log</div></div>
+      <div style="padding:10px">
         <form action="/api/punishment" method="POST">
-          <div class="fg">
-            <label>User</label>
-            <div class="ac-wrap">
-              <input name="targetUsername" id="mod-player-input" placeholder="Enter username (⌘I / Ctrl+I)" required autocomplete="off" oninput="acSearch(this.value)">
-              <div class="ac-list" id="ac-list"></div>
-            </div>
+          <input id="log-username" name="targetUsername" placeholder="Username (auto-filled)" required
+            style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit;margin-bottom:6px">
+          <input name="targetRobloxId" id="log-roblox-id" type="hidden">
+          <select name="type" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit;margin-bottom:6px"
+            onchange="document.getElementById('dur-f').style.display=this.value==='tempban'?'block':'none'">
+            <option value="warn">⚠️ Warning</option>
+            <option value="kick">👢 Kick</option>
+            <option value="ban">🔨 Ban</option>
+            <option value="bolo">👁️ Ban Bolo</option>
+            <option value="tempban">⏳ Temp Ban</option>
+            <option value="note">📝 Note</option>
+          </select>
+          <div id="dur-f" style="display:none;margin-bottom:6px">
+            <input name="duration" placeholder="Duration e.g. 7 days" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit">
           </div>
-          <div class="fg"><label>Roblox ID</label><input name="targetRobloxId" id="mod-roblox-id" placeholder="Optional"></div>
-          <div class="fg"><label>Type</label>
-            <select name="type" onchange="document.getElementById('dur-f').style.display=this.value==='tempban'?'block':'none'">
-              <option value="warn">⚠️ Warning</option>
-              <option value="kick">👢 Kick</option>
-              <option value="ban">🔨 Ban</option>
-              <option value="tempban">⏳ Temp Ban</option>
-              <option value="bolo">👁️ BOLO</option>
-              <option value="note">📝 Note</option>
-            </select>
-          </div>
-          <div class="fg" id="dur-f" style="display:none"><label>Duration</label><input name="duration" placeholder="e.g. 7 days"></div>
-          <div class="fg"><label>Reason</label><textarea name="reason" rows="2" required style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:12.5px;outline:none;font-family:inherit;resize:vertical"></textarea></div>
-          <div class="fg"><label><input type="checkbox" name="sendPM" value="1" style="accent-color:var(--accent);margin-right:6px">Send DM to Discord user when warned</label></div>
-          <input type="hidden" name="discordUserId" id="mod-discord-id">
-          <button type="submit" class="btn btn-accent btn-block">📝 Log Punishment</button>
+          <textarea name="reason" rows="2" placeholder="Reason..." required
+            style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:7px;padding:6px 10px;color:var(--text);font-size:12px;outline:none;font-family:inherit;resize:none;margin-bottom:6px"></textarea>
+          <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text2);margin-bottom:8px;cursor:pointer">
+            <input type="checkbox" name="sendPM" value="1" style="accent-color:var(--accent)"> Auto-PM in ERLC
+          </label>
+          <button type="submit" class="btn btn-accent btn-block" style="font-size:12px;padding:8px">📝 Create Log</button>
         </form>
       </div>
     </div>
 
-    <div class="panel" style="flex:1">
-      <div class="panel-header">
-        <div class="panel-title" id="player-log-title">📋 Player Logs</div>
-        <a href="/punishments" class="btn btn-ghost btn-sm">All Logs →</a>
-      </div>
-      <div style="max-height:500px;overflow-y:auto" id="player-log-panel">
-        <div style="padding:40px;text-align:center;color:var(--muted);font-size:13px">
-          <div style="font-size:28px;margin-bottom:10px;opacity:.4">👤</div>
-          Select a player to view their logs
-        </div>
-      </div>
-    </div>
   </div>
 </div>
 
 <!-- PM Modal -->
-<div id="pm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:var(--surface);border:1px solid var(--border2);border-radius:16px;padding:24px;width:100%;max-width:400px">
-    <div style="font-size:14px;font-weight:700;margin-bottom:16px">📨 Send PM in ER:LC</div>
+<div id="pm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border2);border-radius:16px;padding:22px;width:100%;max-width:360px">
+    <div style="font-size:13px;font-weight:700;margin-bottom:14px">📨 Send In-Game PM</div>
     <form action="/api/erlc/pm" method="POST">
-      <div class="fg"><label>Player</label><input name="player" id="pm-player" required></div>
-      <div class="fg"><label>Message</label><textarea name="message" rows="3" required style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;font-family:inherit;resize:vertical"></textarea></div>
+      <div style="margin-bottom:10px"><input name="player" id="pm-player" required placeholder="Player name" style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;font-family:inherit"></div>
+      <div style="margin-bottom:12px"><textarea name="message" rows="3" required placeholder="Message..." style="width:100%;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;font-family:inherit;resize:none"></textarea></div>
       <div style="display:flex;gap:8px">
-        <button type="submit" class="btn btn-accent" style="flex:1">Send PM</button>
+        <button type="submit" class="btn btn-accent" style="flex:1">Send</button>
         <button type="button" class="btn btn-ghost" onclick="closePM()">Cancel</button>
       </div>
     </form>
@@ -453,129 +532,203 @@ app.get('/moderator', isAuth, async (req, res) => {
 </div>
 
 <script>
-function filterPlayers(q){document.querySelectorAll('.player-row').forEach(function(r){r.style.display=r.dataset.name.includes(q.toLowerCase())?'':'none';});}
-function openPM(name){document.getElementById('pm-modal').style.display='flex';document.getElementById('pm-player').value=name;}
-function closePM(){document.getElementById('pm-modal').style.display='none';}
-document.getElementById('pm-modal').addEventListener('click',function(e){if(e.target===this)closePM();});
-document.addEventListener('keydown',function(e){if((e.ctrlKey||e.metaKey)&&e.key==='i'){e.preventDefault();document.getElementById('mod-player-input').focus();}});
-
-var acTimeout;
-function acSearch(q){
-  clearTimeout(acTimeout);
-  var list=document.getElementById('ac-list');
-  if(!q||q.length<2){list.classList.remove('open');return;}
-  acTimeout=setTimeout(function(){
-    fetch('/api/players/search?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
-      var ingame=d.ingame||[], db=d.db||[];
-      if(!ingame.length&&!db.length){list.classList.remove('open');return;}
-      list.innerHTML='';
-      ingame.forEach(function(p){
-        var el=document.createElement('div');
-        el.className='ac-item ac-item-ingame';
-        el.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;';
-        var img=document.createElement('img');
-        img.src='https://cdn.discordapp.com/embed/avatars/0.png';
-        img.style.cssText='width:36px;height:36px;border-radius:50%;background:var(--surface3);flex-shrink:0;border:2px solid var(--accent)';
-        fetch('/api/roblox/profile?username='+encodeURIComponent(p.name)).then(function(r){return r.json();}).then(function(prof){if(prof&&prof.avatarUrl)img.src=prof.avatarUrl;});
-        var info=document.createElement('div');
-        info.innerHTML='<div style="font-weight:700;font-size:13px">'+p.name+'</div><div style="font-size:11px;color:var(--success)">🟢 In-Game &middot; '+p.team+'</div>';
-        el.appendChild(img);el.appendChild(info);
-        el.addEventListener('click',function(){selectPlayer(p.name);});
-        list.appendChild(el);
-      });
-      db.filter(function(n){return!ingame.find(function(p){return p.name===n;});}).forEach(function(n){
-        var el=document.createElement('div');
-        el.className='ac-item';
-        el.style.cssText='display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;';
-        var img=document.createElement('img');
-        img.src='https://cdn.discordapp.com/embed/avatars/0.png';
-        img.style.cssText='width:36px;height:36px;border-radius:50%;background:var(--surface3);flex-shrink:0;';
-        fetch('/api/roblox/profile?username='+encodeURIComponent(n)).then(function(r){return r.json();}).then(function(prof){if(prof&&prof.avatarUrl)img.src=prof.avatarUrl;});
-        var info=document.createElement('div');
-        info.innerHTML='<div style="font-weight:700;font-size:13px">'+n+'</div><div style="font-size:11px;color:var(--muted)">📋 In logs</div>';
-        el.appendChild(img);el.appendChild(info);
-        el.addEventListener('click',function(){selectPlayer(n);});
-        list.appendChild(el);
-      });
-      list.classList.add('open');
-    });
-  },250);
+// ── Tab switching ──────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(function(el){el.classList.remove('active');});
+  document.querySelectorAll('.tab-btn').forEach(function(el){el.classList.remove('active');});
+  document.getElementById('tab-'+name).classList.add('active');
+  btn.classList.add('active');
 }
 
-function selectPlayer(name){
-  document.getElementById('mod-player-input').value=name;
-  document.getElementById('ac-list').classList.remove('open');
+// ── PM Modal ───────────────────────────────────────────────
+function openPM(name){document.getElementById('pm-modal').style.display='flex';document.getElementById('pm-player').value=name||'';}
+function closePM(){document.getElementById('pm-modal').style.display='none';}
+document.getElementById('pm-modal').addEventListener('click',function(e){if(e.target===this)closePM();});
+document.addEventListener('keydown',function(e){
+  if((e.ctrlKey||e.metaKey)&&e.key==='i'){e.preventDefault();document.getElementById('player-search').focus();}
+  if(e.key==='Escape')closePM();
+});
+
+// ── Player filter ──────────────────────────────────────────
+function filterPlayers(q){
+  document.querySelectorAll('.player-row-item[data-name]').forEach(function(r){
+    r.style.display=r.dataset.name.includes(q.toLowerCase())?'':'none';
+  });
+}
+
+// ── Roblox avatar loader ───────────────────────────────────
+function loadAvatars(){
+  document.querySelectorAll('.roblox-av[data-roblox]').forEach(function(img){
+    var name=img.dataset.roblox;
+    fetch('/api/roblox/profile?username='+encodeURIComponent(name))
+      .then(function(r){return r.json();})
+      .then(function(d){if(d&&d.avatarUrl)img.src=d.avatarUrl;})
+      .catch(function(){});
+    delete img.dataset.roblox;
+  });
+}
+setTimeout(loadAvatars, 500);
+
+// ── Autocomplete ───────────────────────────────────────────
+var acTimer, acItems=[], acIndex=-1;
+function onPlayerSearch(q){
+  filterPlayers(q);
+  clearTimeout(acTimer);
+  var list=document.getElementById('ac-list');
+  if(!q||q.length<2){list.classList.remove('open');acItems=[];return;}
+  acTimer=setTimeout(function(){
+    fetch('/api/players/search?q='+encodeURIComponent(q)).then(function(r){return r.json();}).then(function(d){
+      acItems=(d.ingame||[]).map(function(p){return{name:p.name,sub:p.team,ingame:true};})
+        .concat((d.db||[]).filter(function(n){return!(d.ingame||[]).find(function(p){return p.name===n;});}).map(function(n){return{name:n,sub:'in logs',ingame:false};}));
+      renderAC();
+    });
+  },200);
+}
+function renderAC(){
+  var list=document.getElementById('ac-list');
+  if(!acItems.length){list.classList.remove('open');return;}
+  list.innerHTML='';
+  acItems.forEach(function(p,i){
+    var el=document.createElement('div');
+    el.className='ac-item'+(p.ingame?' ac-item-ingame':'');
+    el.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 12px;cursor:pointer;';
+    var img=document.createElement('img');
+    img.src='https://cdn.discordapp.com/embed/avatars/0.png';
+    img.style.cssText='width:32px;height:32px;border-radius:50%;flex-shrink:0;'+(p.ingame?'border:2px solid var(--accent)':'');
+    fetch('/api/roblox/profile?username='+encodeURIComponent(p.name)).then(function(r){return r.json();}).then(function(d){if(d&&d.avatarUrl)img.src=d.avatarUrl;}).catch(function(){});
+    var info=document.createElement('div');
+    info.innerHTML='<div style="font-size:12.5px;font-weight:700">'+p.name+'</div><div style="font-size:10px;color:'+(p.ingame?'var(--success)':'var(--muted)')+'">'+( p.ingame?'🟢 In-Game · '+p.sub:'📋 '+p.sub)+'</div>';
+    el.appendChild(img);el.appendChild(info);
+    el.addEventListener('click',function(){selectPlayerByName(p.name);document.getElementById('ac-list').classList.remove('open');});
+    list.appendChild(el);
+  });
+  list.classList.add('open');
+  acIndex=-1;
+}
+function acKeyNav(e){
+  var items=document.querySelectorAll('#ac-list .ac-item');
+  if(e.key==='ArrowDown'){e.preventDefault();acIndex=Math.min(acIndex+1,items.length-1);items.forEach(function(el,i){el.style.background=i===acIndex?'var(--surface3)':'';});}
+  else if(e.key==='ArrowUp'){e.preventDefault();acIndex=Math.max(acIndex-1,0);items.forEach(function(el,i){el.style.background=i===acIndex?'var(--surface3)':'';});}
+  else if(e.key==='Enter'&&acIndex>=0){items[acIndex].click();}
+  else if(e.key==='Escape'){document.getElementById('ac-list').classList.remove('open');}
+}
+document.addEventListener('click',function(e){if(!e.target.closest('#player-search')&&!e.target.closest('#ac-list'))document.getElementById('ac-list').classList.remove('open');});
+
+// ── Select player & load panel ─────────────────────────────
+function selectPlayerByName(name){
+  document.getElementById('player-search').value=name;
+  document.getElementById('log-username').value=name;
+  document.querySelectorAll('.player-row-item').forEach(function(r){r.classList.toggle('selected',r.querySelector('div div')&&r.querySelector('div div').textContent===name);});
   loadPlayerPanel(name);
 }
 
 function loadPlayerPanel(username){
-  var panel=document.getElementById('player-log-panel');
-  var title=document.getElementById('player-log-title');
-  title.textContent=username+"'s Logs";
-  panel.innerHTML='<div style="padding:30px;text-align:center;color:var(--muted);font-size:13px">Loading...</div>';
+  var panel=document.getElementById('player-panel');
+  var title=document.getElementById('player-panel-title');
+  title.textContent="Loading...";
+  panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">Loading...</div>';
   Promise.all([
     fetch('/api/roblox/profile?username='+encodeURIComponent(username)).then(function(r){return r.json();}),
     fetch('/api/player/logs?username='+encodeURIComponent(username)).then(function(r){return r.json();})
-  ]).then(function(results){
-    var prof=results[0], logs=results[1];
+  ]).then(function(res){
+    var prof=res[0], logs=res[1];
+    title.textContent=username+"'s Panel";
+    var age=prof&&prof.created?Math.floor((Date.now()-new Date(prof.created))/86400000):null;
     var html='';
+
+    // Profile section
     if(prof){
-      var age=prof.created?Math.floor((Date.now()-new Date(prof.created))/(86400000)):null;
-      html+='<div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border);background:var(--surface2)">'
-        +'<img src="'+(prof.avatarUrl||'https://cdn.discordapp.com/embed/avatars/0.png')+'" style="width:52px;height:52px;border-radius:50%;border:2px solid '+(prof.isBanned?'var(--danger)':'var(--accent)')+';flex-shrink:0">'
+      html+='<div style="background:var(--surface2);padding:14px 13px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center">'
+        +'<div style="position:relative;flex-shrink:0">'
+          +'<img src="'+(prof.avatarUrl||'https://cdn.discordapp.com/embed/avatars/0.png')+'" style="width:54px;height:54px;border-radius:50%;border:2px solid '+(prof.isBanned?'var(--danger)':'var(--accent)')+'">'
+        +'</div>'
         +'<div style="flex:1;min-width:0">'
-          +'<div style="font-size:15px;font-weight:800">'+prof.displayName+'</div>'
-          +(prof.displayName!==prof.name?'<div style="font-size:11px;color:var(--muted)">@'+prof.name+'</div>':'')
-          +'<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">'
-            +(prof.isBanned?'<span class="badge br">🔨 Banned</span>':'<span class="badge bg">✅ Active</span>')
-            +(age!==null?'<span class="badge ba">'+age+'d old</span>':'')
-            +(prof.friendCount!==null?'<span class="badge bb">'+prof.friendCount+' friends</span>':'')
+          +'<div style="font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+prof.displayName+'</div>'
+          +(prof.displayName!==prof.name?'<div style="font-size:10px;color:var(--muted)">@'+prof.name+'</div>':'')
+          +'<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:5px">'
+            +(prof.isBanned?'<span class="badge br" style="font-size:9px">🔨 Banned</span>':'<span class="badge bg" style="font-size:9px">✅ Active</span>')
+            +(age!==null?'<span class="badge ba" style="font-size:9px">'+age+'d old</span>':'')
+            +(prof.friendCount!==null?'<span class="badge bb" style="font-size:9px">'+prof.friendCount+' friends</span>':'')
           +'</div>'
         +'</div>'
         +'<div style="text-align:right;flex-shrink:0">'
-          +'<div style="font-size:26px;font-weight:800;color:'+(logs.total?'var(--danger)':'var(--success)')+'">'+logs.total+'</div>'
-          +'<div style="font-size:10px;color:var(--muted)">log'+(logs.total!==1?'s':'')+'</div>'
+          +'<div style="font-size:22px;font-weight:800;color:'+(logs.total?'var(--danger)':'var(--success)')+'">'+logs.total+'</div>'
+          +'<div style="font-size:9px;color:var(--muted)">log'+(logs.total!==1?'s':'')+'</div>'
         +'</div>'
       +'</div>';
+
+      // Quick stats
+      html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);border-bottom:1px solid var(--border)">'
+        +'<div style="background:var(--surface);padding:7px 12px;text-align:center"><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">ID</div><div style="font-size:11px;font-weight:700;font-family:monospace">'+prof.id+'</div></div>'
+        +'<div style="background:var(--surface);padding:7px 12px;text-align:center"><div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Joined</div><div style="font-size:11px;font-weight:700">'+(prof.created?new Date(prof.created).toLocaleDateString():'—')+'</div></div>'
+      +'</div>';
+
+      // Action buttons
+      html+='<div style="display:flex;gap:4px;padding:8px 10px;border-bottom:1px solid var(--border)">'
+        +'<button onclick="document.getElementById(\'log-username\').value=\''+username+'\'" class="btn btn-ghost btn-sm" style="flex:1;font-size:10px;justify-content:center">📝 Log</button>'
+        +'<button onclick="openPM(\''+username+'\')" class="btn btn-ghost btn-sm" style="flex:1;font-size:10px;justify-content:center">📨 PM</button>'
+        +'<a href="https://www.roblox.com/users/'+prof.id+'/profile" target="_blank" class="btn btn-ghost btn-sm" style="flex:1;font-size:10px;justify-content:center">🔗 Roblox</a>'
+        +'<a href="/search?q='+username+'" class="btn btn-ghost btn-sm" style="flex:1;font-size:10px;justify-content:center">🔍 Full</a>'
+      +'</div>';
     }
+
+    // Punishment logs
     if(logs.punishments&&logs.punishments.length){
-      html+='<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Punishments ('+logs.punishments.length+')</div>';
+      html+='<div style="padding:6px 12px;font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Punishments ('+logs.punishments.length+')</div>';
       logs.punishments.forEach(function(p){
-        var bc=p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':'by';
-        html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
-          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
-            +'<span class="badge '+bc+'">'+p.type+'</span>'
+        var bc=p.type==='ban'?'br':p.type==='kick'?'by':p.type==='note'?'bb':p.type==='bolo'?'br':'by';
+        html+='<div class="pun-row">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">'
+            +'<span class="badge '+bc+'" style="font-size:9px">'+p.type+'</span>'
             +'<span style="font-size:10px;color:var(--muted)">'+new Date(p.createdAt).toLocaleDateString()+'</span>'
           +'</div>'
-          +'<div style="font-size:12px;color:var(--text2)">'+(p.reason||'No reason')+'</div>'
-          +'<div style="font-size:11px;color:var(--muted);margin-top:2px">By '+(p.moderatorTag||'?')+'</div>'
+          +'<div style="font-size:11.5px;color:var(--text2)">'+(p.reason||'No reason')+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px">By '+(p.moderatorTag||'?')+'</div>'
         +'</div>';
       });
     }
+
     if(logs.warnings&&logs.warnings.length){
-      html+='<div style="padding:8px 14px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Warnings ('+logs.warnings.length+')</div>';
+      html+='<div style="padding:6px 12px;font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;background:var(--surface2)">Warnings ('+logs.warnings.length+')</div>';
       logs.warnings.forEach(function(w){
-        html+='<div style="padding:10px 14px;border-bottom:1px solid var(--border)">'
-          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">'
-            +'<span class="badge by">⚠️ warning</span>'
+        html+='<div class="pun-row">'
+          +'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">'
+            +'<span class="badge by" style="font-size:9px">⚠️ warning</span>'
             +'<span style="font-size:10px;color:var(--muted)">'+new Date(w.createdAt).toLocaleDateString()+'</span>'
           +'</div>'
-          +'<div style="font-size:12px;color:var(--text2)">'+(w.reason||'No reason')+'</div>'
-          +'<div style="font-size:11px;color:var(--muted);margin-top:2px">By '+(w.issuedBy||'?')+'</div>'
+          +'<div style="font-size:11.5px;color:var(--text2)">'+(w.reason||'No reason')+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px">By '+(w.issuedBy||'?')+'</div>'
         +'</div>';
       });
     }
-    if(!logs.total) html+='<div style="padding:30px;text-align:center;color:var(--muted);font-size:13px">✅ No logs found</div>';
+
+    if(!logs.total&&!prof){html='<div style="padding:30px;text-align:center;color:var(--muted);font-size:12px">No data found for this player</div>';}
+    if(logs.total===0&&prof){html+='<div style="padding:20px;text-align:center;color:var(--success);font-size:12px">✅ No logs found — clean record!</div>';}
+
     panel.innerHTML=html;
-  }).catch(function(){panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted)">Failed to load</div>';});
+    document.getElementById('log-username').value=username;
+    if(prof&&prof.id)document.getElementById('log-roblox-id').value=prof.id;
+  }).catch(function(){
+    panel.innerHTML='<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">Failed to load player data</div>';
+  });
 }
 
-document.addEventListener('click',function(e){if(!e.target.closest('.ac-wrap'))document.getElementById('ac-list').classList.remove('open');});
-setInterval(function(){document.querySelectorAll('[data-start]').forEach(function(el){var s=parseInt(el.dataset.start);if(!s)return;var d=Date.now()-s;var h=Math.floor(d/3600000),m=Math.floor((d%3600000)/60000),sec=Math.floor((d%60000)/1000);el.textContent=(h>0?h+'h ':'')+m+'m '+sec+'s';});},1000);
+// ── Shift timer ────────────────────────────────────────────
+setInterval(function(){
+  document.querySelectorAll('[data-start]').forEach(function(el){
+    var s=parseInt(el.dataset.start);if(!s)return;
+    var d=Date.now()-s,h=Math.floor(d/3600000),m=Math.floor((d%3600000)/60000),sec=Math.floor((d%60000)/1000);
+    el.textContent=(h>0?h+'h ':'')+m+'m '+sec+'s';
+  });
+},1000);
+
+// Auto-refresh every 20s
+setTimeout(function(){location.reload();},20000);
 </script>`;
 
   res.send(layout(req.user, 'moderator', content, flash(req)));
 });
+
 
 // ── Chat Logs ─────────────────────────────────────────────
 app.get('/chatlogs', isAuth, async (req, res) => {
