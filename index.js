@@ -1,5 +1,5 @@
 require('dotenv').config();
-const http     = require('http');
+require('./dashboard.js');
 const path     = require('path');
 const mongoose = require('mongoose');
 const {
@@ -10,7 +10,6 @@ const {
   ModalBuilder, TextInputBuilder, TextInputStyle, MessageFlags,
 } = require('discord.js');
 
-http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 10000);
 process.chdir(path.dirname(require.main.filename));
 
 const client = new Client({
@@ -136,13 +135,21 @@ process.on('unhandledRejection', (reason) => {
   saveAllConfigs().catch(() => {});
 });
 
-function getGuildConfig(guildId) {
-  if (!config[guildId]) {
-    config[guildId] = {};
-    // Nieuwe guild — direct opslaan
-    saveGuildConfig(guildId).catch(() => {});
-  }
+function createDefaultConfig(guildId) {
+  config[guildId] = {};
+  saveGuildConfig(guildId).catch(() => {});
   return config[guildId];
+}
+
+function getGuildConfig(guildId) {
+  if (!config[guildId]) createDefaultConfig(guildId);
+  return config[guildId];
+}
+
+async function updateSetting(guildId, key, value) {
+  const gc = getGuildConfig(guildId);
+  gc[key] = value;
+  await saveGuildConfig(guildId);
 }
 
 function getHandbookConfig(guildId) {
@@ -241,6 +248,53 @@ function getAutomodConfig(guildId) {
   return gc.automod;
 }
 
+function getVoteConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.voteSystem) gc.voteSystem = { mainServer: false, logChannel: null };
+  return gc.voteSystem;
+}
+
+function getGlobalAnnouncementConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.globalAnnouncement) gc.globalAnnouncement = { announcementChannel: null, announcementPingRoles: [] };
+  return gc.globalAnnouncement;
+}
+
+async function broadcastVoteSuccess(question, voteId) {
+  for (const [guildId, guild] of client.guilds.cache) {
+    try {
+      const gac = getGlobalAnnouncementConfig(guildId);
+      if (!gac.announcementChannel) continue;
+      const ch = guild.channels.cache.get(gac.announcementChannel);
+      if (!ch) continue;
+      const pingContent = gac.announcementPingRoles?.length
+        ? gac.announcementPingRoles.map(r => `<@&${r}>`).join(' ')
+        : undefined;
+      const embed = new EmbedBuilder()
+        .setTitle('✅ Vote Passed!')
+        .setColor(0x57F287)
+        .setDescription(`**${question}**\n\nA vote has passed across all servers.`)
+        .setFooter({ text: `Vote ID: ${voteId}` })
+        .setTimestamp();
+      await ch.send({ content: pingContent, embeds: [embed] }).catch(() => {});
+    } catch { /* skip guild on error */ }
+  }
+}
+
+function getPermissionsConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.permissions) gc.permissions = { adminRoles: [], modRoles: [], staffRoles: [], shrRoles: [] };
+  return gc.permissions;
+}
+
+function getDepartmentsConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.departments) gc.departments = { list: [] };
+  // list: [{ id, name, role, channel, leadRole }]
+  return gc.departments;
+
+}
+
 // ════════════════════════════════════════════
 // COUNTER CONFIG
 // ════════════════════════════════════════════
@@ -300,7 +354,12 @@ async function deleteCounterChannel(guild, type, cc) {
   if (ch) await ch.delete().catch(() => {});
   cfg.channelId = null;
 }
-setInterval(async () => { for (const guild of client.guilds.cache.values()) { await updateCounters(guild).catch(console.error); } }, 5 * 60 * 1000);
+setInterval(async () => {
+  if (!dbReady) return;
+  for (const guild of client.guilds.cache.values()) {
+    await updateCounters(guild).catch(console.error);
+  }
+}, 5 * 60 * 1000);
 
 function buildRolePermsSetupPayload(guildId) {
   const rp = getRolePermConfig(guildId);
@@ -633,8 +692,8 @@ const pendingSendMsgChannel  = new Map();
 //   guildId, typeId, panelId, questionIndex, answers, dmChannelId, guildName, startedAt
 // }
 // ════════════════════════════════════════════
-const activeAppSessions = new Map();
-
+const activeAppSessions  = new Map();
+const activeGeneralVotes = new Map(); // voteId → { messageId, channelId, question, yes[], no[], endsAt, guildId }
 // ════════════════════════════════════════════
 // UTILS
 // ════════════════════════════════════════════
@@ -870,7 +929,72 @@ async function submitApplication(userId, session, appType, guild) {
 
 // ════════════════════════════════════════════
 // AUTOMOD
-// ════════════════════════════════════════════
+// ════════════════════════════════════════════}
+
+function buildVoteSystemSetupPayload(guildId) {
+  const vc = getVoteConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('🗳️ Vote System Setup')
+    .setColor(0x5865F2)
+    .setDescription('Configure the vote system.\n\n**Only guilds marked as Main Server can start votes.**')
+    .addFields(
+      { name: '🏠 Main Server', value: vc.mainServer ? '✅ Yes' : '❌ No', inline: true },
+      { name: '📋 Log Channel', value: vc.logChannel ? `<#${vc.logChannel}>` : '*Not set*', inline: true },
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('vote_setup__toggle').setLabel(vc.mainServer ? 'Disable Main Server' : 'Enable Main Server').setStyle(vc.mainServer ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🏠'),
+    new ButtonBuilder().setCustomId('vote_setup__log').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+    new ButtonBuilder().setCustomId('vote_setup__announce_channel').setLabel('Announce Channel').setStyle(ButtonStyle.Primary).setEmoji('📣'),
+    new ButtonBuilder().setCustomId('vote_setup__announce_roles').setLabel('Announce Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
+  );
+  return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
+}
+
+function buildPermissionsSetupPayload(guildId) {
+  const pc = getPermissionsConfig(guildId);
+  const fmt = (arr) => arr.length ? arr.map(r => `<@&${r}>`).join(', ') : '*Not set*';
+  const embed = new EmbedBuilder()
+    .setTitle('🔐 Permissions Setup')
+    .setColor(0x5865F2)
+    .setDescription('Configure which roles have access to each permission level.')
+    .addFields(
+      { name: '👑 Admin Roles',  value: fmt(pc.adminRoles),  inline: false },
+      { name: '🛡️ Mod Roles',   value: fmt(pc.modRoles),    inline: false },
+      { name: '👤 Staff Roles',  value: fmt(pc.staffRoles),  inline: false },
+      { name: '⭐ SHR Roles',    value: fmt(pc.shrRoles),    inline: false },
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('perms__admin').setLabel('Admin Roles').setStyle(ButtonStyle.Primary).setEmoji('👑'),
+    new ButtonBuilder().setCustomId('perms__mod').setLabel('Mod Roles').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
+    new ButtonBuilder().setCustomId('perms__staff').setLabel('Staff Roles').setStyle(ButtonStyle.Primary).setEmoji('👤'),
+    new ButtonBuilder().setCustomId('perms__shr').setLabel('SHR Roles').setStyle(ButtonStyle.Primary).setEmoji('⭐'),
+  );
+  return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
+}
+
+function buildDepartmentsSetupPayload(guildId) {
+  const dc = getDepartmentsConfig(guildId);
+  const embed = new EmbedBuilder()
+    .setTitle('🏢 Departments Setup')
+    .setColor(0xEB459E)
+    .setDescription(dc.list.length
+      ? dc.list.map((d, i) =>
+          `**${i + 1}. ${d.name}**\nRole: ${d.role ? `<@&${d.role}>` : '*None*'} | Channel: ${d.channel ? `<#${d.channel}>` : '*None*'} | Lead: ${d.leadRole ? `<@&${d.leadRole}>` : '*None*'}`
+        ).join('\n\n')
+      : '*No departments configured yet.*'
+    );
+  const btns = [
+    new ButtonBuilder().setCustomId('dept__add').setLabel('Add Department').setStyle(ButtonStyle.Success).setEmoji('➕'),
+  ];
+  if (dc.list.length) {
+    btns.push(
+      new ButtonBuilder().setCustomId('dept__edit').setLabel('Edit').setStyle(ButtonStyle.Primary).setEmoji('✏️'),
+      new ButtonBuilder().setCustomId('dept__remove').setLabel('Remove').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+    );
+  }
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], flags: MessageFlags.Ephemeral };
+}
+
 function buildAutomodSetupPayload(guildId) {
   const am = getAutomodConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🛡️ Automod Setup').setColor(0xED4245)
@@ -1157,10 +1281,12 @@ async function postSessionStart(guild, sc, hostUser, rawLink, vars, voterMention
   if (isValidUrl(rawLink)) comps.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())));
 
   // Bouw content: ping roles + voters (als ze er zijn)
-  let content = ping ?? '';
-  if (voterMentions) content = content ? `${content}\n🗳️ **Voters:** ${voterMentions}` : `🗳️ **Voters:** ${voterMentions}`;
+  const parts = [];
+  if (ping) parts.push(ping);
+  if (voterMentions) parts.push(`🗳️ **Voters:** ${voterMentions}`);
+  const content = parts.length ? parts.join('\n') : undefined;
 
-  await sCh.send({ content: content || undefined, embeds: [embed], components: comps });
+  await sCh.send({ content, embeds: [embed], components: comps });
 }
 
 // ════════════════════════════════════════════
@@ -1235,6 +1361,11 @@ const commands = [
   { name: 'erlckick', description: '[SHR] Kick ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'erlcban', description: '[SHR] Ban ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'trainrequest', description: 'Request a trainer (Trial Staff only)' },
+  { name: 'startvote', description: 'Start a yes/no vote', options: [
+    { name: 'question', type: 3, description: 'The vote question', required: true },
+    { name: 'duration', type: 4, description: 'Duration in minutes (default: 5)', required: false },
+  ]},
+  
   { name: 'setup', description: '[SHR] Setup bot features', options: [
     { name: 'tickets', type: 1, description: 'Ticket system' },
     { name: 'sessions', type: 1, description: 'Session system' },
@@ -1254,6 +1385,9 @@ const commands = [
     { name: 'roleperms', type: 1, description: 'Role permission system' },
     { name: 'commandlist', type: 1, description: 'Auto-updating command list' },
     { name: 'handbooks', type: 1, description: 'Handbook panel system' },
+    { name: 'permissions', type: 1, description: 'Permission roles setup' },
+    { name: 'departments', type: 1, description: 'Department roles setup' },
+    { name: 'votesystem', type: 1, description: 'Vote system setup' },
   ]},
 ];
 
@@ -1382,6 +1516,28 @@ client.once('clientReady', async () => {
 });
 
 
+client.on('guildCreate', async guild => {
+  createDefaultConfig(guild.id);
+  // Pre-initialize all subsystems so no handler ever hits undefined
+  getSessionConfig(guild.id);
+  getTicketConfig(guild.id);
+  getAnnouncementConfig(guild.id);
+  getSelfRoleConfig(guild.id);
+  getWelcomerConfig(guild.id);
+  getAutoroleConfig(guild.id);
+  getVerificationConfig(guild.id);
+  getApplicationConfig(guild.id);
+  getSavedMessagesConfig(guild.id);
+  getAutomodConfig(guild.id);
+  getCounterConfig(guild.id);
+  getVoteConfig(guild.id);
+  getPermissionsConfig(guild.id);
+  getDepartmentsConfig(guild.id);
+  getGlobalAnnouncementConfig(guild.id);
+  await saveGuildConfig(guild.id);
+  console.log(`✅ Joined guild: ${guild.name} (${guild.id}) — config initialized.`);
+});
+
 client.on('guildMemberAdd', async member => { await updateCounters(member.guild).catch(console.error); });
 client.on('guildMemberRemove', async member => { await updateCounters(member.guild).catch(console.error); });
 
@@ -1481,7 +1637,7 @@ client.on('messageCreate', async message => {
   const am = getAutomodConfig(guildId);
   if (!am.enabled || !am.keywords.length) return;
   const member = message.member;
-  if (!member) return;
+  if (!member || !member.roles?.cache) return;
   if (hasAnyStaff(member) || member.permissions.has(PermissionFlagsBits.Administrator)) return;
   const content = message.content.toLowerCase();
   const triggered = am.keywords.find(kw => content.includes(kw.toLowerCase()));
@@ -1514,6 +1670,7 @@ client.on('messageCreate', async message => {
 // GUILD MEMBER ADD (welcomer + autorole)
 // ════════════════════════════════════════════
 client.on('guildMemberAdd', async member => {
+  if (!dbReady) return;
   const guildId = member.guild.id;
   try {
     const ar = getAutoroleConfig(guildId);
@@ -1961,6 +2118,73 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ content: '✅ Shutdown posted!' });
         }
       }
+      if (cmd === 'startvote') {
+        const vc = getVoteConfig(guildId);
+        if (!vc.mainServer) return interaction.reply({ content: '❌ This server is not configured as a Main Server. Enable it via `/setup votesystem`.', flags: MessageFlags.Ephemeral });
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to start a vote.', flags: MessageFlags.Ephemeral });
+        const question = interaction.options.getString('question');
+        const duration = interaction.options.getInteger('duration') ?? 5;
+        const endsAt = Date.now() + duration * 60000;
+        const voteId = genId();
+        const embed = new EmbedBuilder()
+          .setTitle('🗳️ Vote Started!')
+          .setColor(0x5865F2)
+          .setDescription(`**${question}**`)
+          .addFields(
+            { name: '✅ Yes', value: '0 votes', inline: true },
+            { name: '❌ No',  value: '0 votes', inline: true },
+            { name: '⏱️ Ends', value: `<t:${Math.floor(endsAt / 1000)}:R>`, inline: true },
+          )
+          .setFooter({ text: `Vote ID: ${voteId} • Started by ${interaction.user.tag}` })
+          .setTimestamp();
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`vote__yes__${voteId}`).setLabel('✅ Yes').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`vote__no__${voteId}`).setLabel('❌ No').setStyle(ButtonStyle.Danger),
+        );
+        const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
+        // Store active vote state
+        activeGeneralVotes.set(voteId, { messageId: msg.id, channelId: interaction.channel.id, question, yes: [], no: [], endsAt, guildId });
+        // Auto-close after duration
+        setTimeout(async () => {
+          const voteData = activeGeneralVotes.get(voteId);
+          if (!voteData) return;
+          activeGeneralVotes.delete(voteId);
+          const yesCount = voteData.yes.length;
+          const noCount  = voteData.no.length;
+          const total    = yesCount + noCount;
+          const success  = yesCount > noCount;
+          const resultEmbed = new EmbedBuilder()
+            .setTitle(`🗳️ Vote Ended — ${success ? '✅ Passed' : '❌ Failed'}`)
+            .setColor(success ? 0x57F287 : 0xED4245)
+            .setDescription(`**${question}**`)
+            .addFields(
+              { name: '✅ Yes', value: `${yesCount} vote${yesCount !== 1 ? 's' : ''}`, inline: true },
+              { name: '❌ No',  value: `${noCount} vote${noCount !== 1 ? 's' : ''}`,  inline: true },
+              { name: '📊 Total', value: `${total}`, inline: true },
+              { name: '📋 Result', value: success ? '✅ **Passed**' : '❌ **Failed**', inline: false },
+            )
+            .setFooter({ text: `Vote ID: ${voteId}` })
+            .setTimestamp();
+          const resolvedGuild = client.guilds.cache.get(voteData.guildId);
+          if (resolvedGuild) {
+            const ch = resolvedGuild.channels.cache.get(voteData.channelId);
+            if (ch) {
+              const origMsg = await ch.messages.fetch(voteData.messageId).catch(() => null);
+              if (origMsg) await origMsg.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+            }
+            const vc2 = getVoteConfig(voteData.guildId);
+            if (vc2.logChannel) {
+              const logCh = resolvedGuild.channels.cache.get(vc2.logChannel);
+              if (logCh) await logCh.send({ embeds: [resultEmbed] }).catch(() => {});
+            }
+          }
+          if (success) {
+            await broadcastVoteSuccess(question, voteId).catch(console.error);
+          }
+        }, duration * 60000);
+        return;
+      }
+
       if (cmd === 'setup') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         const sub = interaction.options.getSubcommand();
@@ -1981,7 +2205,10 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'founderrequest') return interaction.reply(buildRequestSetupPayload(guildId, 'founder'));
         if (sub === 'roleperms')      return interaction.reply(buildRolePermsSetupPayload(guildId));
         if (sub === 'commandlist')    return interaction.reply(buildCommandListSetupPayload(guildId));
-        if (sub === 'handbooks')      return interaction.reply(buildHandbookSetupPayload(guildId));
+        if (sub === 'handbooks')     return interaction.reply(buildHandbookSetupPayload(guildId));
+        if (sub === 'permissions')   return interaction.reply(buildPermissionsSetupPayload(guildId));
+        if (sub === 'departments')   return interaction.reply(buildDepartmentsSetupPayload(guildId));
+        if (sub === 'votesystem')    return interaction.reply(buildVoteSystemSetupPayload(guildId));
       }
     }
 
@@ -2220,6 +2447,132 @@ client.on('interactionCreate', async interaction => {
           return interaction.editReply({ content: `✅ Handbook panel deployed in <#${panel.channel}>!` });
         }
         if (action === 'delete_panel') { delete hc.panels[panelId]; await saveConfig(config); return interaction.update(buildHandbookSetupPayload(guildId)); }
+      }
+
+      // ════ GENERAL VOTE BUTTONS ════
+      if (id.startsWith('vote__')) {
+        const parts  = id.split('__');
+        const choice = parts[1]; // yes or no
+        const voteId = parts[2];
+        const voteData = activeGeneralVotes.get(voteId);
+        if (!voteData) return interaction.reply({ content: '❌ This vote is no longer active.', flags: MessageFlags.Ephemeral });
+        if (Date.now() > voteData.endsAt) {
+          activeGeneralVotes.delete(voteId);
+          return interaction.reply({ content: '❌ This vote has already ended.', flags: MessageFlags.Ephemeral });
+        }
+        const userId = interaction.user.id;
+        if (voteData.yes.includes(userId) || voteData.no.includes(userId)) {
+          return interaction.reply({ content: '❌ You have already voted!', flags: MessageFlags.Ephemeral });
+        }
+        if (choice === 'yes') voteData.yes.push(userId);
+        if (choice === 'no')  voteData.no.push(userId);
+        const yesCount = voteData.yes.length;
+        const noCount  = voteData.no.length;
+        const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+          .spliceFields(0, 1, { name: '✅ Yes', value: `${yesCount} vote${yesCount !== 1 ? 's' : ''}`, inline: true })
+          .spliceFields(1, 1, { name: '❌ No',  value: `${noCount} vote${noCount !== 1 ? 's' : ''}`,  inline: true });
+        await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
+        return;
+      }
+
+      // ════ VOTE SETUP BUTTONS ════
+      if (id.startsWith('vote_setup__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const action = id.replace('vote_setup__', '');
+        const vc = getVoteConfig(guildId);
+        if (action === 'toggle') {
+          vc.mainServer = !vc.mainServer;
+          await saveGuildConfig(guildId);
+          return interaction.update(buildVoteSystemSetupPayload(guildId));
+        }
+        if (action === 'log') {
+          return interaction.reply({ content: '### 📋 Select log channel for votes', components: [channelDropdown('vote_setup_log', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'announce_channel') {
+          return interaction.reply({ content: '### 📣 Select announcement channel for successful votes', components: [channelDropdown('vote_setup_announce_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'announce_roles') {
+          return interaction.reply({
+            content: '### 🔔 Select roles to ping on successful vote announcements',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('vote_setup_announce_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+
+      // ════ PERMISSIONS SETUP BUTTONS ════
+      if (id.startsWith('perms__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const level = id.replace('perms__', '');
+        const labelMap = { admin: 'Admin', mod: 'Mod', staff: 'Staff', shr: 'SHR' };
+        if (!labelMap[level]) return;
+        return interaction.reply({
+          content: `### 🔐 Select **${labelMap[level]}** roles`,
+          components: [new ActionRowBuilder().addComponents(
+            new RoleSelectMenuBuilder()
+              .setCustomId(`perms_save__${level}`)
+              .setPlaceholder(`Select ${labelMap[level]} roles...`)
+              .setMinValues(0)
+              .setMaxValues(10)
+          )],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      // ════ DEPARTMENT CONFIG BUTTONS (Set Role / Channel / Lead from editor) ════
+      if (id.startsWith('dept_cfg__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const parts = id.split('__');
+        const action = parts[1];
+        const deptId = parts[2];
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.list.find(d => d.id === deptId);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        if (action === 'role') {
+          return interaction.reply({
+            content: `### 🎭 Select role for **${dept.name}**`,
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`dept_set_role__${deptId}`).setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (action === 'channel') {
+          return interaction.reply({
+            content: `### 📢 Select channel for **${dept.name}**`,
+            components: [channelDropdown(`dept_set_channel__${deptId}`, 'Select channel...')],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (action === 'lead') {
+          return interaction.reply({
+            content: `### 👑 Select lead role for **${dept.name}**`,
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`dept_set_lead__${deptId}`).setPlaceholder('Select lead role...').setMinValues(1).setMaxValues(1))],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+
+      // ════ DEPARTMENTS SETUP BUTTONS ════
+      if (id.startsWith('dept__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const action = id.replace('dept__', '');
+        const dc = getDepartmentsConfig(guildId);
+        if (action === 'add') {
+          const modal = new ModalBuilder().setCustomId('modal_dept_add').setTitle('Add Department');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_name').setLabel('Department name').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (action === 'edit') {
+          if (!dc.list.length) return interaction.reply({ content: '❌ No departments.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_edit').setPlaceholder('Select department...').addOptions(dc.list.map(d => ({ label: d.name, value: d.id })));
+          return interaction.reply({ content: '### ✏️ Select department to edit', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'remove') {
+          if (!dc.list.length) return interaction.reply({ content: '❌ No departments.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department...').addOptions(dc.list.map(d => ({ label: d.name, value: d.id })));
+          return interaction.reply({ content: '### 🗑️ Select department to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
       }
 
       // ════ ROLE PERMS SETUP BUTTONS ════
@@ -3152,6 +3505,17 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isRoleSelectMenu()) {
       if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
       const ids = interaction.values;
+      if (interaction.customId.startsWith('perms_save__')) {
+        const level = interaction.customId.replace('perms_save__', '');
+        const pc = getPermissionsConfig(guildId);
+        const keyMap = { admin: 'adminRoles', mod: 'modRoles', staff: 'staffRoles', shr: 'shrRoles' };
+        const key = keyMap[level];
+        if (!key) return interaction.reply({ content: '❌ Unknown level.', flags: MessageFlags.Ephemeral });
+        pc[key] = interaction.values;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ **${level.toUpperCase()}** roles updated: ${interaction.values.length ? interaction.values.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
+      }
+
       if (interaction.customId === 'ard_add')          { const ar = getAutoroleConfig(guildId); for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); } await saveConfig(config); return interaction.reply({ content: `✅ Autoroles added.`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'vcd_role')          { const vc = getVerificationConfig(guildId); vc.verifiedRole = ids[0]; await saveConfig(config); return interaction.reply({ content: `✅ Verified role: <@&${ids[0]}>.`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_ping_roles')     { getTicketConfig(guildId).pingRoles = ids; await saveConfig(config); return interaction.reply({ content: '✅ Ticket ping roles set.', flags: MessageFlags.Ephemeral }); }
@@ -3285,6 +3649,30 @@ client.on('interactionCreate', async interaction => {
         await saveConfig(config);
         return interaction.reply({ content: `✅ Ping roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
       }
+      if (interaction.customId.startsWith('dept_set_role__')) {
+        const deptId = interaction.customId.replace('dept_set_role__', '');
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.list.find(d => d.id === deptId);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        dept.role = ids[0];
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Role for **${dept.name}** set to <@&${ids[0]}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId.startsWith('dept_set_lead__')) {
+        const deptId = interaction.customId.replace('dept_set_lead__', '');
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.list.find(d => d.id === deptId);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        dept.leadRole = ids[0];
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Lead role for **${dept.name}** set to <@&${ids[0]}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'vote_setup_announce_roles') {
+        const gac = getGlobalAnnouncementConfig(guildId);
+        gac.announcementPingRoles = ids;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Announce ping roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
+      }
 
       if (interaction.customId.startsWith('srr__add__')) {
         const panelId = interaction.customId.replace('srr__add__', '');
@@ -3365,6 +3753,28 @@ client.on('interactionCreate', async interaction => {
         hc.panels[panelId].channel = chId;
         await saveConfig(config);
         return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (interaction.customId === 'vote_setup_log') {
+        const vc = getVoteConfig(guildId);
+        vc.logChannel = chId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Vote log channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'vote_setup_announce_channel') {
+        const gac = getGlobalAnnouncementConfig(guildId);
+        gac.announcementChannel = chId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Vote announcement channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId.startsWith('dept_set_channel__')) {
+        const deptId = interaction.customId.replace('dept_set_channel__', '');
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.list.find(d => d.id === deptId);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        dept.channel = chId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Channel for **${dept.name}** set to <#${chId}>.`, flags: MessageFlags.Ephemeral });
       }
 
       if (interaction.customId === 'cmdlist_channel') {
@@ -3448,6 +3858,33 @@ client.on('interactionCreate', async interaction => {
       if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
 
       // Standard selects
+      if (id === 'dept_sel_remove') {
+        const dc = getDepartmentsConfig(guildId);
+        dc.list = dc.list.filter(d => d.id !== val);
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: '✅ Department removed.', flags: MessageFlags.Ephemeral });
+      }
+
+      if (id === 'dept_sel_edit') {
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.list.find(d => d.id === val);
+        if (!dept) return interaction.reply({ content: '❌ Not found.', flags: MessageFlags.Ephemeral });
+        const embed = new EmbedBuilder()
+          .setTitle(`✏️ Editing: ${dept.name}`)
+          .setColor(0xEB459E)
+          .addFields(
+            { name: '🎭 Role',     value: dept.role     ? `<@&${dept.role}>`     : '*Not set*', inline: true },
+            { name: '📢 Channel',  value: dept.channel  ? `<#${dept.channel}>`   : '*Not set*', inline: true },
+            { name: '👑 Lead Role',value: dept.leadRole ? `<@&${dept.leadRole}>` : '*Not set*', inline: true },
+          );
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`dept_cfg__role__${val}`).setLabel('Set Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
+          new ButtonBuilder().setCustomId(`dept_cfg__channel__${val}`).setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+          new ButtonBuilder().setCustomId(`dept_cfg__lead__${val}`).setLabel('Lead Role').setStyle(ButtonStyle.Primary).setEmoji('👑'),
+        );
+        return interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+      }
+
       if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); await saveConfig(config); return interaction.reply({ content: `✅ Removed from autoroles.`, flags: MessageFlags.Ephemeral }); }
       if (id === 'smd_delete')      { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; await saveConfig(config); return interaction.reply({ content: '✅ Deleted.', flags: MessageFlags.Ephemeral }); }
       if (id === 'an_sel_edit')     { return interaction.update(buildAnnouncementEditor(guildId, val)); }
@@ -3658,7 +4095,16 @@ client.on('interactionCreate', async interaction => {
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
 
-      // ── Counter labels ──
+      // ── Department add ──
+      if (mid === 'modal_dept_add') {
+        const dc = getDepartmentsConfig(guildId);
+        const name = interaction.fields.getTextInputValue('dept_name').trim();
+        if (dc.list.some(d => d.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ **${name}** already exists.`, flags: MessageFlags.Ephemeral });
+        dc.list.push({ id: genId(), name, role: null, channel: null, leadRole: null });
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Department **${name}** created!`, flags: MessageFlags.Ephemeral });
+      }
+
       if (mid === 'modal_cnt_labels') {
         const cc = getCounterConfig(guildId);
         cc.channels.members.label  = interaction.fields.getTextInputValue('cnt_lbl_members').trim()  || cc.channels.members.label;
