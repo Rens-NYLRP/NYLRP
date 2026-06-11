@@ -1,5 +1,6 @@
 require('dotenv').config();
-require('./index.js');
+const http = require('http');
+http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 const path     = require('path');
 const mongoose = require('mongoose');
 const {
@@ -2711,7 +2712,7 @@ async function createTicketChannel(interaction, type, tc, pc, guildId, alreadyUp
 // ════════════════════════════════════════════
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
-  { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }, { label: 'Chain of Command', value: 'coc_setup', emoji: '⛓️' },] },
+  { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
   { name: 'serverinfo', description: 'Server information' },
   { name: 'roleinfo', description: 'Role information', options: [{ name: 'role', type: 8, description: 'Which role?', required: true }] },
   { name: 'poll', description: 'Create a poll', options: [
