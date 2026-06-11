@@ -1,5 +1,5 @@
 require('dotenv').config();
-require('./dashboard.js');
+require('./index.js');
 const path     = require('path');
 const mongoose = require('mongoose');
 const {
