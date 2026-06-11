@@ -1,2 +1,5 @@
 .env
-node_modules
+config.json
+node_modules/
+*.zip
+.DS_Store
