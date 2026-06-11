@@ -9483,6 +9483,20 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
+// Render healthcheck server
+const express = require('express');
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.status(200).send('Bot is running');
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Web server listening on port ${PORT}`);
+});
+
 //Start: eerst DB verbinden, dan bot inloggen //
 (async () => {
   await connectDB();
