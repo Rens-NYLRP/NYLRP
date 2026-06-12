@@ -525,8 +525,10 @@ function getApplicationConfig(guildId) {
     panels: [],
     reviewChannel: null,
     logChannel: null,
+    transcriptChannel: null,
     appTypes: [],
   };
+  if (gc.applications.transcriptChannel === undefined) gc.applications.transcriptChannel = null;
   if (!isMainServer(guildId)) {
     const mainApps = getMainConfig('applications');
     if (mainApps) {
@@ -2274,7 +2276,7 @@ function buildApplicationSetupPayload(guildId) {
     .addFields(
       { name: '📢 Global Review Channel', value: ac.reviewChannel ? `<#${ac.reviewChannel}>` : '*Not set*', inline: true },
       { name: '📋 Log Channel',           value: ac.logChannel ? `<#${ac.logChannel}>` : '*Not set*', inline: true },
-      { name: '\u200b', value: '\u200b', inline: true },
+      { name: '📝 Transcript Channel',    value: ac.transcriptChannel ? `<#${ac.transcriptChannel}>` : '*Not set*', inline: true },
       { name: '📝 Application Types',    value: typeList, inline: false },
       { name: '🖼️ Panels',              value: panelList, inline: false },
     );
@@ -2282,6 +2284,7 @@ function buildApplicationSetupPayload(guildId) {
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ap_review_channel').setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId('ap_log_channel').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+    new ButtonBuilder().setCustomId('ap_transcript_channel').setLabel('Transcript Channel').setStyle(ButtonStyle.Primary).setEmoji('📝'),
   );
   const r2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ap_add_type').setLabel('Add Type').setStyle(ButtonStyle.Success).setEmoji('➕'),
@@ -4814,12 +4817,9 @@ client.on('interactionCreate', async interaction => {
             new ButtonBuilder().setCustomId('setup_menu__founderrequest').setLabel('Founder Req').setStyle(ButtonStyle.Primary).setEmoji('📋'),
             new ButtonBuilder().setCustomId('setup_menu__infractions').setLabel('Infractions').setStyle(ButtonStyle.Danger).setEmoji('⚠️'),
             new ButtonBuilder().setCustomId('setup_menu__loa').setLabel('LOA').setStyle(ButtonStyle.Primary).setEmoji('🏖️'),
-            new ButtonBuilder().setCustomId('setup_menu__roleping').setLabel('Role Ping').setStyle(ButtonStyle.Danger).setEmoji('🔔'),
-          );
-          const r6 = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('setup_menu__chainofcommand').setLabel('Chain of Command').setStyle(ButtonStyle.Primary).setEmoji('⛓️'),
           );
-         return interaction.reply({ embeds: [embed], components: [r1, r2, r3, r4, r5, r6], flags: MessageFlags.Ephemeral });
+         return interaction.reply({ embeds: [embed], components: [r1, r2, r3, r4, r5], flags: MessageFlags.Ephemeral });
         }
       }
 
