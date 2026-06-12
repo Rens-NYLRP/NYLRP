@@ -1196,6 +1196,9 @@ function buildChainSetupPayload(guildId) {
   const chainList = chain.length
     ? chain.map((e, i) => `**${i + 1}.** <@&${e.roleId}>`).join('\n')
     : '*No ranks configured yet.*';
+  const promoteRolesList = cc.promoteRoles?.length
+    ? cc.promoteRoles.map(id => `<@&${id}>`).join(', ')
+    : '*None — only SHR can use /promote*';
 
   const embed = new EmbedBuilder()
     .setTitle('⛓️ Chain of Command Setup')
@@ -1207,20 +1210,25 @@ function buildChainSetupPayload(guildId) {
     .addFields(
       { name: '📋 Log Channel', value: cc.logChannel ? `<#${cc.logChannel}>` : '*Not set*', inline: true },
       { name: '📊 Total Ranks', value: `${chain.length}`, inline: true },
+      { name: '🎖️ Promote Roles', value: promoteRolesList, inline: false },
     );
 
-  const r1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('coc__add_rank').setLabel('Add Rank').setStyle(ButtonStyle.Success).setEmoji('➕'),
-    new ButtonBuilder().setCustomId('coc__remove_rank').setLabel('Remove Rank').setStyle(ButtonStyle.Danger).setEmoji('➖'),
-    new ButtonBuilder().setCustomId('coc__move_up').setLabel('Move Up').setStyle(ButtonStyle.Primary).setEmoji('⬆️'),
-    new ButtonBuilder().setCustomId('coc__move_down').setLabel('Move Down').setStyle(ButtonStyle.Primary).setEmoji('⬇️'),
-    new ButtonBuilder().setCustomId('coc__log_channel').setLabel('Log Channel').setStyle(ButtonStyle.Secondary).setEmoji('📋'),
-  );
-  const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('coc__clear').setLabel('Clear Chain').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-  );
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('coc_action')
+    .setPlaceholder('Select an action...')
+    .addOptions(
+      { label: 'Add Rank', value: 'add_rank', emoji: '➕', description: 'Add a role to the chain' },
+      { label: 'Remove Rank', value: 'remove_rank', emoji: '➖', description: 'Remove a role from the chain' },
+      { label: 'Move Rank Up', value: 'move_up', emoji: '⬆️', description: 'Move a rank one position up' },
+      { label: 'Move Rank Down', value: 'move_down', emoji: '⬇️', description: 'Move a rank one position down' },
+      { label: 'Log Channel', value: 'log_channel', emoji: '📋', description: 'Set the promotion log channel' },
+      { label: 'Promote Roles', value: 'promote_roles', emoji: '🎖️', description: 'Set who can use /promote (besides SHR)' },
+      { label: 'Clear Chain', value: 'clear', emoji: '🗑️', description: 'Remove all ranks from the chain' },
+    );
 
-  return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
+  const r1 = new ActionRowBuilder().addComponents(select);
+
+  return { embeds: [embed], components: [r1], flags: MessageFlags.Ephemeral };
 }
 
 function buildStaffReviewSetupPayload(guildId) {
@@ -1531,11 +1539,21 @@ function getChainConfig(guildId) {
   if (!gc.chainOfCommand) gc.chainOfCommand = {
     chain: [], // [{ roleId, position }] gesorteerd op position ascending
     logChannel: null,
+    promoteRoles: [], // rollen die /promote mogen gebruiken voor 1-staps CoC promoties
   };
   if (!Array.isArray(gc.chainOfCommand.chain)) gc.chainOfCommand.chain = [];
+  if (!Array.isArray(gc.chainOfCommand.promoteRoles)) gc.chainOfCommand.promoteRoles = [];
   // Zorg dat chain altijd gesorteerd is op positie
   gc.chainOfCommand.chain.sort((a, b) => a.position - b.position);
   return gc.chainOfCommand;
+}
+
+// Mag deze member /promote gebruiken (instelbare promote-rollen of SHR)?
+function hasPromoteAccess(m, guildId) {
+  if (hasSHR(m)) return true;
+  const cc = getChainConfig(guildId);
+  if (!cc.promoteRoles?.length) return false;
+  return cc.promoteRoles.some(id => m.roles.cache.has(id));
 }
 
 // Geeft de huidige rank positie van een member in de chain terug, -1 als geen
@@ -2827,7 +2845,7 @@ const commands = [
     { name: 'roles', type: 3, description: 'Role IDs or mentions separated by spaces', required: true },
   ]},
   { name: 'nickname', description: '[SHR] Change nickname', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname', required: false }] },
-  { name: 'promote', description: '[SHR] Promote a user to a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to promote to', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
+  { name: 'promote', description: 'Promote a user via the Chain of Command (SHR can override rank)', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: '[SHR only] Override: skip directly to this rank', required: false }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'demote', description: '[SHR] Demote a user from a role', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role to demote from', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'verify', description: 'Verify your Roblox account' },
   { name: 'unverify', description: '[SHR] Unverify a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
@@ -4120,75 +4138,75 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (cmd === 'promote') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         const targetMember = interaction.options.getMember('user');
-        const role = interaction.options.getRole('role');
+        const overrideRole = interaction.options.getRole('role'); // SHR-only override
         const promoteReason = interaction.options.getString('reason') ?? 'No reason provided';
         if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
+
+        const isSHR = hasSHR(interaction.member);
+
+        // Toegang: SHR altijd, anders alleen instelbare promote-rollen
+        if (!hasPromoteAccess(interaction.member, guildId)) {
+          return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+        }
+
+        // Override (rol-keuze) is exclusief voor SHR
+        if (overrideRole && !isSHR) {
+          return interaction.reply({ content: '❌ Only SHR can specify a target rank to override the Chain of Command order.', flags: MessageFlags.Ephemeral });
+        }
+
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        // Chain of command logica
         const cc = getChainConfig(guildId);
-        if (cc.chain.length > 0) {
-          const currentPosition = getMemberChainPosition(targetMember, cc.chain);
-          const isAtTop = currentPosition === cc.chain[cc.chain.length - 1]?.position;
-          if (isAtTop) return interaction.editReply({ content: '❌ This member is already at the highest rank in the chain.' });
-
-          // SHR mag naar elke rank, normaal één stap omhoog
-          const skipTo = hasSHR(interaction.member) && role ? role.id : null;
-
-          // Valideer: als SHR een rol kiest die niet in de chain zit, gewoon de rol geven (legacy)
-          if (skipTo && !cc.chain.some(e => e.roleId === skipTo)) {
-            // Rol niet in chain — gewoon toevoegen (legacy gedrag)
-            try {
-              await targetMember.roles.add(role, promoteReason);
-            } catch (e) {
-              return interaction.editReply({ content: `❌ Could not add role: ${e.message}` });
-            }
-          } else {
-            // Chain promotie
-            const result = await promoteInChain(interaction.guild, targetMember, interaction.user, guildId, skipTo);
-            if (!result.success) return interaction.editReply({ content: `❌ ${result.reason}` });
-            return interaction.editReply({ content: `✅ **${userDisplay(targetMember.user)}** promoted to **${result.newRole.name}** via chain of command.` });
-          }
-        } else {
-          // Geen chain geconfigureerd — legacy gedrag
-          try {
-            await targetMember.roles.add(role, promoteReason);
-          } catch (e) {
-            return interaction.editReply({ content: `❌ Could not add role: ${e.message}` });
-          }
+        if (!cc.chain.length) {
+          return interaction.editReply({ content: '❌ No Chain of Command is configured. Set it up via `/setup` → Chain of Command.' });
         }
-        // Stuur één gecombineerd bericht in het announce kanaal
+
+        const currentPosition = getMemberChainPosition(targetMember, cc.chain);
+        const isAtTop = currentPosition === cc.chain[cc.chain.length - 1]?.position;
+        if (isAtTop) return interaction.editReply({ content: '❌ This member is already at the highest rank in the chain.' });
+
+        // SHR override: spring naar een specifieke rank (moet wel in de chain staan)
+        let skipTo = null;
+        if (overrideRole) {
+          if (!cc.chain.some(e => e.roleId === overrideRole.id)) {
+            return interaction.editReply({ content: '❌ That role is not part of the Chain of Command.' });
+          }
+          skipTo = overrideRole.id;
+        }
+
+        const result = await promoteInChain(interaction.guild, targetMember, interaction.user, guildId, skipTo);
+        if (!result.success) return interaction.editReply({ content: `❌ ${result.reason}` });
+
+        // Stuur gecombineerd bericht in het announce kanaal
         const tc = getTrainingConfig(guildId);
         if (tc.announceChannel) {
           const announceCh = interaction.guild.channels.cache.get(tc.announceChannel);
           if (announceCh) {
             const defaultMsg = (tc.announceMessage || '🎉 Congratulations <@{user}>! You have been promoted to **{role}**!')
               .replace(/{user}/g, targetMember.user.id)
-              .replace(/{role}/g, role.name)
+              .replace(/{role}/g, result.newRole.name)
               .replace(/{promotedBy}/g, userDisplay(interaction.user))
               .replace(/{server}/g, interaction.guild.name);
             const announceEmbed = new EmbedBuilder()
               .setTitle('⬆️ Promotion!')
               .setColor(0x57F287)
-              .setDescription(defaultMsg)
+              .setDescription(embedSafe.desc(defaultMsg))
               .setThumbnail(targetMember.user.displayAvatarURL({ dynamic: true }))
               .addFields(
                 { name: '👤 User', value: `${userDisplay(targetMember.user)}`, inline: true },
-                { name: '🎭 Role', value: role.name, inline: true },
-                { name: '📝 Reason', value: promoteReason, inline: false },
+                { name: '🎭 New Rank', value: result.newRole.name, inline: true },
+                { name: '📝 Reason', value: embedSafe.fieldVal(promoteReason), inline: false },
                 { name: '👮 By', value: userDisplay(interaction.user), inline: true },
               )
               .setTimestamp();
             await announceCh.send({ content: `<@${targetMember.user.id}>`, embeds: [announceEmbed] }).catch(() => {});
           }
+        } else {
+          await interaction.channel.send({ content: `<@${targetMember.user.id}>`, embeds: [new EmbedBuilder().setTitle('⬆️ Promotion!').setColor(0x57F287).setDescription(`Congratulations <@${targetMember.user.id}>! You have been promoted to **${result.newRole.name}**!`).setTimestamp()] }).catch(() => {});
         }
-        // Ping in announce kanaal als dat bestaat, anders in huidig kanaal
-        if (!tc.announceChannel) {
-          await interaction.channel.send({ content: `<@${targetMember.user.id}>`, embeds: [new EmbedBuilder().setTitle('⬆️ Promotion!').setColor(0x57F287).setDescription(`Congratulations <@${targetMember.user.id}>! You have been promoted to **${role.name}**!`).setTimestamp()] }).catch(() => {});
-        }
-        return interaction.editReply({ content: `✅ **${userDisplay(targetMember.user)}** promoted to **${role.name}**.` });
+
+        return interaction.editReply({ content: `✅ **${userDisplay(targetMember.user)}** promoted to **${result.newRole.name}** via Chain of Command${skipTo ? ' (SHR override)' : ''}.` });
       }
 
       if (cmd === 'demote') {
