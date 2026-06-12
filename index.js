@@ -4816,7 +4816,10 @@ client.on('interactionCreate', async interaction => {
             new ButtonBuilder().setCustomId('setup_menu__loa').setLabel('LOA').setStyle(ButtonStyle.Primary).setEmoji('🏖️'),
             new ButtonBuilder().setCustomId('setup_menu__roleping').setLabel('Role Ping').setStyle(ButtonStyle.Danger).setEmoji('🔔'),
           );
-         return interaction.reply({ embeds: [embed], components: [r1, r2, r3, r4, r5], flags: MessageFlags.Ephemeral });
+          const r6 = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('setup_menu__chainofcommand').setLabel('Chain of Command').setStyle(ButtonStyle.Primary).setEmoji('⛓️'),
+          );
+         return interaction.reply({ embeds: [embed], components: [r1, r2, r3, r4, r5, r6], flags: MessageFlags.Ephemeral });
         }
       }
 
