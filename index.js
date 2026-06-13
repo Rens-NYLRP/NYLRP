@@ -4802,42 +4802,38 @@ client.on('interactionCreate', async interaction => {
             .addFields(
               { name: '🎫 Moderation', value: '`tickets` `automod` `verification`', inline: true },
             );
-          const r1 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('setup_menu__tickets').setLabel('Tickets').setStyle(ButtonStyle.Primary).setEmoji('🎫'),
-            new ButtonBuilder().setCustomId('setup_menu__sessions').setLabel('Sessions').setStyle(ButtonStyle.Primary).setEmoji('🎮'),
-            new ButtonBuilder().setCustomId('setup_menu__selfroles').setLabel('Self Roles').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
-            new ButtonBuilder().setCustomId('setup_menu__announcements').setLabel('Announcements').setStyle(ButtonStyle.Primary).setEmoji('📣'),
-            new ButtonBuilder().setCustomId('setup_menu__welcomer').setLabel('Welcomer').setStyle(ButtonStyle.Primary).setEmoji('👋'),
-          );
-          const r2 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('setup_menu__autorole').setLabel('Autorole').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
-            new ButtonBuilder().setCustomId('setup_menu__verification').setLabel('Verification').setStyle(ButtonStyle.Primary).setEmoji('✅'),
-            new ButtonBuilder().setCustomId('setup_menu__applications').setLabel('Applications').setStyle(ButtonStyle.Primary).setEmoji('📋'),
-            new ButtonBuilder().setCustomId('setup_menu__automod').setLabel('Automod').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
-            new ButtonBuilder().setCustomId('setup_menu__counters').setLabel('Counters').setStyle(ButtonStyle.Primary).setEmoji('📊'),
-          );
-          const r3 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('setup_menu__training').setLabel('Training').setStyle(ButtonStyle.Primary).setEmoji('🎓'),
-            new ButtonBuilder().setCustomId('setup_menu__erlclogs').setLabel('ERLC Logs').setStyle(ButtonStyle.Primary).setEmoji('📡'),
-            new ButtonBuilder().setCustomId('setup_menu__roleperms').setLabel('Role Perms').setStyle(ButtonStyle.Primary).setEmoji('🔐'),
-            new ButtonBuilder().setCustomId('setup_menu__permissions').setLabel('Permissions').setStyle(ButtonStyle.Primary).setEmoji('👑'),
-            new ButtonBuilder().setCustomId('setup_menu__departments').setLabel('Departments').setStyle(ButtonStyle.Primary).setEmoji('🏢'),
-          );
-          const r4 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('setup_menu__handbooks').setLabel('Handbooks').setStyle(ButtonStyle.Primary).setEmoji('📚'),
-            new ButtonBuilder().setCustomId('setup_menu__savedmessages').setLabel('Saved Msgs').setStyle(ButtonStyle.Primary).setEmoji('💾'),
-            new ButtonBuilder().setCustomId('setup_menu__commandlist').setLabel('Cmd List').setStyle(ButtonStyle.Primary).setEmoji('📜'),
-            new ButtonBuilder().setCustomId('setup_menu__votesystem').setLabel('Vote System').setStyle(ButtonStyle.Primary).setEmoji('🗳️'),
-            new ButtonBuilder().setCustomId('setup_menu__execrequest').setLabel('Exec Request').setStyle(ButtonStyle.Primary).setEmoji('📋'),
-          );
-          const r5 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('setup_menu__botconfig').setLabel('Bot Config').setStyle(ButtonStyle.Secondary).setEmoji('🤖'),
-            new ButtonBuilder().setCustomId('setup_menu__founderrequest').setLabel('Founder Req').setStyle(ButtonStyle.Primary).setEmoji('📋'),
-            new ButtonBuilder().setCustomId('setup_menu__infractions').setLabel('Infractions').setStyle(ButtonStyle.Danger).setEmoji('⚠️'),
-            new ButtonBuilder().setCustomId('setup_menu__loa').setLabel('LOA').setStyle(ButtonStyle.Primary).setEmoji('🏖️'),
-            new ButtonBuilder().setCustomId('setup_menu__chainofcommand').setLabel('Chain of Command').setStyle(ButtonStyle.Primary).setEmoji('⛓️'),
-          );
-         return interaction.reply({ embeds: [embed], components: [r1, r2, r3, r4, r5], flags: MessageFlags.Ephemeral });
+          const select = new StringSelectMenuBuilder()
+            .setCustomId('setup_menu')
+            .setPlaceholder('Select a category to configure...')
+            .addOptions(
+              { label: 'Tickets', value: 'tickets', emoji: '🎫' },
+              { label: 'Sessions', value: 'sessions', emoji: '🎮' },
+              { label: 'Self Roles', value: 'selfroles', emoji: '🎭' },
+              { label: 'Announcements', value: 'announcements', emoji: '📣' },
+              { label: 'Welcomer', value: 'welcomer', emoji: '👋' },
+              { label: 'Autorole', value: 'autorole', emoji: '🎭' },
+              { label: 'Verification', value: 'verification', emoji: '✅' },
+              { label: 'Applications', value: 'applications', emoji: '📋' },
+              { label: 'Automod', value: 'automod', emoji: '🛡️' },
+              { label: 'Counters', value: 'counters', emoji: '📊' },
+              { label: 'Training', value: 'training', emoji: '🎓' },
+              { label: 'ERLC Logs', value: 'erlclogs', emoji: '📡' },
+              { label: 'Role Perms', value: 'roleperms', emoji: '🔐' },
+              { label: 'Permissions', value: 'permissions', emoji: '👑' },
+              { label: 'Departments', value: 'departments', emoji: '🏢' },
+              { label: 'Handbooks', value: 'handbooks', emoji: '📚' },
+              { label: 'Saved Msgs', value: 'savedmessages', emoji: '💾' },
+              { label: 'Cmd List', value: 'commandlist', emoji: '📜' },
+              { label: 'Vote System', value: 'votesystem', emoji: '🗳️' },
+              { label: 'Exec Request', value: 'execrequest', emoji: '📋' },
+              { label: 'Bot Config', value: 'botconfig', emoji: '🤖' },
+              { label: 'Founder Req', value: 'founderrequest', emoji: '📋' },
+              { label: 'Infractions', value: 'infractions', emoji: '⚠️' },
+              { label: 'LOA', value: 'loa', emoji: '🏖️' },
+              { label: 'Chain of Command', value: 'chainofcommand', emoji: '⛓️' },
+            );
+          const row = new ActionRowBuilder().addComponents(select);
+          return interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
         }
       }
 
@@ -5399,7 +5395,7 @@ client.on('interactionCreate', async interaction => {
         if (!action || !typeId) return interaction.reply({ content: '❌ Malformed button ID.', flags: MessageFlags.Ephemeral });
         if (action === 'required') return interaction.reply({ content: `### 🔒 Select required roles`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_required_roles__${typeId}`).setPlaceholder('Select required roles (0 = everyone)...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
         if (action === 'view')     return interaction.reply({ content: `### 👁️ Select view roles`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_view_roles__${typeId}`).setPlaceholder('Select view roles (0 = none)...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
-        if (action === 'category') return interaction.reply({ content: `### 📁 Select category for this ticket type`, components: [channelDropdown(`tkt_type_category__${typeId}`, 'Select category...')], flags: MessageFlags.Ephemeral });
+        if (action === 'category') return interaction.reply({ content: `### 📁 Select category for this ticket type`, components: [channelDropdown(`tkt_type_category__${typeId}`, 'Select category...', [ChannelType.GuildCategory])], flags: MessageFlags.Ephemeral });
         if (action === 'ping_roles') return interaction.reply({ content: `### 📢 Select ping roles for this type\n*Leave empty to use global ping roles*`, components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`tkt_type_ping_roles__${typeId}`).setPlaceholder('Select ping roles (empty = use global)...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
         if (action === 'transcript') return interaction.reply({ content: `### 📋 Select transcript channel for this type\n*Leave empty to use global*`, components: [channelDropdown(`tkt_type_transcript__${typeId}`, 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (action === 'embed') {
