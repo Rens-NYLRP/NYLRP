@@ -1242,14 +1242,12 @@ function buildStaffReviewSetupPayload(guildId) {
   const embed = new EmbedBuilder().setTitle('⭐ Staff Review Setup').setColor(0x5865F2)
     .addFields(
       { name: '📢 Review Channel',          value: src.channel ? `<#${src.channel}>` : '*Not set*',                                              inline: true },
-      { name: '📋 Log Channel',             value: src.logChannel ? `<#${src.logChannel}>` : '*Not set*',                                        inline: true },
       { name: '👮 Reviewable Staff Roles',  value: src.staffRoles.length ? src.staffRoles.map(r => `<@&${r}>`).join(', ') : '*Any staff member*', inline: true },
       { name: '📊 Total Reviews',           value: totalCount ? `${totalCount} review(s) — avg ⭐ ${avgScore}/5` : '*No reviews yet*',            inline: false },
     )
-    .setDescription('Allow members to submit a star rating + written review for any staff member.\n\n**Review Channel** — where reviews are posted publicly.\n**Log Channel** — where a summary with updated stats is sent after each review (staff-only).');
+    .setDescription('Allow members to submit a star rating + written review for any staff member.');
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('sr2_setup__channel').setLabel('Review Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-    new ButtonBuilder().setCustomId('sr2_setup__log_channel').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
+    new ButtonBuilder().setCustomId('sr2_setup__channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId('sr2_setup__staff_roles').setLabel('Staff Roles').setStyle(ButtonStyle.Primary).setEmoji('👮'),
     new ButtonBuilder().setCustomId('sr2_setup__leaderboard').setLabel('Leaderboard').setStyle(ButtonStyle.Secondary).setEmoji('🏆'),
   );
@@ -1649,9 +1647,8 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
 
 function getStaffReviewConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.staffReview) gc.staffReview = { channel: null, logChannel: null, staffRoles: [], reviews: {} };
+  if (!gc.staffReview) gc.staffReview = { channel: null, staffRoles: [], reviews: {} };
   if (!gc.staffReview.staffRoles) gc.staffReview.staffRoles = [];
-  if (gc.staffReview.logChannel === undefined) gc.staffReview.logChannel = null;
   if (!gc.staffReview.reviews)    gc.staffReview.reviews    = {};
   return gc.staffReview;
 }
@@ -6150,10 +6147,7 @@ client.on('interactionCreate', async interaction => {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const action = id.replace('sr2_setup__', '');
         if (action === 'channel') {
-          return interaction.reply({ content: '### 📢 Select the channel where staff reviews will be posted (publicly visible).', components: [channelDropdown('sr2d_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'log_channel') {
-          return interaction.reply({ content: '### 📋 Select the **log channel** where a result summary is sent after each review (e.g. a staff-only channel). Set to the same channel as the review channel to disable separate logging.', components: [channelDropdown('sr2d_log_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: '### 📢 Select the channel where staff reviews will be posted.', components: [channelDropdown('sr2d_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
         }
         if (action === 'staff_roles') {
           return interaction.reply({
@@ -7782,7 +7776,6 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('ticketv2type_cat__'))  { const typeId = interaction.customId.replace('ticketv2type_cat__', ''); const v2 = getTicketV2Config(guildId); const t = v2.types?.find(t => t.id === typeId); if (!t) return interaction.reply({ content: '❌ Type config not found.', flags: MessageFlags.Ephemeral }); t.categoryId = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Category set to <#${chId}> for **${t.ticketTypeName}**!`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'coc_log_channel')     { getChainConfig(guildId).logChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Chain log channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'sr2d_channel')        { getStaffReviewConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Staff review channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral }); }
-      if (interaction.customId === 'sr2d_log_channel')    { getStaffReviewConfig(guildId).logChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Staff review **log channel** set to <#${chId}>!\nAfter each review, a result summary will be sent there.`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'wcd_channel')         { getWelcomerConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Welcome channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'vcd_channel')         { getVerificationConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_transcript')       { getTicketConfig(guildId).transcriptChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
