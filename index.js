@@ -527,8 +527,10 @@ function getApplicationConfig(guildId) {
     logChannel: null,
     transcriptChannel: null,
     appTypes: [],
+    submissions: {},
   };
   if (gc.applications.transcriptChannel === undefined) gc.applications.transcriptChannel = null;
+  if (!gc.applications.submissions) gc.applications.submissions = {};
   if (!isMainServer(guildId)) {
     const mainApps = getMainConfig('applications');
     if (mainApps) {
@@ -766,23 +768,60 @@ function getLOAConfig(guildId) {
 function getInfractionConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.infractions) gc.infractions = {
-    // Hiërarchie: [{ roleId, label }] — index 0 = strike 1, index 1 = strike 2, etc.
-    hierarchy:        [],
-    logChannel:       null,
-    embedTitle:       '⚠️ Strike {strikeCount} — {username}',
-    embedDescription: '**{userMention}** has received **Strike {strikeCount}**.\n\n**Reason:** {reason}\n**Moderator:** {moderator}',
-    embedColor:       '#ED4245',
-    dmMessage:        '⚠️ You have received **Strike {strikeCount}** in **{server}**.\n\n**Reason:** {reason}\n\nIf you have questions, please contact a staff member.',
-    userStrikes:      {}, // userId → number
+    // Progression: levels 1-3 = Warning 1-3, levels 4-6 = Strike 1-3, level 7 = Termination
+    // hierarchy[i].roleId — optional role to assign at progression level i+1 (i = 0..6)
+    hierarchy:          [],
+    logChannel:         null,
+    embedTitle:         '⚠️ {levelLabel} — {username}',
+    embedDescription:   '**{userMention}** has received **{levelLabel}** ({type}).\n\n**Reason:** {reason}\n**Moderator:** {moderator}',
+    embedColor:         '#ED4245',
+    dmMessage:          '⚠️ You have received **{levelLabel}** in **{server}**.\n\n**Type:** {type}\n**Reason:** {reason}\n\nIf you have questions, please contact a staff member.',
+    terminationMessage: '🚨 **{userMention}** has reached **Termination** ({progressionLevel}/{maxLevel}).\n\nStaff action is required.',
+    userStrikes:        {}, // userId → number (0-7, progression level reached)
+    userHistory:        {}, // userId → [{ type, reason, moderator, date, level }]
   };
-  if (!gc.infractions.hierarchy)        gc.infractions.hierarchy        = [];
-  if (!gc.infractions.userStrikes)      gc.infractions.userStrikes      = {};
-  if (!gc.infractions.logChannel)       gc.infractions.logChannel       = null;
-  if (!gc.infractions.embedTitle)       gc.infractions.embedTitle       = '⚠️ Strike {strikeCount} — {username}';
-  if (!gc.infractions.embedDescription) gc.infractions.embedDescription = '**{userMention}** has received **Strike {strikeCount}**.\n\n**Reason:** {reason}\n**Moderator:** {moderator}';
-  if (!gc.infractions.embedColor)       gc.infractions.embedColor       = '#ED4245';
-  if (!gc.infractions.dmMessage)        gc.infractions.dmMessage        = '⚠️ You have received **Strike {strikeCount}** in **{server}**.\n\n**Reason:** {reason}\n\nIf you have questions, please contact a staff member.';
+  if (!gc.infractions.hierarchy)          gc.infractions.hierarchy          = [];
+  if (!gc.infractions.userStrikes)        gc.infractions.userStrikes        = {};
+  if (!gc.infractions.userHistory)        gc.infractions.userHistory        = {};
+  if (!gc.infractions.logChannel)         gc.infractions.logChannel         = null;
+  if (!gc.infractions.embedTitle)         gc.infractions.embedTitle         = '⚠️ {levelLabel} — {username}';
+  if (!gc.infractions.embedDescription)   gc.infractions.embedDescription   = '**{userMention}** has received **{levelLabel}** ({type}).\n\n**Reason:** {reason}\n**Moderator:** {moderator}';
+  if (!gc.infractions.embedColor)         gc.infractions.embedColor         = '#ED4245';
+  if (!gc.infractions.dmMessage)          gc.infractions.dmMessage          = '⚠️ You have received **{levelLabel}** in **{server}**.\n\n**Type:** {type}\n**Reason:** {reason}\n\nIf you have questions, please contact a staff member.';
+  if (!gc.infractions.terminationMessage) gc.infractions.terminationMessage = '🚨 **{userMention}** has reached **Termination** ({progressionLevel}/{maxLevel}).\n\nStaff action is required.';
   return gc.infractions;
+}
+
+// Fixed progression: Warning 1-3 (levels 1-3), Strike 1-3 (levels 4-6), Termination (level 7)
+const INFRACTION_PROGRESSION = [
+  { label: 'Warning 1',   category: 'Warning' },
+  { label: 'Warning 2',   category: 'Warning' },
+  { label: 'Warning 3',   category: 'Warning' },
+  { label: 'Strike 1',    category: 'Strike' },
+  { label: 'Strike 2',    category: 'Strike' },
+  { label: 'Strike 3',    category: 'Strike' },
+  { label: 'Termination', category: 'Termination' },
+];
+function getProgressionEntry(level) {
+  const idx = Math.max(0, Math.min(level - 1, INFRACTION_PROGRESSION.length - 1));
+  return INFRACTION_PROGRESSION[idx];
+}
+
+// Removes all progression-level roles from a member, then assigns the role for `level` (if any).
+// `level` is 1-7 (Termination = 7). level <= 0 means no role assigned.
+async function applyInfractionLevelRole(member, ic, level) {
+  for (const entry of ic.hierarchy) {
+    if (entry?.roleId && member.roles.cache.has(entry.roleId)) {
+      await member.roles.remove(entry.roleId).catch(() => {});
+    }
+  }
+  if (level >= 1) {
+    const roleId = ic.hierarchy[level - 1]?.roleId;
+    if (roleId) {
+      const role = member.guild.roles.cache.get(roleId);
+      if (role) await member.roles.add(role).catch(() => {});
+    }
+  }
 }
 
 function getPermissionsConfig(guildId) {
@@ -1914,6 +1953,16 @@ async function submitApplication(userId, session, appType, guild) {
 
   const appId = genId();
 
+  // Bewaar de submission zodat we later (bij accept/deny) een transcript kunnen sturen
+  ac.submissions[appId] = {
+    userId,
+    typeId: appType.id,
+    questions: appType.questions.slice(),
+    answers: session.answers.slice(),
+    submittedAt: new Date().toISOString(),
+  };
+  await saveGuildConfig(session.guildId);
+
   const applicantDisplay = applicant
     ? `${userDisplay(applicant)} (<@${userId}>)`
     : `<@${userId}>`;
@@ -1989,6 +2038,83 @@ async function submitApplication(userId, session, appType, guild) {
     await reviewCh.send({ embeds: batch, components: isLastBatch ? [row] : [] });
   }
   return appId;
+}
+
+/**
+ * Send a full transcript (all questions + answers + final decision) to the
+ * configured application transcript channel, if one is set.
+ */
+async function sendApplicationTranscript(guild, ac, appId, decision) {
+  if (!ac.transcriptChannel) return;
+  const transcriptCh = guild.channels.cache.get(ac.transcriptChannel);
+  if (!transcriptCh) return;
+
+  const submission = ac.submissions?.[appId];
+  if (!submission) return;
+
+  const appType = ac.appTypes.find(t => t.id === submission.typeId);
+  const applicant = await client.users.fetch(submission.userId).catch(() => null);
+  const applicantDisplay = applicant ? `${userDisplay(applicant)} (<@${submission.userId}>)` : `<@${submission.userId}>`;
+
+  const decisionColor = decision.result === 'accepted' ? 0x57F287 : 0xED4245;
+  const decisionLabel = decision.result === 'accepted' ? '✅ Accepted' : '❌ Denied';
+
+  const headerFields = [
+    { name: '👤 Applicant', value: applicantDisplay.slice(0, 1024), inline: true },
+    { name: '📋 Type',      value: appType?.label ?? submission.typeId, inline: true },
+    { name: '📊 Decision',  value: decisionLabel, inline: true },
+    { name: '👮 Moderator', value: decision.moderator, inline: true },
+    { name: '📅 Submitted', value: new Date(submission.submittedAt).toUTCString(), inline: false },
+  ];
+  if (decision.reason) headerFields.push({ name: '📝 Reason', value: decision.reason.slice(0, 1024), inline: false });
+
+  const answerFields = submission.questions.map((q, i) => ({
+    name: `❓ ${q.slice(0, 250)}`,
+    value: (submission.answers[i] ?? '*No answer*').slice(0, 1024),
+    inline: false,
+  }));
+
+  const fieldSize = f => (f.name?.length ?? 0) + (f.value?.length ?? 0);
+  const EMBED_MAX = 5800;
+  const MAX_FIELDS = 24;
+
+  const embeds = [];
+  let currentFields = [...headerFields];
+  let isFirst = true;
+  let page = 1;
+  let currentSize = headerFields.reduce((s, f) => s + fieldSize(f), 0) + 256;
+
+  const flushEmbed = () => {
+    const title = isFirst
+      ? `📝 Application Transcript — ${appType?.label ?? submission.typeId}`
+      : `📝 Application Transcript (continued) — Page ${page}`;
+    embeds.push(new EmbedBuilder()
+      .setTitle(title.slice(0, 256))
+      .setColor(decisionColor)
+      .addFields(...currentFields)
+      .setFooter({ text: `Application ID: ${appId}` })
+      .setThumbnail(isFirst ? (applicant?.displayAvatarURL({ dynamic: true }) ?? null) : null)
+      .setTimestamp());
+    isFirst = false;
+    page++;
+    currentFields = [];
+    currentSize = 256;
+  };
+
+  for (const field of answerFields) {
+    const fSize = fieldSize(field);
+    if (currentFields.length >= MAX_FIELDS || (currentSize + fSize > EMBED_MAX && currentFields.length > 0)) {
+      flushEmbed();
+    }
+    currentFields.push(field);
+    currentSize += fSize;
+  }
+  flushEmbed();
+
+  const EMBEDS_PER_MSG = 10;
+  for (let i = 0; i < embeds.length; i += EMBEDS_PER_MSG) {
+    await transcriptCh.send({ embeds: embeds.slice(i, i + EMBEDS_PER_MSG) }).catch(() => {});
+  }
 }
 
 // ════════════════════════════════════════════
@@ -2106,36 +2232,38 @@ function buildBotConfigSetupPayload(guildId) {
 
 function buildInfractionSetupPayload(guildId) {
   const ic = getInfractionConfig(guildId);
-  const hierarchyList = ic.hierarchy.length
-    ? ic.hierarchy.map((h, i) =>
-        `**${i + 1}.** ${h.roleId ? `<@&${h.roleId}>` : '*No role*'} — \`${h.label}\``
-      ).join('\n')
-    : '*No strike levels configured yet*';
+  const hierarchyList = INFRACTION_PROGRESSION.map((p, i) => {
+    const roleId = ic.hierarchy[i]?.roleId;
+    const icon = p.category === 'Termination' ? '🚨' : p.category === 'Strike' ? '🔴' : '🟡';
+    return `${icon} **${i + 1}.** \`${p.label}\` — ${roleId ? `<@&${roleId}>` : '*No role*'}`;
+  }).join('\n');
 
   const embed = new EmbedBuilder()
-    .setTitle('⚠️ Strike System Setup')
+    .setTitle('⚠️ Infraction System Setup')
     .setColor(0xED4245)
     .setDescription(
-      'Configure the strike hierarchy. Each strike moves the user one level up and assigns the corresponding role. Previous strike roles are automatically removed.\n\n' +
-      '**Variables:** `{user}` `{userMention}` `{username}` `{reason}` `{moderator}` `{strikeCount}` `{strikeLabel}` `{server}`'
+      'Fixed progression: **3 Warnings → 3 Strikes → Termination**. Every infraction (Warning or Strike) advances the user one level. ' +
+      'Optionally assign a role per level — previous level roles are automatically removed.\n\n' +
+      '**Variables:** `{user}` `{userMention}` `{username}` `{reason}` `{moderator}` `{type}` `{levelLabel}` `{progressionLevel}` `{maxLevel}` `{server}`'
     )
     .addFields(
-      { name: '📊 Strike Hierarchy',  value: hierarchyList,                                              inline: false },
+      { name: '📊 Progression',       value: hierarchyList,                                              inline: false },
       { name: '📢 Log Channel',       value: ic.logChannel ? `<#${ic.logChannel}>` : '*Not set*',         inline: true  },
       { name: '🏷️ Embed Title',      value: `\`${ic.embedTitle}\``,                                      inline: false },
       { name: '📝 Embed Description', value: `\`\`\`${ic.embedDescription.slice(0, 200)}\`\`\``,          inline: false },
       { name: '💬 DM Message',        value: `\`\`\`${ic.dmMessage.slice(0, 200)}\`\`\``,                 inline: false },
+      { name: '🚨 Termination Message', value: `\`\`\`${ic.terminationMessage.slice(0, 200)}\`\`\``,      inline: false },
     );
 
   const r1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('inf__add_level').setLabel('Add Level').setStyle(ButtonStyle.Success).setEmoji('➕'),
-    new ButtonBuilder().setCustomId('inf__remove_level').setLabel('Remove Last').setStyle(ButtonStyle.Danger).setEmoji('➖'),
+    new ButtonBuilder().setCustomId('inf__set_role').setLabel('Set Level Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
     new ButtonBuilder().setCustomId('inf__log_channel').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
   );
   const r2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('inf__edit_embed').setLabel('Edit Embed').setStyle(ButtonStyle.Primary).setEmoji('🎨'),
     new ButtonBuilder().setCustomId('inf__edit_dm').setLabel('Edit DM Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
     new ButtonBuilder().setCustomId('inf__edit_color').setLabel('Edit Color').setStyle(ButtonStyle.Primary).setEmoji('🎨'),
+    new ButtonBuilder().setCustomId('inf__edit_termination').setLabel('Edit Termination Msg').setStyle(ButtonStyle.Danger).setEmoji('🚨'),
   );
 
   return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
@@ -2892,6 +3020,10 @@ const commands = [
   ]},
   { name: 'infract', description: '[SHR] Give a user an infraction', options: [
     { name: 'user',   type: 6, description: 'Who?',   required: true  },
+    { name: 'type',   type: 3, description: 'Type of infraction', required: true, choices: [
+      { name: 'Warning', value: 'warning' },
+      { name: 'Strike',  value: 'strike'  },
+    ]},
     { name: 'reason', type: 3, description: 'Reason', required: true  },
   ]},
   { name: 'infractions', description: '[SHR] View infractions of a user', options: [
@@ -2899,6 +3031,10 @@ const commands = [
   ]},
   { name: 'clearinfractions', description: '[SHR] Clear all infractions of a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
+  ]},
+  { name: 'setinfractions', description: '[SHR] Override a user\'s infraction progression level', options: [
+    { name: 'user',  type: 6, description: 'Who?', required: true },
+    { name: 'level', type: 4, description: 'New progression level (0-7, 0 = clean, 7 = Termination)', required: true, min_value: 0, max_value: 7 },
   ]},
   { name: 'ticket-addstaff', description: 'Add a staff member to this ticket', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
@@ -4406,39 +4542,36 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'infract') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         const ic = getInfractionConfig(guildId);
-        if (!ic.hierarchy.length) return interaction.reply({ content: '❌ No strike levels configured. Use `/setup` → Infractions first.', flags: MessageFlags.Ephemeral });
 
         const targetMember = interaction.options.getMember('user');
         const targetUser   = interaction.options.getUser('user');
+        const infrType     = interaction.options.getString('type'); // 'warning' | 'strike'
         const infrReason   = interaction.options.getString('reason');
         if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
 
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        // Verhoog strike count, capped op max hierarchy level
+        // Progress one level (max 7 = Termination), regardless of warning/strike choice
         if (!ic.userStrikes) ic.userStrikes = {};
-        const currentCount = ic.userStrikes[targetUser.id] ?? 0;
-        const maxLevel     = ic.hierarchy.length;
-        const newCount     = Math.min(currentCount + 1, maxLevel);
-        ic.userStrikes[targetUser.id] = newCount;
+        if (!ic.userHistory) ic.userHistory = {};
+        const maxLevel    = INFRACTION_PROGRESSION.length; // 7
+        const currentLevel = ic.userStrikes[targetUser.id] ?? 0;
+        const newLevel    = Math.min(currentLevel + 1, maxLevel);
+        ic.userStrikes[targetUser.id] = newLevel;
 
-        // Haal het juiste hierarchy level op
-        const levelIndex  = newCount - 1;
-        const levelEntry  = ic.hierarchy[levelIndex];
-        const strikeLabel = levelEntry?.label || `Strike ${newCount}`;
+        const progEntry  = getProgressionEntry(newLevel);
+        const levelLabel = progEntry.label;
+        const typeLabel  = infrType === 'strike' ? 'Strike' : 'Warning';
 
-        // Verwijder ALLE vorige strike rollen uit de hiërarchie
-        for (const level of ic.hierarchy) {
-          if (level.roleId && targetMember.roles.cache.has(level.roleId)) {
-            await targetMember.roles.remove(level.roleId).catch(() => {});
-          }
-        }
+        // Update history
+        if (!ic.userHistory[targetUser.id]) ic.userHistory[targetUser.id] = [];
+        ic.userHistory[targetUser.id].push({
+          type: typeLabel, reason: infrReason, moderator: userDisplay(interaction.user),
+          date: new Date().toUTCString(), level: newLevel,
+        });
 
-        // Geef de nieuwe strike rol
-        if (levelEntry?.roleId) {
-          const strikeRole = interaction.guild.roles.cache.get(levelEntry.roleId);
-          if (strikeRole) await targetMember.roles.add(strikeRole).catch(() => {});
-        }
+        // Rol toewijzen volgens progressie level
+        await applyInfractionLevelRole(targetMember, ic, newLevel);
 
         await saveGuildConfig(guildId);
 
@@ -4446,17 +4579,20 @@ client.on('interactionCreate', async interaction => {
         const replaceVarsInfr = (text) => {
           if (!text) return text;
           return text
-            .replace(/{user}/g,         targetUser.id)
-            .replace(/{userMention}/g,  `<@${targetUser.id}>`)
-            .replace(/{username}/g,     targetUser.username)
-            .replace(/{reason}/g,       infrReason)
-            .replace(/{moderator}/g,    userDisplay(interaction.user))
-            .replace(/{strikeCount}/g,  `${newCount}`)
-            .replace(/{strikeLabel}/g,  strikeLabel)
-            .replace(/{server}/g,       interaction.guild.name);
+            .replace(/{user}/g,             targetUser.id)
+            .replace(/{userMention}/g,      `<@${targetUser.id}>`)
+            .replace(/{username}/g,         targetUser.username)
+            .replace(/{reason}/g,           infrReason)
+            .replace(/{moderator}/g,        userDisplay(interaction.user))
+            .replace(/{type}/g,             typeLabel)
+            .replace(/{levelLabel}/g,       levelLabel)
+            .replace(/{progressionLevel}/g, `${newLevel}`)
+            .replace(/{maxLevel}/g,         `${maxLevel}`)
+            .replace(/{server}/g,           interaction.guild.name);
         };
 
-        const atMax = newCount >= maxLevel;
+        const isTermination = newLevel >= maxLevel;
+        const levelRoleId   = ic.hierarchy[newLevel - 1]?.roleId;
 
         // Embed in channel
         const infrEmbed = new EmbedBuilder()
@@ -4464,38 +4600,51 @@ client.on('interactionCreate', async interaction => {
           .setDescription(replaceVarsInfr(ic.embedDescription))
           .setColor(hexToInt(ic.embedColor))
           .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-          .setFooter({ text: `Strike ${newCount}/${maxLevel}${atMax ? ' — Maximum reached' : ''} • By ${userDisplay(interaction.user)}` })
+          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})${isTermination ? ' — TERMINATION' : ''} • By ${userDisplay(interaction.user)}` })
           .setTimestamp();
 
         // Ping de gebruiker in het kanaal
         await interaction.channel.send({ content: `<@${targetUser.id}>`, embeds: [infrEmbed] }).catch(() => {});
-        await interaction.editReply({ content: '✅ Strike issued.' });
+        await interaction.editReply({ content: `✅ ${typeLabel} issued — user is now at **${levelLabel}** (${newLevel}/${maxLevel}).` });
 
         // DM naar gebruiker
         await targetUser.send({ embeds: [new EmbedBuilder()
           .setTitle(replaceVarsInfr(ic.embedTitle))
           .setDescription(replaceVarsInfr(ic.dmMessage))
           .setColor(hexToInt(ic.embedColor))
-          .setFooter({ text: `Strike ${newCount}/${maxLevel}` })
+          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})` })
           .setTimestamp()
         ]}).catch(() => {});
 
         // Log channel
         if (ic.logChannel) {
           const logCh = interaction.guild.channels.cache.get(ic.logChannel);
-          if (logCh) await logCh.send({ embeds: [new EmbedBuilder()
-            .setTitle(`⚠️ Strike Logged — ${strikeLabel}`)
-            .setColor(hexToInt(ic.embedColor))
-            .addFields(
-              { name: '👤 User',       value: `${userDisplay(targetUser)} (<@${targetUser.id}>)`, inline: true  },
-              { name: '⚠️ Strike',     value: `${strikeLabel} (${newCount}/${maxLevel})`, inline: true  },
-              { name: '🎭 Role Given', value: levelEntry?.roleId ? `<@&${levelEntry.roleId}>` : '*None*', inline: true },
-              { name: '📝 Reason',     value: infrReason,           inline: false },
-              { name: '👮 Moderator',  value: userDisplay(interaction.user),  inline: true  },
-            )
-            .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-            .setTimestamp()
-          ]}).catch(() => {});
+          if (logCh) {
+            await logCh.send({ embeds: [new EmbedBuilder()
+              .setTitle(`⚠️ Infraction Logged — ${levelLabel}`)
+              .setColor(hexToInt(ic.embedColor))
+              .addFields(
+                { name: '👤 User',       value: `${userDisplay(targetUser)} (<@${targetUser.id}>)`, inline: true  },
+                { name: '📋 Type',       value: typeLabel,           inline: true  },
+                { name: '📊 Progression', value: `${levelLabel} (${newLevel}/${maxLevel})`, inline: true  },
+                { name: '🎭 Role Given', value: levelRoleId ? `<@&${levelRoleId}>` : '*None*', inline: true },
+                { name: '📝 Reason',     value: infrReason,           inline: false },
+                { name: '👮 Moderator',  value: userDisplay(interaction.user),  inline: true  },
+              )
+              .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+              .setTimestamp()
+            ]}).catch(() => {});
+
+            // Extra termination warning
+            if (isTermination) {
+              await logCh.send({ embeds: [new EmbedBuilder()
+                .setTitle('🚨 Termination Reached')
+                .setColor(0x992D22)
+                .setDescription(replaceVarsInfr(ic.terminationMessage))
+                .setTimestamp()
+              ]}).catch(() => {});
+            }
+          }
         }
         return;
       }
@@ -4503,26 +4652,31 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'infractions') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         const ic = getInfractionConfig(guildId);
-        const targetUser = interaction.options.getUser('user');
-        const count      = ic.userStrikes?.[targetUser.id] ?? 0;
-        const maxLevel   = ic.hierarchy.length;
-        const levelIndex = count > 0 ? Math.min(count - 1, maxLevel - 1) : -1;
-        const level      = levelIndex >= 0 ? ic.hierarchy[levelIndex] : null;
+        const targetUser  = interaction.options.getUser('user');
+        const maxLevel    = INFRACTION_PROGRESSION.length;
+        const level       = ic.userStrikes?.[targetUser.id] ?? 0;
+        const history     = ic.userHistory?.[targetUser.id] ?? [];
 
-        const hierarchyDisplay = ic.hierarchy.length
-          ? ic.hierarchy.map((h, i) => {
-              const isCurrent = i === levelIndex;
-              return `${isCurrent ? '▶️' : '⬜'} **${i + 1}.** ${h.roleId ? `<@&${h.roleId}>` : '*No role*'} — \`${h.label}\`${isCurrent ? ' ← current' : ''}`;
-            }).join('\n')
-          : '*No hierarchy configured*';
+        const progressionDisplay = INFRACTION_PROGRESSION.map((p, i) => {
+          const num = i + 1;
+          const isCurrent = num === level;
+          const icon = p.category === 'Termination' ? '🚨' : p.category === 'Strike' ? '🔴' : '🟡';
+          return `${isCurrent ? '▶️' : icon} **${num}.** \`${p.label}\`${isCurrent ? ' ← current' : ''}`;
+        }).join('\n');
+
+        const historyDisplay = history.length
+          ? history.slice(-10).reverse().map((h, i) =>
+              `**${getProgressionEntry(h.level).label}** (${h.type}) — ${h.reason}\n　*by ${h.moderator} on ${h.date}*`
+            ).join('\n\n')
+          : '*No infractions recorded*';
 
         return interaction.reply({ embeds: [new EmbedBuilder()
-          .setTitle(`⚠️ Strikes — ${userDisplay(targetUser)}`)
-          .setColor(0xED4245)
+          .setTitle(`⚠️ Infractions — ${userDisplay(targetUser)}`)
+          .setColor(level >= maxLevel ? 0x992D22 : 0xED4245)
           .addFields(
-            { name: '⚠️ Strike Count',       value: `${count}/${maxLevel}`,                                            inline: true },
-            { name: '🎭 Current Role',        value: level?.roleId ? `<@&${level.roleId}>` : '*None*',                  inline: true },
-            { name: '📊 Strike Hierarchy',    value: hierarchyDisplay,                                                  inline: false },
+            { name: '📊 Current Level', value: level > 0 ? `${getProgressionEntry(level).label} (${level}/${maxLevel})` : `Clean (0/${maxLevel})`, inline: true },
+            { name: '📈 Progression',   value: progressionDisplay, inline: false },
+            { name: '📜 Recent History (last 10)', value: historyDisplay, inline: false },
           )
           .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
           .setTimestamp()
@@ -4732,16 +4886,39 @@ client.on('interactionCreate', async interaction => {
         const targetMember = interaction.options.getMember('user');
         if (!ic.userStrikes) ic.userStrikes = {};
         ic.userStrikes[targetUser.id] = 0;
-        // Verwijder alle strike rollen
-        if (targetMember) {
-          for (const s of ic.hierarchy) {
-            if (s.roleId && targetMember.roles.cache.has(s.roleId)) {
-              await targetMember.roles.remove(s.roleId).catch(() => {});
-            }
-          }
-        }
+        if (!ic.userHistory) ic.userHistory = {};
+        ic.userHistory[targetUser.id] = [];
+        // Verwijder alle progressie-rollen
+        if (targetMember) await applyInfractionLevelRole(targetMember, ic, 0);
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Infractions cleared for **${userDisplay(targetUser)}**.`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (cmd === 'setinfractions') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const ic = getInfractionConfig(guildId);
+        const targetUser   = interaction.options.getUser('user');
+        const targetMember = interaction.options.getMember('user');
+        const newLevel     = interaction.options.getInteger('level');
+        const maxLevel     = INFRACTION_PROGRESSION.length;
+        if (newLevel < 0 || newLevel > maxLevel) return interaction.reply({ content: `❌ Level must be between 0 and ${maxLevel}.`, flags: MessageFlags.Ephemeral });
+
+        if (!ic.userStrikes) ic.userStrikes = {};
+        const oldLevel = ic.userStrikes[targetUser.id] ?? 0;
+        ic.userStrikes[targetUser.id] = newLevel;
+
+        if (!ic.userHistory) ic.userHistory = {};
+        if (!ic.userHistory[targetUser.id]) ic.userHistory[targetUser.id] = [];
+        ic.userHistory[targetUser.id].push({
+          type: 'Override', reason: `Level manually set by ${userDisplay(interaction.user)} (${oldLevel} → ${newLevel})`,
+          moderator: userDisplay(interaction.user), date: new Date().toUTCString(), level: newLevel,
+        });
+
+        if (targetMember) await applyInfractionLevelRole(targetMember, ic, newLevel);
+        await saveGuildConfig(guildId);
+
+        const levelLabel = newLevel > 0 ? getProgressionEntry(newLevel).label : 'Clean';
+        return interaction.reply({ content: `✅ **${userDisplay(targetUser)}** infraction level overridden to **${levelLabel}** (${newLevel}/${maxLevel}).`, flags: MessageFlags.Ephemeral });
       }
 
       if (cmd === 'loa') {
@@ -4808,6 +4985,7 @@ client.on('interactionCreate', async interaction => {
             .addOptions(
               { label: 'Tickets', value: 'tickets', emoji: '🎫' },
               { label: 'Sessions', value: 'sessions', emoji: '🎮' },
+              { label: 'Staff Review', value: 'staffreview', emoji: '⭐' },
               { label: 'Self Roles', value: 'selfroles', emoji: '🎭' },
               { label: 'Announcements', value: 'announcements', emoji: '📣' },
               { label: 'Welcomer', value: 'welcomer', emoji: '👋' },
@@ -5031,27 +5209,21 @@ client.on('interactionCreate', async interaction => {
         const ic = getInfractionConfig(guildId);
         const action = id.replace('inf__', '');
 
-        if (action === 'add_level') {
-          const modal = new ModalBuilder().setCustomId('modal_inf_add_level').setTitle(`Add Strike Level ${ic.hierarchy.length + 1}`);
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId('level_label')
-                .setLabel('Label (e.g. Warning, Strike 1)')
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder(`Strike ${ic.hierarchy.length + 1}`)
-                .setRequired(true)
-                .setMaxLength(50)
-            ),
-          );
-          return interaction.showModal(modal);
-        }
-
-        if (action === 'remove_level') {
-          if (!ic.hierarchy.length) return interaction.reply({ content: '❌ No levels to remove.', flags: MessageFlags.Ephemeral });
-          ic.hierarchy.pop();
-          await saveGuildConfig(guildId);
-          return interaction.update(buildInfractionSetupPayload(guildId));
+        if (action === 'set_role') {
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('inf_select_level')
+            .setPlaceholder('Select a progression level...')
+            .addOptions(INFRACTION_PROGRESSION.map((p, i) => ({
+              label: `${i + 1}. ${p.label}`,
+              description: ic.hierarchy[i]?.roleId ? `Current: role set` : 'No role set',
+              value: `${i}`,
+              emoji: p.category === 'Termination' ? '🚨' : p.category === 'Strike' ? '🔴' : '🟡',
+            })));
+          return interaction.reply({
+            content: '### 🎭 Select which level you want to assign a role to',
+            components: [new ActionRowBuilder().addComponents(sel)],
+            flags: MessageFlags.Ephemeral,
+          });
         }
 
         if (action === 'log_channel') {
@@ -5083,6 +5255,14 @@ client.on('interactionCreate', async interaction => {
           const modal = new ModalBuilder().setCustomId('modal_inf_color').setTitle('Edit Strike Embed Color');
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('inf_color').setLabel('Hex color (e.g. #ED4245)').setStyle(TextInputStyle.Short).setValue(ic.embedColor || '#ED4245').setRequired(true).setMaxLength(7)),
+          );
+          return interaction.showModal(modal);
+        }
+
+        if (action === 'edit_termination') {
+          const modal = new ModalBuilder().setCustomId('modal_inf_termination').setTitle('Edit Termination Message');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('inf_termination').setLabel('Termination message (sent to log channel)').setStyle(TextInputStyle.Paragraph).setValue(ic.terminationMessage || '').setRequired(true).setMaxLength(2000)),
           );
           return interaction.showModal(modal);
         }
@@ -6339,6 +6519,7 @@ client.on('interactionCreate', async interaction => {
 
         if (id === 'ap_review_channel') return interaction.reply({ content: '### 📢 Select global review channel', components: [channelDropdown('apd_review_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 'ap_log_channel')    return interaction.reply({ content: '### 📋 Select log channel', components: [channelDropdown('apd_log_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        if (id === 'ap_transcript_channel') return interaction.reply({ content: '### 📝 Select application transcript channel\n*A full transcript (all questions + answers + decision) will be posted here whenever an application is accepted or denied.*', components: [channelDropdown('apd_transcript_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
 
         if (id === 'ap_add_type') {
           const modal = new ModalBuilder().setCustomId('modal_ap_add_type').setTitle('Add Application Type');
@@ -6581,7 +6762,7 @@ client.on('interactionCreate', async interaction => {
       // ════ APPLICATION ACCEPT / DENY (review channel) ════
       if (id.startsWith('app__accept__') || id.startsWith('app__acceptsilent__') || id.startsWith('app__deny__')) {
         const parts = id.split('__');
-        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3];
+        const action = parts[1]; const applicantId = parts[2]; const typeId = parts[3]; const appId = parts[4];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
 
@@ -6686,11 +6867,17 @@ client.on('interactionCreate', async interaction => {
             if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('✅ Application Accepted').setColor(0x57F287)
               .addFields({ name: 'Applicant', value: userDisplay(applicant?.user) ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Accepted by', value: userDisplay(interaction.user), inline: true }, { name: 'DM Sent', value: action === 'accept' ? 'Yes' : 'No', inline: true }).setTimestamp()] });
           }
+
+          // Transcript
+          await sendApplicationTranscript(interaction.guild, ac, appId, {
+            result: 'accepted',
+            moderator: userDisplay(interaction.user),
+          });
           return;
         }
 
         if (action === 'deny') {
-          const modal = new ModalBuilder().setCustomId(`modal_app_deny__${applicantId}__${typeId}`).setTitle('Deny Application');
+          const modal = new ModalBuilder().setCustomId(`modal_app_deny__${applicantId}__${typeId}__${appId}`).setTitle('Deny Application');
           modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('deny_reason').setLabel('Reason for denial').setStyle(TextInputStyle.Paragraph).setPlaceholder('You did not meet the requirements...').setRequired(true).setMaxLength(1000)));
           return interaction.showModal(modal);
         }
@@ -7509,14 +7696,15 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('inf_level_role__')) {
         const ic = getInfractionConfig(guildId);
         const index = parseInt(interaction.customId.replace('inf_level_role__', ''), 10);
-        if (!isNaN(index) && ic.hierarchy[index]) {
+        const progEntry = INFRACTION_PROGRESSION[index];
+        if (!isNaN(index) && progEntry) {
+          if (!ic.hierarchy[index]) ic.hierarchy[index] = { roleId: null };
           ic.hierarchy[index].roleId = interaction.values[0] ?? null;
           await saveGuildConfig(guildId);
-          const label = ic.hierarchy[index].label;
           return interaction.reply({
             content: interaction.values[0]
-              ? `✅ Role <@&${interaction.values[0]}> set for **${label}** (Level ${index + 1})!`
-              : `✅ No role set for **${label}** — strike will be recorded without giving a role.`,
+              ? `✅ Role <@&${interaction.values[0]}> set for **${progEntry.label}** (Level ${index + 1})!`
+              : `✅ No role set for **${progEntry.label}** — this infraction will be recorded without giving a role.`,
             flags: MessageFlags.Ephemeral,
           });
         }
@@ -7783,6 +7971,7 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'sd_channel')          { getSessionConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'apd_review_channel')  { getApplicationConfig(guildId).reviewChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Global review channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'apd_log_channel')     { getApplicationConfig(guildId).logChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
+      if (interaction.customId === 'apd_transcript_channel') { getApplicationConfig(guildId).transcriptChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Application transcript channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'amd_log')             { getAutomodConfig(guildId).logChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Automod log: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId.startsWith('anch__'))      { const typeId = interaction.customId.replace('anch__', ''); getAnnouncementConfig(guildId).types[typeId].channel = chId; await saveGuildConfig(guildId); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
       if (interaction.customId.startsWith('srch__'))      { const panelId = interaction.customId.replace('srch__', ''); getSelfRoleConfig(guildId).panels[panelId].channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
@@ -7964,6 +8153,25 @@ client.on('interactionCreate', async interaction => {
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_notes').setLabel('Anything else the trainer should know?').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. I have done 2 ride-alongs already').setRequired(false).setMaxLength(500)),
         );
         return interaction.showModal(modal);
+      }
+
+      // ════ INFRACTION LEVEL SELECTION (which level to assign a role to) ════
+      if (id === 'inf_select_level') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const index = parseInt(val, 10);
+        const progEntry = INFRACTION_PROGRESSION[index];
+        if (!progEntry) return interaction.reply({ content: '❌ Level not found.', flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: `### 🎭 Select the role to assign for **${progEntry.label}** (Level ${index + 1})\n*Leave empty to remove the role for this level.*`,
+          components: [new ActionRowBuilder().addComponents(
+            new RoleSelectMenuBuilder()
+              .setCustomId(`inf_level_role__${index}`)
+              .setPlaceholder('Select role for this level...')
+              .setMinValues(0)
+              .setMaxValues(1)
+          )],
+          flags: MessageFlags.Ephemeral,
+        });
       }
 
       // ════ CENTRAL SETUP MENU (dropdown) ════
@@ -8489,35 +8697,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ LOA prefix set to \`${lc.prefix}\`.`, flags: MessageFlags.Ephemeral });
       }
 
-      if (mid === 'modal_inf_add_level') {
-        try {
-          console.log(`[INF] modal_inf_add_level fired | guildId: ${guildId} | user: ${userDisplay(interaction.user)}`);
-          const ic = getInfractionConfig(guildId);
-          console.log(`[INF] hierarchy before:`, JSON.stringify(ic.hierarchy));
-          if (!Array.isArray(ic.hierarchy)) ic.hierarchy = [];
-          const label    = interaction.fields.getTextInputValue('level_label').trim();
-          console.log(`[INF] label:`, label);
-          const newIndex = ic.hierarchy.length;
-          ic.hierarchy.push({ label, roleId: null });
-          await saveGuildConfig(guildId);
-          console.log(`[INF] saved OK, newIndex: ${newIndex}`);
-          return interaction.reply({
-            content: `✅ **${label}** added as Strike Level ${newIndex + 1}!\n\n### 🎭 Select the role to assign for this strike level (optional — skip to dismiss):`,
-            components: [new ActionRowBuilder().addComponents(
-              new RoleSelectMenuBuilder()
-                .setCustomId(`inf_level_role__${newIndex}`)
-                .setPlaceholder('Select role for this strike level...')
-                .setMinValues(0)
-                .setMaxValues(1)
-            )],
-            flags: MessageFlags.Ephemeral,
-          });
-        } catch (e) {
-          console.error('modal_inf_add_level error:', e);
-          return interaction.reply({ content: `❌ Error: ${e.message}`, flags: MessageFlags.Ephemeral });
-        }
-      }
-
       if (mid === 'modal_inf_embed') {
         const ic = getInfractionConfig(guildId);
         ic.embedTitle       = interaction.fields.getTextInputValue('inf_title').trim();
@@ -8538,6 +8717,13 @@ client.on('interactionCreate', async interaction => {
         ic.embedColor = interaction.fields.getTextInputValue('inf_color').trim();
         await saveGuildConfig(guildId);
         return interaction.reply({ content: '✅ Color updated!', flags: MessageFlags.Ephemeral });
+      }
+
+      if (mid === 'modal_inf_termination') {
+        const ic = getInfractionConfig(guildId);
+        ic.terminationMessage = interaction.fields.getTextInputValue('inf_termination').trim();
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: '✅ Termination message updated!', flags: MessageFlags.Ephemeral });
       }
 
       // ── Bot config ──
@@ -8681,7 +8867,7 @@ client.on('interactionCreate', async interaction => {
       // ── Application deny reason ──
       if (mid.startsWith('modal_app_deny__')) {
         const parts = mid.replace('modal_app_deny__', '').split('__');
-        const applicantId = parts[0]; const typeId = parts[1];
+        const applicantId = parts[0]; const typeId = parts[1]; const appId = parts[2];
         const ac = getApplicationConfig(guildId);
         const appType = ac.appTypes.find(t => t.id === typeId);
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
@@ -8722,6 +8908,13 @@ client.on('interactionCreate', async interaction => {
           if (logCh) await logCh.send({ embeds: [new EmbedBuilder().setTitle('❌ Application Denied').setColor(0xED4245)
             .addFields({ name: 'Applicant', value: userDisplay(applicant?.user) ?? applicantId, inline: true }, { name: 'Type', value: appType?.label ?? typeId, inline: true }, { name: 'Denied by', value: userDisplay(interaction.user), inline: true }, { name: '📝 Reason', value: reason, inline: false }).setTimestamp()] });
         }
+
+        // Transcript
+        await sendApplicationTranscript(interaction.guild, ac, appId, {
+          result: 'denied',
+          moderator: userDisplay(interaction.user),
+          reason,
+        });
         return;
       }
 
