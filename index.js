@@ -1576,7 +1576,7 @@ function getTrainingConfig(guildId) {
 function getChainConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.chainOfCommand) gc.chainOfCommand = {
-    chain: [], // [{ roleId, position }] gesorteerd op position ascending
+    chain: [], // [{ roleId, position, nicknamePrefix }] gesorteerd op position ascending
     logChannel: null,
     promoteRoles: [], // rollen die /promote mogen gebruiken voor 1-staps CoC promoties
   };
@@ -1645,41 +1645,16 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   // Geef nieuwe rank rol
   await targetMember.roles.add(newRole).catch(() => {});
 
-  // DM naar gebruiker
-  await targetMember.user.send({
-    embeds: [new EmbedBuilder()
-      .setTitle('⬆️ You have been promoted!')
-      .setColor(0x57F287)
-      .setDescription(`You have been promoted to **${newRole.name}** in **${guild.name}**!`)
-      .addFields(
-        { name: '🎭 New Rank', value: newRole.name, inline: true },
-        { name: '👮 Promoted by', value: userDisplay(promotedBy), inline: true },
-      )
-      .setTimestamp()
-    ]
-  }).catch(() => {});
-
-  // Log
-  if (cc.logChannel) {
-    const logCh = guild.channels.cache.get(cc.logChannel);
-    if (logCh) {
-      await logCh.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('⬆️ Chain Promotion')
-          .setColor(0x57F287)
-          .addFields(
-            { name: '👤 User', value: `${userDisplay(targetMember.user)} (<@${targetMember.id}>)`, inline: true },
-            { name: '🎭 New Rank', value: newRole.name, inline: true },
-            { name: '👮 Promoted by', value: `${userDisplay(promotedBy)}`, inline: true },
-          )
-          .setTimestamp()
-        ]
-      }).catch(() => {});
-    }
+  // Nickname prefix instellen als geconfigureerd op het chain entry
+  if (targetEntry.nicknamePrefix) {
+    try {
+      const baseName = targetMember.nickname ?? targetMember.user.username;
+      // Strip oude prefix (alles voor ' | ') als die er al in zit
+      const cleanName = baseName.includes(' | ') ? baseName.split(' | ').slice(1).join(' | ') : baseName;
+      const newNick = `${targetEntry.nicknamePrefix} | ${cleanName}`.slice(0, 32);
+      await targetMember.setNickname(newNick, `Promoted to ${newRole.name}`).catch(() => {});
+    } catch {}
   }
-
-  // Announcement
-  await sendPromotionAnnounce(guild, targetMember.user, newRole.name, promotedBy, 'promotion').catch(() => {});
 
   return { success: true, newRole };
 }
@@ -4314,35 +4289,66 @@ client.on('interactionCreate', async interaction => {
         const result = await promoteInChain(interaction.guild, targetMember, interaction.user, guildId, skipTo);
         if (!result.success) return interaction.editReply({ content: `❌ ${result.reason}` });
 
-        // Stuur gecombineerd bericht in het announce kanaal
         const tc = getTrainingConfig(guildId);
-        if (tc.announceChannel) {
-          const announceCh = interaction.guild.channels.cache.get(tc.announceChannel);
-          if (announceCh) {
-            const defaultMsg = (tc.announceMessage || '🎉 Congratulations <@{user}>! You have been promoted to **{role}**!')
-              .replace(/{user}/g, targetMember.user.id)
-              .replace(/{role}/g, result.newRole.name)
-              .replace(/{promotedBy}/g, userDisplay(interaction.user))
-              .replace(/{server}/g, interaction.guild.name);
-            const announceEmbed = new EmbedBuilder()
-              .setTitle('⬆️ Promotion!')
-              .setColor(0x57F287)
-              .setDescription(embedSafe.desc(defaultMsg))
-              .setThumbnail(targetMember.user.displayAvatarURL({ dynamic: true }))
-              .addFields(
-                { name: '👤 User', value: `${userDisplay(targetMember.user)}`, inline: true },
-                { name: '🎭 New Rank', value: result.newRole.name, inline: true },
-                { name: '📝 Reason', value: embedSafe.fieldVal(promoteReason), inline: false },
-                { name: '👮 By', value: userDisplay(interaction.user), inline: true },
-              )
-              .setTimestamp();
-            await announceCh.send({ content: `<@${targetMember.user.id}>`, embeds: [announceEmbed] }).catch(() => {});
-          }
-        } else {
-          await interaction.channel.send({ content: `<@${targetMember.user.id}>`, embeds: [new EmbedBuilder().setTitle('⬆️ Promotion!').setColor(0x57F287).setDescription(`Congratulations <@${targetMember.user.id}>! You have been promoted to **${result.newRole.name}**!`).setTimestamp()] }).catch(() => {});
+        const defaultMsg = (tc.announceMessage || '🎉 Congratulations <@{user}>! You have been promoted to **{role}**!')
+          .replace(/{user}/g, targetMember.user.id)
+          .replace(/{role}/g, result.newRole.name)
+          .replace(/{promotedBy}/g, userDisplay(interaction.user))
+          .replace(/{server}/g, interaction.guild.name);
+
+        // Eén enkel promotie embed met alle info
+        const announceEmbed = new EmbedBuilder()
+          .setTitle('⬆️ Chain Promotion')
+          .setColor(0x57F287)
+          .setDescription(embedSafe.desc(defaultMsg))
+          .setThumbnail(targetMember.user.displayAvatarURL({ dynamic: true }))
+          .addFields(
+            { name: '👤 User', value: `${userDisplay(targetMember.user)} (<@${targetMember.user.id}>)`, inline: true },
+            { name: '🎭 New Rank', value: result.newRole.name, inline: true },
+            { name: '👮 Promoted by', value: userDisplay(interaction.user), inline: true },
+            { name: '📝 Reason', value: embedSafe.fieldVal(promoteReason), inline: false },
+          )
+          .setTimestamp();
+
+        const targetCh = tc.announceChannel
+          ? interaction.guild.channels.cache.get(tc.announceChannel)
+          : interaction.channel;
+
+        if (targetCh) {
+          await targetCh.send({ content: `<@${targetMember.user.id}>`, embeds: [announceEmbed] }).catch(() => {});
         }
 
-        return interaction.editReply({ content: `✅ **${userDisplay(targetMember.user)}** promoted to **${result.newRole.name}** via Chain of Command${skipTo ? ' (SHR override)' : ''}.` });
+        // Log naar chain log channel (apart, staf only)
+        const cc2 = getChainConfig(guildId);
+        if (cc2.logChannel) {
+          const logCh = interaction.guild.channels.cache.get(cc2.logChannel);
+          if (logCh) await logCh.send({ embeds: [new EmbedBuilder()
+            .setTitle('📋 Chain Promotion Log')
+            .setColor(0x5865F2)
+            .addFields(
+              { name: '👤 User', value: `${userDisplay(targetMember.user)} (<@${targetMember.id}>)`, inline: true },
+              { name: '🎭 New Rank', value: result.newRole.name, inline: true },
+              { name: '👮 By', value: userDisplay(interaction.user), inline: true },
+              { name: '📝 Reason', value: embedSafe.fieldVal(promoteReason), inline: false },
+            )
+            .setTimestamp()
+          ]}).catch(() => {});
+        }
+
+        // DM naar de gebruiker
+        await targetMember.user.send({ embeds: [new EmbedBuilder()
+          .setTitle('⬆️ You have been promoted!')
+          .setColor(0x57F287)
+          .setDescription(`You have been promoted to **${result.newRole.name}** in **${interaction.guild.name}**!`)
+          .addFields(
+            { name: '🎭 New Rank', value: result.newRole.name, inline: true },
+            { name: '👮 Promoted by', value: userDisplay(interaction.user), inline: true },
+            { name: '📝 Reason', value: embedSafe.fieldVal(promoteReason), inline: false },
+          )
+          .setTimestamp()
+        ]}).catch(() => {});
+
+        return interaction.editReply({ content: `✅ **${userDisplay(targetMember.user)}** promoted to **${result.newRole.name}**${skipTo ? ' (SHR override)' : ''}.` });
       }
 
       if (cmd === 'demote') {
@@ -5479,24 +5485,28 @@ client.on('interactionCreate', async interaction => {
 
           if (passed) {
             const targetUser = await client.users.fetch(requestUserId).catch(() => null);
-            const typeName = trainingType ? trainingType.name : 'their training';
-            if (targetUser) await sendPromotionAnnounce(interaction.guild, targetUser, typeName, interaction.user, 'training');
-
             const targetMemberForPromo = await interaction.guild.members.fetch(requestUserId).catch(() => null);
             const cc = getChainConfig(guildId);
+            const tcTr = getTrainingConfig(guildId);
+            const typeName = trainingType ? trainingType.name : null;
+
+            let newRoleName = null;
 
             if (cc.chain.length > 0 && targetMemberForPromo) {
               // Chain geconfigureerd — automatisch één stap omhoog
               const result = await promoteInChain(interaction.guild, targetMemberForPromo, interaction.user, guildId);
               if (result.success) {
-                await interaction.followUp({ content: `✅ **${userDisplay(targetMemberForPromo.user)}** automatically promoted to **${result.newRole.name}** via chain of command.`, flags: MessageFlags.Ephemeral });
+                newRoleName = result.newRole.name;
+                await interaction.followUp({ content: `✅ **${userDisplay(targetMemberForPromo.user)}** promoted to **${result.newRole.name}** via chain of command.`, flags: MessageFlags.Ephemeral });
               } else {
                 await interaction.followUp({ content: `⚠️ Training passed but chain promotion failed: ${result.reason}`, flags: MessageFlags.Ephemeral });
               }
             } else if (trainingType?.roleId && targetMemberForPromo) {
               // Geen chain — gebruik training type rol
+              const trRole = interaction.guild.roles.cache.get(trainingType.roleId);
               await targetMemberForPromo.roles.add(trainingType.roleId).catch(() => {});
-              await interaction.followUp({ content: `✅ Automatically gave <@&${trainingType.roleId}> to <@${requestUserId}> for passing **${trainingType.name}**.`, flags: MessageFlags.Ephemeral });
+              newRoleName = trRole?.name ?? null;
+              await interaction.followUp({ content: `✅ Gave <@&${trainingType.roleId}> to <@${requestUserId}> for passing **${trainingType.name}**.`, flags: MessageFlags.Ephemeral });
             } else {
               // Geen chain, geen type rol — handmatige selectie
               await interaction.followUp({
@@ -5506,6 +5516,41 @@ client.on('interactionCreate', async interaction => {
                 )],
                 flags: MessageFlags.Ephemeral,
               });
+            }
+
+            // Eén enkel announce bericht
+            if (tcTr.announceChannel && targetUser) {
+              const announceCh = interaction.guild.channels.cache.get(tcTr.announceChannel);
+              if (announceCh) {
+                const defaultMsg = (tcTr.announceMessage || '🎉 Congratulations <@{user}>! You have **passed your training** and have been promoted to **{role}**! Well done!')
+                  .replace(/{user}/g, requestUserId)
+                  .replace(/{role}/g, newRoleName ?? (typeName ?? 'the next rank'))
+                  .replace(/{promotedBy}/g, userDisplay(interaction.user))
+                  .replace(/{server}/g, interaction.guild.name);
+                const trainEmbed = new EmbedBuilder()
+                  .setTitle('🎓 Training Passed!')
+                  .setColor(0x57F287)
+                  .setDescription(embedSafe.desc(defaultMsg))
+                  .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+                  .addFields(
+                    { name: '👤 User', value: `${userDisplay(targetUser)} (<@${requestUserId}>)`, inline: true },
+                    ...(typeName ? [{ name: '🎓 Training Type', value: typeName, inline: true }] : []),
+                    ...(newRoleName ? [{ name: '🎭 New Rank', value: newRoleName, inline: true }] : []),
+                    { name: '👮 Trainer', value: userDisplay(interaction.user), inline: true },
+                  )
+                  .setTimestamp();
+                await announceCh.send({ content: `<@${requestUserId}>`, embeds: [trainEmbed] }).catch(() => {});
+              }
+            }
+
+            // DM naar de gebruiker
+            if (targetUser) {
+              await targetUser.send({ embeds: [new EmbedBuilder()
+                .setTitle('🎓 Training Passed!')
+                .setColor(0x57F287)
+                .setDescription(`Congratulations! **${userDisplay(interaction.user)}** has marked your${typeName ? ` **${typeName}**` : ''} training as **passed**! 🎉${newRoleName ? `\n\n**New rank:** ${newRoleName}` : ''}`)
+                .setTimestamp()
+              ]}).catch(() => {});
             }
           }
 
@@ -6264,6 +6309,18 @@ client.on('interactionCreate', async interaction => {
             )],
             flags: MessageFlags.Ephemeral,
           });
+        }
+
+        if (action === 'set_prefix') {
+          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain yet.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('coc_sel_prefix')
+            .setPlaceholder('Select rank to set nickname prefix for...')
+            .addOptions(cc.chain.map((e, i) => {
+              const role = interaction.guild.roles.cache.get(e.roleId);
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, description: e.nicknamePrefix ? `Prefix: ${e.nicknamePrefix}` : 'No prefix set', value: String(e.roleId) };
+            }));
+          return interaction.reply({ content: '### 🏷️ Select rank to configure nickname prefix\n*When promoted to this rank, the prefix is automatically set before the username.*', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
         if (action === 'remove_rank') {
@@ -8307,6 +8364,28 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ════ CHAIN OF COMMAND SELECTS ════
+      if (id === 'coc_sel_prefix') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const cc = getChainConfig(guildId);
+        const entry = cc.chain.find(e => e.roleId === val);
+        if (!entry) return interaction.reply({ content: '❌ Rank not found.', flags: MessageFlags.Ephemeral });
+        const role = interaction.guild.roles.cache.get(val);
+        const modal = new ModalBuilder().setCustomId(`modal_coc_prefix__${val}`).setTitle(`Prefix: ${role?.name ?? val}`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('coc_prefix_val')
+              .setLabel('Nickname prefix (empty = disable)')
+              .setStyle(TextInputStyle.Short)
+              .setValue(entry.nicknamePrefix ?? '')
+              .setPlaceholder('e.g. [Supervisor] or [JM]')
+              .setRequired(false)
+              .setMaxLength(20)
+          )
+        );
+        return interaction.showModal(modal);
+      }
+
       if (id === 'coc_remove_rank') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const cc = getChainConfig(guildId);
