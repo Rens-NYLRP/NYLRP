@@ -6295,91 +6295,6 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
-      // ════ CHAIN OF COMMAND SETUP BUTTONS ════
-      if (id.startsWith('coc__')) {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
-        const cc = getChainConfig(guildId);
-        const action = id.replace('coc__', '');
-
-        if (action === 'add_rank') {
-          // Toon role dropdown — alle rollen die nog niet in de chain zitten
-          const existingIds = cc.chain.map(e => e.roleId);
-          return interaction.reply({
-            content: '### ➕ Select a role to add to the chain\n*Roles already in the chain are excluded.*',
-            components: [new ActionRowBuilder().addComponents(
-              new RoleSelectMenuBuilder()
-                .setCustomId('coc_add_role')
-                .setPlaceholder('Select role to add...')
-                .setMinValues(1)
-                .setMaxValues(1)
-            )],
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-
-        if (action === 'set_prefix') {
-          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain yet.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder()
-            .setCustomId('coc_sel_prefix')
-            .setPlaceholder('Select rank to set nickname prefix for...')
-            .addOptions(cc.chain.map((e, i) => {
-              const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, description: e.nicknamePrefix ? `Prefix: ${e.nicknamePrefix}` : 'No prefix set', value: String(e.roleId) };
-            }));
-          return interaction.reply({ content: '### 🏷️ Select rank to configure nickname prefix\n*When promoted to this rank, the prefix is automatically set before the username.*', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
-        }
-
-        if (action === 'remove_rank') {
-          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder()
-            .setCustomId('coc_remove_rank')
-            .setPlaceholder('Select rank to remove...')
-            .addOptions(cc.chain.map((e, i) => {
-              const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
-            }));
-          return interaction.reply({ content: '### ➖ Select rank to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
-        }
-
-        if (action === 'move_up') {
-          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder()
-            .setCustomId('coc_move_up')
-            .setPlaceholder('Select rank to move up...')
-            .addOptions(cc.chain.map((e, i) => {
-              const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
-            }));
-          return interaction.reply({ content: '### ⬆️ Select rank to move one position up', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
-        }
-
-        if (action === 'move_down') {
-          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder()
-            .setCustomId('coc_move_down')
-            .setPlaceholder('Select rank to move down...')
-            .addOptions(cc.chain.map((e, i) => {
-              const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
-            }));
-          return interaction.reply({ content: '### ⬇️ Select rank to move one position down', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
-        }
-
-        if (action === 'log_channel') {
-          return interaction.reply({
-            content: '### 📋 Select log channel for chain promotions',
-            components: [channelDropdown('coc_log_channel', 'Select channel...')],
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-
-        if (action === 'clear') {
-          cc.chain = [];
-          await saveGuildConfig(guildId);
-          return interaction.update(buildChainSetupPayload(guildId));
-        }
-      }
-
       // ════ STAFF REVIEW SETUP BUTTONS ════
       if (id.startsWith('sr2_setup__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -7719,6 +7634,20 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ════ CHAIN OF COMMAND PROMOTE ROLES ════
+      if (interaction.customId === 'coc_promote_roles') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const cc = getChainConfig(guildId);
+        cc.promoteRoles = ids ?? [];
+        await saveGuildConfig(guildId);
+        return interaction.reply({
+          content: ids?.length
+            ? `✅ Promote roles set: ${ids.map(id => `<@&${id}>`).join(', ')}`
+            : '✅ Promote roles cleared — only SHR can use `/promote`.',
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
       // ════ TRAINING TYPE ROLE SELECT (na aanmaken type) ════
       if (interaction.customId.startsWith('tr_type_role__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -8239,6 +8168,105 @@ client.on('interactionCreate', async interaction => {
     // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
       const id = interaction.customId; const val = interaction.values[0];
+
+      // ════ CHAIN OF COMMAND — ACTION SELECTION ════
+      if (id === 'coc_action') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const cc = getChainConfig(guildId);
+        const action = val;
+
+        if (action === 'add_rank') {
+          return interaction.reply({
+            content: '### ➕ Select a role to add to the chain\n*Roles already in the chain are excluded.*',
+            components: [new ActionRowBuilder().addComponents(
+              new RoleSelectMenuBuilder()
+                .setCustomId('coc_add_role')
+                .setPlaceholder('Select role to add...')
+                .setMinValues(1)
+                .setMaxValues(1)
+            )],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        if (action === 'set_prefix') {
+          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain yet.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('coc_sel_prefix')
+            .setPlaceholder('Select rank to set nickname prefix for...')
+            .addOptions(cc.chain.map((e, i) => {
+              const role = interaction.guild.roles.cache.get(e.roleId);
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, description: e.nicknamePrefix ? `Prefix: ${e.nicknamePrefix}` : 'No prefix set', value: String(e.roleId) };
+            }));
+          return interaction.reply({ content: '### 🏷️ Select rank to configure nickname prefix\n*When promoted to this rank, the prefix is automatically set before the username.*', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+
+        if (action === 'remove_rank') {
+          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('coc_remove_rank')
+            .setPlaceholder('Select rank to remove...')
+            .addOptions(cc.chain.map((e, i) => {
+              const role = interaction.guild.roles.cache.get(e.roleId);
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+            }));
+          return interaction.reply({ content: '### ➖ Select rank to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+
+        if (action === 'move_up') {
+          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('coc_move_up')
+            .setPlaceholder('Select rank to move up...')
+            .addOptions(cc.chain.map((e, i) => {
+              const role = interaction.guild.roles.cache.get(e.roleId);
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+            }));
+          return interaction.reply({ content: '### ⬆️ Select rank to move one position up', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+
+        if (action === 'move_down') {
+          if (!cc.chain.length) return interaction.reply({ content: '❌ No ranks in chain.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder()
+            .setCustomId('coc_move_down')
+            .setPlaceholder('Select rank to move down...')
+            .addOptions(cc.chain.map((e, i) => {
+              const role = interaction.guild.roles.cache.get(e.roleId);
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+            }));
+          return interaction.reply({ content: '### ⬇️ Select rank to move one position down', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+
+        if (action === 'log_channel') {
+          return interaction.reply({
+            content: '### 📋 Select log channel for chain promotions',
+            components: [channelDropdown('coc_log_channel', 'Select channel...')],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        if (action === 'promote_roles') {
+          return interaction.reply({
+            content: '### 🎖️ Select roles allowed to use `/promote`\n*Besides SHR, who has staff setup permission. Leave empty to clear.*',
+            components: [new ActionRowBuilder().addComponents(
+              new RoleSelectMenuBuilder()
+                .setCustomId('coc_promote_roles')
+                .setPlaceholder('Select roles...')
+                .setMinValues(0)
+                .setMaxValues(10)
+            )],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+
+        if (action === 'clear') {
+          cc.chain = [];
+          await saveGuildConfig(guildId);
+          return interaction.update(buildChainSetupPayload(guildId));
+        }
+
+        return interaction.reply({ content: '❌ Unknown action.', flags: MessageFlags.Ephemeral });
+      }
 
       // ════ TRAINING TYPE SELECTION ════
       if (id === 'tr_select_type') {
