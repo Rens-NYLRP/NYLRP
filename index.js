@@ -5001,7 +5001,6 @@ client.on('interactionCreate', async interaction => {
               { label: 'Departments', value: 'departments', emoji: '🏢' },
               { label: 'Handbooks', value: 'handbooks', emoji: '📚' },
               { label: 'Saved Msgs', value: 'savedmessages', emoji: '💾' },
-              { label: 'Cmd List', value: 'commandlist', emoji: '📜' },
               { label: 'Vote System', value: 'votesystem', emoji: '🗳️' },
               { label: 'Exec Request', value: 'execrequest', emoji: '📋' },
               { label: 'Bot Config', value: 'botconfig', emoji: '🤖' },
