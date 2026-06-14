@@ -1139,7 +1139,7 @@ function buildHandbookSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('hb__create').setLabel('➕ New Panel').setStyle(ButtonStyle.Success),
   );
   if (panels.length) {
-    const sel = new StringSelectMenuBuilder().setCustomId('hb__select_panel').setPlaceholder('Select panel to edit...').addOptions(panels.slice(0, 25).map(([id, p]) => ({ label: p.title, value: id })));
+    const sel = new StringSelectMenuBuilder().setCustomId('hb__select_panel').setPlaceholder('Select panel to edit...').addOptions(panels.slice(0, 25).map(([id, p]) => ({ label: p.title, value: String(id) })));
     return { embeds: [embed], components: [new ActionRowBuilder().addComponents(sel), row], flags: MessageFlags.Ephemeral };
   }
   return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
@@ -1165,7 +1165,7 @@ function buildHandbookPanelEditor(guildId, panelId) {
     ),
   ];
   if (panel.books?.length) {
-    const sel = new StringSelectMenuBuilder().setCustomId(`hb__remove_book__${panelId}`).setPlaceholder('Remove a book...').addOptions(panel.books.slice(0, 25).map(b => ({ label: b.label, value: b.id })));
+    const sel = new StringSelectMenuBuilder().setCustomId(`hb__remove_book__${panelId}`).setPlaceholder('Remove a book...').addOptions(panel.books.slice(0, 25).map(b => ({ label: b.label, value: String(b.id) })));
     rows.push(new ActionRowBuilder().addComponents(sel));
   }
   return { embeds: [embed], components: rows, flags: MessageFlags.Ephemeral };
@@ -3975,7 +3975,7 @@ client.on('interactionCreate', async interaction => {
           const typeSelect = new StringSelectMenuBuilder()
             .setCustomId('tr_select_type')
             .setPlaceholder('Select the training type...')
-            .addOptions(tc.types.slice(0, 25).map(t => ({ label: t.name, value: t.id, description: t.roleId ? `Role: will be assigned on pass` : 'No role assigned' })));
+            .addOptions(tc.types.slice(0, 25).map(t => ({ label: t.name, value: String(t.id), description: t.roleId ? `Role: will be assigned on pass` : 'No role assigned' })));
           return interaction.reply({
             content: '### 🎓 Select the type of training you are requesting:',
             components: [new ActionRowBuilder().addComponents(typeSelect)],
@@ -5168,7 +5168,7 @@ client.on('interactionCreate', async interaction => {
         }
         if (action === 'remove') {
           if (!src.ranks.length) return interaction.reply({ content: '❌ No ranks to remove.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('staffrank_remove_sel').setPlaceholder('Select rank to remove...').addOptions(src.ranks.map(r => ({ label: `Level ${r.level} — ${r.name}`, value: r.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('staffrank_remove_sel').setPlaceholder('Select rank to remove...').addOptions(src.ranks.map(r => ({ label: `Level ${r.level} — ${r.name}`, value: String(r.id ?? '') })));
           return interaction.reply({ content: '### ➖ Remove rank', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
       }
@@ -5189,12 +5189,12 @@ client.on('interactionCreate', async interaction => {
         }
         if (action === 'edit') {
           if (!v2.types?.length) return interaction.reply({ content: '❌ No V2 type configs.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('ticketv2type_edit_sel').setPlaceholder('Select type to edit...').addOptions(v2.types.map(t => ({ label: t.ticketTypeName, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('ticketv2type_edit_sel').setPlaceholder('Select type to edit...').addOptions(v2.types.map(t => ({ label: t.ticketTypeName, value: String(t.id) })));
           return interaction.reply({ content: '### ✏️ Select type config to edit', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
         if (action === 'remove') {
           if (!v2.types?.length) return interaction.reply({ content: '❌ No V2 type configs.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('ticketv2type_remove_sel').setPlaceholder('Select type to remove...').addOptions(v2.types.map(t => ({ label: t.ticketTypeName, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('ticketv2type_remove_sel').setPlaceholder('Select type to remove...').addOptions(v2.types.map(t => ({ label: t.ticketTypeName, value: String(t.id) })));
           return interaction.reply({ content: '### 🗑️ Select type config to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
         if (action.startsWith('setcat__')) {
@@ -6063,7 +6063,7 @@ client.on('interactionCreate', async interaction => {
         if (action === 'remove') {
           const depts = dc.departments ?? [];
           if (!depts.length) return interaction.reply({ content: '❌ No departments.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department to remove...').addOptions(depts.map(d => ({ label: d.name, value: d.id, description: `Server: ${d.guildId}` })));
+          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department to remove...').addOptions(depts.map(d => ({ label: d.name, value: String(d.id), description: `Server: ${d.guildId}` })));
           return interaction.reply({ content: '### 🗑️ Select department to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
       }
@@ -6240,7 +6240,7 @@ client.on('interactionCreate', async interaction => {
         if (action === 'remove_type') {
           const tc2 = getTrainingConfig(guildId);
           if (!tc2.types.length) return interaction.reply({ content: '❌ No training types to remove.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('tr_sel_remove_type').setPlaceholder('Select type to remove...').addOptions(tc2.types.map(t => ({ label: t.name, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('tr_sel_remove_type').setPlaceholder('Select type to remove...').addOptions(tc2.types.map(t => ({ label: t.name, value: String(t.id) })));
           return interaction.reply({ content: '### 🗑️ Select training type to remove:', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
       }
@@ -6274,7 +6274,7 @@ client.on('interactionCreate', async interaction => {
             .setPlaceholder('Select rank to remove...')
             .addOptions(cc.chain.map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: e.roleId };
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
             }));
           return interaction.reply({ content: '### ➖ Select rank to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -6286,7 +6286,7 @@ client.on('interactionCreate', async interaction => {
             .setPlaceholder('Select rank to move up...')
             .addOptions(cc.chain.map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: e.roleId };
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
             }));
           return interaction.reply({ content: '### ⬆️ Select rank to move one position up', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -6298,7 +6298,7 @@ client.on('interactionCreate', async interaction => {
             .setPlaceholder('Select rank to move down...')
             .addOptions(cc.chain.map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: e.roleId };
+              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
             }));
           return interaction.reply({ content: '### ⬇️ Select rank to move one position down', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -6533,13 +6533,13 @@ client.on('interactionCreate', async interaction => {
 
         if (id === 'ap_edit_type') {
           if (!ac.appTypes.length) return interaction.reply({ content: '❌ No types to edit.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_edit_type').setPlaceholder('Select type...').addOptions(ac.appTypes.map(t => ({ label: `${t.emoji || '•'} ${t.label}`, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_edit_type').setPlaceholder('Select type...').addOptions(ac.appTypes.map(t => ({ label: `${t.emoji || '•'} ${t.label}`, value: String(t.id) })));
           return interaction.reply({ content: '### ✏️ Select type to edit', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
         if (id === 'ap_remove_type') {
           if (!ac.appTypes.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('apd_remove_type').setPlaceholder('Select type...').addOptions(ac.appTypes.map(t => ({ label: t.label, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_remove_type').setPlaceholder('Select type...').addOptions(ac.appTypes.map(t => ({ label: t.label, value: String(t.id) })));
           return interaction.reply({ content: '### ➖ Remove application type', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
@@ -6557,19 +6557,19 @@ client.on('interactionCreate', async interaction => {
 
         if (id === 'ap_edit_panel') {
           if (!ac.panels.length) return interaction.reply({ content: '❌ No panels to edit.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_edit_panel').setPlaceholder('Select panel...').addOptions(ac.panels.map(p => ({ label: p.name, value: p.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_edit_panel').setPlaceholder('Select panel...').addOptions(ac.panels.map(p => ({ label: p.name, value: String(p.id) })));
           return interaction.reply({ content: '### ✏️ Select panel to edit', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
         if (id === 'ap_remove_panel') {
           if (!ac.panels.length) return interaction.reply({ content: '❌ No panels.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('apd_remove_panel').setPlaceholder('Select panel...').addOptions(ac.panels.map(p => ({ label: p.name, value: p.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_remove_panel').setPlaceholder('Select panel...').addOptions(ac.panels.map(p => ({ label: p.name, value: String(p.id) })));
           return interaction.reply({ content: '### 🗑️ Remove panel', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
         if (id === 'ap_deploy_panel') {
           if (!ac.panels.length) return interaction.reply({ content: '❌ Create a panel first.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_deploy_panel').setPlaceholder('Select panel to deploy...').addOptions(ac.panels.map(p => ({ label: p.name, value: p.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('apd_select_deploy_panel').setPlaceholder('Select panel to deploy...').addOptions(ac.panels.map(p => ({ label: p.name, value: String(p.id) })));
           return interaction.reply({ content: '### 🚀 Select panel to deploy', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
       }
@@ -6898,8 +6898,8 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
-        if (id === 'sm_edit') { const msgs = Object.entries(sm.messages); if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('smd_edit').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: mid }))); return interaction.reply({ content: '### ✏️ Edit message', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
-        if (id === 'sm_delete') { const msgs = Object.entries(sm.messages); if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('smd_delete').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: mid }))); return interaction.reply({ content: '### 🗑️ Delete message', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
+        if (id === 'sm_edit') { const msgs = Object.entries(sm.messages); if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('smd_edit').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: String(mid) }))); return interaction.reply({ content: '### ✏️ Edit message', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
+        if (id === 'sm_delete') { const msgs = Object.entries(sm.messages); if (!msgs.length) return interaction.reply({ content: '❌ No saved messages.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('smd_delete').setPlaceholder('Select message...').addOptions(msgs.map(([mid, m]) => ({ label: m.name, value: String(mid) }))); return interaction.reply({ content: '### 🗑️ Delete message', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
       }
 
       // ════ WELCOMER BUTTONS ════
@@ -6926,7 +6926,7 @@ client.on('interactionCreate', async interaction => {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         const ar = getAutoroleConfig(guildId);
         if (id === 'ar_add') return interaction.reply({ content: '### ➕ Select autoroles', components: [roleDropdown('ard_add', 'Select roles...')], flags: MessageFlags.Ephemeral });
-        if (id === 'ar_remove') { if (!ar.roles.length) return interaction.reply({ content: '❌ No roles.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role...').addOptions(ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: id }; })); return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
+        if (id === 'ar_remove') { if (!ar.roles.length) return interaction.reply({ content: '❌ No roles.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('ard_remove').setPlaceholder('Select role...').addOptions(ar.roles.map(id => { const role = interaction.guild.roles.cache.get(id); return { label: role?.name ?? id, value: String(id) }; })); return interaction.reply({ content: '### ➖ Remove autorole', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
         if (id === 'ar_toggle') { ar.enabled = !ar.enabled; await saveGuildConfig(guildId); return interaction.update(buildAutoroleSetupPayload(guildId)); }
       }
 
@@ -7070,10 +7070,10 @@ client.on('interactionCreate', async interaction => {
         if (id === 't_type_roles') {
           const tc = getTicketConfig(guildId);
           if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No ticket types yet.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('td_select_type_roles').setPlaceholder('Select type to configure roles...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id })));
+          const sel = new StringSelectMenuBuilder().setCustomId('td_select_type_roles').setPlaceholder('Select type to configure roles...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: String(t.id) })));
           return interaction.reply({ content: '### 🔑 Select ticket type to configure roles', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
-        if (id === 't_remove_type') { const tc = getTicketConfig(guildId); if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: t.id }))); return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
+        if (id === 't_remove_type') { const tc = getTicketConfig(guildId); if (!tc.ticketTypes.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); const sel = new StringSelectMenuBuilder().setCustomId('td_remove_type').setPlaceholder('Select type...').addOptions(tc.ticketTypes.map(t => ({ label: t.label, value: String(t.id) }))); return interaction.reply({ content: '### ➖ Remove ticket type', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral }); }
         if (id === 't_rating') {
           const rc = getTicketRatingConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_t_rating').setTitle('Rating System Settings');
@@ -7185,8 +7185,8 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
-        if (id === 'an_edit')   { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### ✏️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], flags: MessageFlags.Ephemeral }); }
-        if (id === 'an_delete') { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### 🗑️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: tid }))))], flags: MessageFlags.Ephemeral }); }
+        if (id === 'an_edit')   { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### ✏️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_edit').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: String(tid) }))))], flags: MessageFlags.Ephemeral }); }
+        if (id === 'an_delete') { const types = Object.entries(ac.types); if (!types.length) return interaction.reply({ content: '❌ No types.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### 🗑️ Select type', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('an_sel_delete').setPlaceholder('Select type...').addOptions(types.map(([tid, t]) => ({ label: `${t.emoji || '📢'} ${t.name}`, value: String(tid) }))))], flags: MessageFlags.Ephemeral }); }
         if (id.startsWith('ane__')) {
           const parts = id.split('__'); const action = parts[1]; const typeId = parts.slice(2).join('__');
           const t = ac.types[typeId];
@@ -7224,8 +7224,8 @@ client.on('interactionCreate', async interaction => {
           );
           return interaction.showModal(modal);
         }
-        if (id === 'sr_edit')   { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], flags: MessageFlags.Ephemeral }); }
-        if (id === 'sr_delete') { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: pid }))))], flags: MessageFlags.Ephemeral }); }
+        if (id === 'sr_edit')   { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### ✏️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_edit').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: String(pid) }))))], flags: MessageFlags.Ephemeral }); }
+        if (id === 'sr_delete') { const panels = Object.entries(src.panels); if (!panels.length) return interaction.reply({ content: '❌ No panels.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: '### 🗑️ Select panel', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('sr_sel_delete').setPlaceholder('Select panel...').addOptions(panels.map(([pid, p]) => ({ label: p.title, value: String(pid) }))))], flags: MessageFlags.Ephemeral }); }
         if (id.startsWith('sre__')) {
           const parts = id.split('__'); const action = parts[1]; const panelId = parts.slice(2).join('__');
           const panel = src.panels[panelId];
@@ -7242,7 +7242,7 @@ client.on('interactionCreate', async interaction => {
           }
           if (action === 'channel')    return interaction.reply({ content: `### 📢 Channel for **${panel.title}**`, components: [channelDropdown(`srch__${panelId}`, 'Select channel...')], flags: MessageFlags.Ephemeral });
           if (action === 'addrole')    return interaction.reply({ content: `### ➕ Add role to **${panel.title}**`, components: [roleDropdown(`srr__add__${panelId}`, 'Select role...', 1, 1)], flags: MessageFlags.Ephemeral });
-          if (action === 'removerole') { if (!panel.roles.length) return interaction.reply({ content: '❌ No roles.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: `### ➖ Remove role`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role...').addOptions(panel.roles.map(r => ({ label: r.label, value: r.id }))))], flags: MessageFlags.Ephemeral }); }
+          if (action === 'removerole') { if (!panel.roles.length) return interaction.reply({ content: '❌ No roles.', flags: MessageFlags.Ephemeral }); return interaction.reply({ content: `### ➖ Remove role`, components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`sr_sel_rmrole__${panelId}`).setPlaceholder('Select role...').addOptions(panel.roles.map(r => ({ label: r.label, value: String(r.id) }))))], flags: MessageFlags.Ephemeral }); }
           if (action === 'deploy') {
             if (!panel.channel || !panel.roles.length) return interaction.reply({ content: '❌ Set channel and add roles first.', flags: MessageFlags.Ephemeral });
             await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -8302,7 +8302,7 @@ client.on('interactionCreate', async interaction => {
       if (id === 'staffrank_remove_sel') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const src = getStaffRankConfig(guildId);
-        src.ranks = src.ranks.filter(r => r.id !== val);
+        src.ranks = src.ranks.filter(r => String(r.id) !== String(val));
         await saveGuildConfig(guildId);
         return interaction.reply({ content: '✅ Rank removed.', flags: MessageFlags.Ephemeral });
       }
@@ -9760,4 +9760,4 @@ app.listen(PORT, '0.0.0.0', () => {
   await connectDB();
   await client.login(process.env.TOKEN);
 })();
-// End of bot
+// End of bots
