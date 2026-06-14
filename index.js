@@ -1260,6 +1260,7 @@ function buildChainSetupPayload(guildId) {
       { label: 'Remove Rank', value: 'remove_rank', emoji: '➖', description: 'Remove a role from the chain' },
       { label: 'Move Rank Up', value: 'move_up', emoji: '⬆️', description: 'Move a rank one position up' },
       { label: 'Move Rank Down', value: 'move_down', emoji: '⬇️', description: 'Move a rank one position down' },
+      { label: 'Set Nickname Prefix', value: 'set_prefix', emoji: '🏷️', description: 'Auto-set nickname prefix on promotion' },
       { label: 'Log Channel', value: 'log_channel', emoji: '📋', description: 'Set the promotion log channel' },
       { label: 'Promote Roles', value: 'promote_roles', emoji: '🎖️', description: 'Set who can use /promote (besides SHR)' },
       { label: 'Clear Chain', value: 'clear', emoji: '🗑️', description: 'Remove all ranks from the chain' },
@@ -5501,18 +5502,23 @@ client.on('interactionCreate', async interaction => {
               } else {
                 await interaction.followUp({ content: `⚠️ Training passed but chain promotion failed: ${result.reason}`, flags: MessageFlags.Ephemeral });
               }
-            } else if (trainingType?.roleId && targetMemberForPromo) {
-              // Geen chain — gebruik training type rol
-              const trRole = interaction.guild.roles.cache.get(trainingType.roleId);
-              await targetMemberForPromo.roles.add(trainingType.roleId).catch(() => {});
-              newRoleName = trRole?.name ?? null;
-              await interaction.followUp({ content: `✅ Gave <@&${trainingType.roleId}> to <@${requestUserId}> for passing **${trainingType.name}**.`, flags: MessageFlags.Ephemeral });
+            } else if ((trainingType?.roleIds?.length || trainingType?.roleId) && targetMemberForPromo) {
+              // Geen chain — gebruik training type rol(len)
+              const roleIds = trainingType.roleIds?.length ? trainingType.roleIds : (trainingType.roleId ? [trainingType.roleId] : []);
+              const roleNames = [];
+              for (const rid of roleIds) {
+                const trRole = interaction.guild.roles.cache.get(rid);
+                await targetMemberForPromo.roles.add(rid).catch(() => {});
+                if (trRole) roleNames.push(trRole.name);
+                if (!newRoleName) newRoleName = trRole?.name ?? null;
+              }
+              await interaction.followUp({ content: `✅ Gave ${roleIds.map(r => `<@&${r}>`).join(', ')} to <@${requestUserId}> for passing **${trainingType.name}**.`, flags: MessageFlags.Ephemeral });
             } else {
               // Geen chain, geen type rol — handmatige selectie
               await interaction.followUp({
-                content: `### 🎭 Optionally give a role to <@${requestUserId}> for passing${trainingType ? ` **${trainingType.name}**` : ''}:`,
+                content: `### 🎭 Optionally give role(s) to <@${requestUserId}> for passing${trainingType ? ` **${trainingType.name}**` : ''}:`,
                 components: [new ActionRowBuilder().addComponents(
-                  new RoleSelectMenuBuilder().setCustomId(`tr_pass_role__${requestUserId}`).setPlaceholder('Select role to give (optional)...').setMinValues(0).setMaxValues(1)
+                  new RoleSelectMenuBuilder().setCustomId(`tr_pass_role__${requestUserId}`).setPlaceholder('Select role(s) to give (optional)...').setMinValues(0).setMaxValues(10)
                 )],
                 flags: MessageFlags.Ephemeral,
               });
@@ -7713,6 +7719,42 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
+      // ════ TRAINING TYPE ROLE SELECT (na aanmaken type) ════
+      if (interaction.customId.startsWith('tr_type_role__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const typeId = interaction.customId.replace('tr_type_role__', '');
+        const tc = getTrainingConfig(guildId);
+        const t = tc.types.find(t => t.id === typeId);
+        if (!t) return interaction.reply({ content: '❌ Training type not found.', flags: MessageFlags.Ephemeral });
+        // Support multiple roles
+        t.roleIds = ids.length ? ids : [];
+        t.roleId  = ids[0] ?? null; // backwards compat
+        await saveGuildConfig(guildId);
+        return interaction.reply({
+          content: ids.length
+            ? `✅ Role(s) ${ids.map(r => `<@&${r}>`).join(', ')} will be given when someone passes **${t.name}**!`
+            : `✅ No role set for **${t.name}**.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      // ════ TRAINING PASS ROLE SELECT (handmatige rol na pass) ════
+      if (interaction.customId.startsWith('tr_pass_role__')) {
+        const targetUserId = interaction.customId.replace('tr_pass_role__', '');
+        const targetMember = await interaction.guild.members.fetch(targetUserId).catch(() => null);
+        if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
+        if (!ids.length) return interaction.reply({ content: '✅ No role given.', flags: MessageFlags.Ephemeral });
+        let added = 0;
+        for (const roleId of ids) {
+          const role = interaction.guild.roles.cache.get(roleId);
+          if (role) { await targetMember.roles.add(role).catch(() => {}); added++; }
+        }
+        return interaction.reply({
+          content: `✅ Gave ${ids.map(r => `<@&${r}>`).join(', ')} to <@${targetUserId}>!`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
       // ════ STAFF REVIEW STAFF ROLES ════
       if (interaction.customId === 'sr2d_staff_roles') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -8804,6 +8846,25 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '✅ Termination message updated!', flags: MessageFlags.Ephemeral });
       }
 
+      // ── Chain of Command prefix ──
+      if (mid.startsWith('modal_coc_prefix__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const roleId = mid.replace('modal_coc_prefix__', '');
+        const cc = getChainConfig(guildId);
+        const entry = cc.chain.find(e => e.roleId === roleId);
+        if (!entry) return interaction.reply({ content: '❌ Rank not found.', flags: MessageFlags.Ephemeral });
+        const prefix = interaction.fields.getTextInputValue('coc_prefix_val').trim();
+        entry.nicknamePrefix = prefix || null;
+        await saveGuildConfig(guildId);
+        const role = interaction.guild.roles.cache.get(roleId);
+        return interaction.reply({
+          content: prefix
+            ? `✅ Prefix **${prefix}** set for **${role?.name ?? roleId}**!\n\nWhen promoted to this rank, nickname becomes: \`${prefix} | Username\``
+            : `✅ Prefix removed for **${role?.name ?? roleId}**. Nickname will not change automatically.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
       // ── Bot config ──
       if (mid === 'modal_botcfg_logo') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -9619,9 +9680,9 @@ client.on('interactionCreate', async interaction => {
         tc.types.push({ id: newId, name, roleId: null });
         await saveGuildConfig(guildId);
         return interaction.reply({
-          content: `✅ Training type **${name}** added!\n\n### 🎭 Select the role to assign when someone **passes** this training (optional — dismiss to skip):`,
+          content: `✅ Training type **${name}** added!\n\n### 🎭 Select the role(s) to assign when someone **passes** this training (optional — dismiss to skip):`,
           components: [new ActionRowBuilder().addComponents(
-            new RoleSelectMenuBuilder().setCustomId(`tr_type_role__${newId}`).setPlaceholder('Select role to give on pass...').setMinValues(0).setMaxValues(1)
+            new RoleSelectMenuBuilder().setCustomId(`tr_type_role__${newId}`).setPlaceholder('Select role(s) to give on pass...').setMinValues(0).setMaxValues(10)
           )],
           flags: MessageFlags.Ephemeral,
         });
