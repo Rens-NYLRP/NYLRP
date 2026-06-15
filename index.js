@@ -596,6 +596,12 @@ function getAntipingConfig(guildId) {
   return gc.antiping;
 }
 
+function getStickyConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.stickyMessages) gc.stickyMessages = {}; // channelId → { content, embedTitle, embedColor, lastMessageId }
+  return gc.stickyMessages;
+}
+
 function getRolePingProtectionConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.rolePingProtection) gc.rolePingProtection = {
@@ -3722,6 +3728,35 @@ client.on('messageCreate', async message => {
   if (!message.guild || message.author.bot) return;
   const guildId = message.guild.id;
 
+  // ── Sticky Messages ──
+  try {
+    const stickyCfg = getStickyConfig(guildId);
+    const sticky = stickyCfg[message.channel.id];
+    if (sticky) {
+      // Verwijder het vorige sticky-bericht
+      if (sticky.lastMessageId) {
+        const oldMsg = await message.channel.messages.fetch(sticky.lastMessageId).catch(() => null);
+        if (oldMsg) await oldMsg.delete().catch(() => {});
+      }
+      // Post het sticky-bericht opnieuw onderaan
+      const payload = {};
+      if (sticky.content) payload.content = sticky.content;
+      if (sticky.embedTitle || sticky.embedDescription) {
+        const embed = new EmbedBuilder().setColor(hexToInt(sticky.embedColor));
+        if (sticky.embedTitle) embed.setTitle(sticky.embedTitle);
+        if (sticky.embedDescription) embed.setDescription(sticky.embedDescription);
+        payload.embeds = [embed];
+      }
+      if (payload.content || payload.embeds) {
+        const newMsg = await message.channel.send(payload).catch(() => null);
+        if (newMsg) {
+          sticky.lastMessageId = newMsg.id;
+          await saveGuildConfig(guildId);
+        }
+      }
+    }
+  } catch (e) { console.error('Sticky message error:', e); }
+
   // ── Role Ping Protection ──
   try {
     const rpp = getRolePingProtectionConfig(guildId);
@@ -5202,7 +5237,7 @@ client.on('interactionCreate', async interaction => {
             );
           const select = new StringSelectMenuBuilder()
             .setCustomId('setup_menu')
-            .setPlaceholder('Select a category to configure...')
+            .setPlaceholder('Select a category to configure... (1/2)')
             .addOptions(
               { label: 'Tickets', value: 'tickets', emoji: '🎫' },
               { label: 'Sessions', value: 'sessions', emoji: '🎮' },
@@ -5217,6 +5252,11 @@ client.on('interactionCreate', async interaction => {
               { label: 'Counters', value: 'counters', emoji: '📊' },
               { label: 'Training', value: 'training', emoji: '🎓' },
               { label: 'ERLC Logs', value: 'erlclogs', emoji: '📡' },
+            );
+          const select2 = new StringSelectMenuBuilder()
+            .setCustomId('setup_menu')
+            .setPlaceholder('Select a category to configure... (2/2)')
+            .addOptions(
               { label: 'Role Perms', value: 'roleperms', emoji: '🔐' },
               { label: 'Permissions', value: 'permissions', emoji: '👑' },
               { label: 'Departments', value: 'departments', emoji: '🏢' },
@@ -5229,9 +5269,11 @@ client.on('interactionCreate', async interaction => {
               { label: 'Infractions', value: 'infractions', emoji: '⚠️' },
               { label: 'LOA', value: 'loa', emoji: '🏖️' },
               { label: 'Chain of Command', value: 'chainofcommand', emoji: '⛓️' },
+              { label: 'Sticky Messages', value: 'stickymessages', emoji: '📌' },
             );
           const row = new ActionRowBuilder().addComponents(select);
-          return interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+          const row2 = new ActionRowBuilder().addComponents(select2);
+          return interaction.reply({ embeds: [embed], components: [row, row2], flags: MessageFlags.Ephemeral });
         }
       }
 
