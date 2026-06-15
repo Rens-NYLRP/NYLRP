@@ -1752,12 +1752,15 @@ function parseDDMMYYYY(input) {
   return date.getTime();
 }
 
-// Combineert 'DD-MM-YYYY' en 'HH:MM' (UTC) tot een timestamp, of null bij ongeldige invoer.
-function parseDateTimeUTC(dateInput, timeInput) {
+// Combineert 'DD-MM-YYYY' en 'HH:MM' in de gegeven UTC-offset (bv. 2 voor UTC+2, -5 voor UTC-5, 5.5 voor UTC+5:30)
+// tot een UTC-timestamp, of null bij ongeldige invoer.
+function parseDateTimeUTC(dateInput, timeInput, utcOffsetHours = 0) {
   const dayTs = parseDDMMYYYY(dateInput);
   const time = parseHHMM(timeInput);
   if (dayTs === null || time === null) return null;
-  return dayTs + time.hours * 3_600_000 + time.minutes * 60_000;
+  const localMs = dayTs + time.hours * 3_600_000 + time.minutes * 60_000;
+  // Lokale tijd minus de offset = UTC-tijd
+  return localMs - utcOffsetHours * 3_600_000;
 }
 
 // Cryptographically secure verification code (Part 13a)
@@ -2977,8 +2980,35 @@ const commands = [
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
     { name: 'schedule', type: 1, description: 'Schedule a session for later (everyone sees it in their own timezone)', options: [
-      { name: 'date', type: 3, description: 'Date (DD-MM-YYYY)', required: true },
-      { name: 'time', type: 3, description: 'Time UTC (HH:MM)', required: true },
+      { name: 'date', type: 3, description: 'Date (DD-MM-YYYY) in your own timezone', required: true },
+      { name: 'time', type: 3, description: 'Time (HH:MM) in your own timezone', required: true },
+      { name: 'timezone', type: 3, description: 'Your timezone', required: true, choices: [
+        { name: 'UTC-12 — Baker Island',                value: '-12' },
+        { name: 'UTC-11 — American Samoa',              value: '-11' },
+        { name: 'UTC-10 — Hawaii',                       value: '-10' },
+        { name: 'UTC-9 — Alaska',                        value: '-9'  },
+        { name: 'UTC-8 — Pacific Time (US/Canada)',      value: '-8'  },
+        { name: 'UTC-7 — Mountain Time (US/Canada)',     value: '-7'  },
+        { name: 'UTC-6 — Central Time (US/Canada)',      value: '-6'  },
+        { name: 'UTC-5 — Eastern Time (US/Canada)',      value: '-5'  },
+        { name: 'UTC-4 — Atlantic Time / Brazil (West)', value: '-4'  },
+        { name: 'UTC-3 — Brazil (Brasília), Argentina',  value: '-3'  },
+        { name: 'UTC-2 — South Georgia',                 value: '-2'  },
+        { name: 'UTC-1 — Azores',                        value: '-1'  },
+        { name: 'UTC+0 — London, Lisbon',                value: '0'   },
+        { name: 'UTC+1 — Amsterdam, Paris, Berlin',      value: '1'   },
+        { name: 'UTC+2 — Athens, Cairo, Johannesburg',   value: '2'   },
+        { name: 'UTC+3 — Moscow, Istanbul, Riyadh',      value: '3'   },
+        { name: 'UTC+4 — Dubai, Baku',                   value: '4'   },
+        { name: 'UTC+5 — Karachi, Tashkent',             value: '5'   },
+        { name: 'UTC+5:30 — India, Sri Lanka',           value: '5.5' },
+        { name: 'UTC+6 — Dhaka, Almaty',                 value: '6'   },
+        { name: 'UTC+7 — Bangkok, Jakarta',              value: '7'   },
+        { name: 'UTC+8 — Beijing, Singapore, Manila',    value: '8'   },
+        { name: 'UTC+9 — Tokyo, Seoul',                  value: '9'   },
+        { name: 'UTC+10 — Sydney, Melbourne',            value: '10'  },
+        { name: 'UTC+12 — Auckland, Fiji',               value: '12'  },
+      ]},
       { name: 'link', type: 3, description: 'Join link override', required: false },
     ]},
   ]},
@@ -4586,10 +4616,11 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'schedule') {
           const dateStr = interaction.options.getString('date');
           const timeStr = interaction.options.getString('time');
+          const tzOffset = parseFloat(interaction.options.getString('timezone'));
           const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null;
 
-          const scheduledAt = parseDateTimeUTC(dateStr, timeStr);
-          if (scheduledAt === null) return interaction.editReply({ content: '❌ Invalid date/time. Use `DD-MM-YYYY` and `HH:MM` (UTC), e.g. `20-06-2026` and `19:00`.' });
+          const scheduledAt = parseDateTimeUTC(dateStr, timeStr, tzOffset);
+          if (scheduledAt === null) return interaction.editReply({ content: '❌ Invalid date/time. Use `DD-MM-YYYY` and `HH:MM`, e.g. `20-06-2026` and `19:00`.' });
           if (scheduledAt <= Date.now()) return interaction.editReply({ content: '❌ The scheduled time must be in the future.' });
 
           const schedId = genId();
