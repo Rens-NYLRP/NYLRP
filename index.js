@@ -485,6 +485,7 @@ function getSessionConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.session) gc.session = { channel: null, pingRoles: [], allowedRoles: [], joinLink: null, startImage: null, startDescription: null, voteImage: null, voteDescription: null, shutdownImage: null, shutdownDescription: null, voteThreshold: 5 };
   if (gc.session.voteThreshold === undefined) gc.session.voteThreshold = 5;
+  if (!gc.session.scheduled) gc.session.scheduled = {}; // id → { hostId, scheduledAt, joinLink, voters: [], messageId, channelId, fired }
   if (!isMainServer(guildId)) {
     const mainSession = getMainConfig('session');
     if (mainSession) {
@@ -1283,14 +1284,23 @@ function buildStaffReviewSetupPayload(guildId) {
       { name: '📢 Review Channel',          value: src.channel ? `<#${src.channel}>` : '*Not set*',                                              inline: true },
       { name: '👮 Reviewable Staff Roles',  value: src.staffRoles.length ? src.staffRoles.map(r => `<@&${r}>`).join(', ') : '*Any staff member*', inline: true },
       { name: '📊 Total Reviews',           value: totalCount ? `${totalCount} review(s) — avg ⭐ ${avgScore}/5` : '*No reviews yet*',            inline: false },
+      { name: '🖼️ Panel Image',            value: src.panelImage ? `[Set](${src.panelImage})` : '*Not set*',                                     inline: true },
+      { name: '🖼️ Panel Thumbnail',        value: src.panelThumbnail ? `[Set](${src.panelThumbnail})` : '*Not set*',                              inline: true },
     )
-    .setDescription('Allow members to submit a star rating + written review for any staff member.');
+    .setDescription('Allow members to submit a star rating + written review for any staff member.\n\nUse **Send Panel** to post a "Leave a Review" button in the review channel.');
+  if (src.panelImage) embed.setImage(src.panelImage);
+  if (src.panelThumbnail) embed.setThumbnail(src.panelThumbnail);
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('sr2_setup__channel').setLabel('Set Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
     new ButtonBuilder().setCustomId('sr2_setup__staff_roles').setLabel('Staff Roles').setStyle(ButtonStyle.Primary).setEmoji('👮'),
     new ButtonBuilder().setCustomId('sr2_setup__leaderboard').setLabel('Leaderboard').setStyle(ButtonStyle.Secondary).setEmoji('🏆'),
   );
-  return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('sr2_setup__image').setLabel('Set Image').setStyle(ButtonStyle.Secondary).setEmoji('🖼️'),
+    new ButtonBuilder().setCustomId('sr2_setup__thumbnail').setLabel('Set Thumbnail').setStyle(ButtonStyle.Secondary).setEmoji('🖼️'),
+    new ButtonBuilder().setCustomId('sr2_setup__send_panel').setLabel('Send Panel').setStyle(ButtonStyle.Success).setEmoji('📨'),
+  );
+  return { embeds: [embed], components: [row, row2], flags: MessageFlags.Ephemeral };
 }
 
 function buildTrainingSetupPayload(guildId) {
@@ -1661,9 +1671,11 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
 
 function getStaffReviewConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.staffReview) gc.staffReview = { channel: null, staffRoles: [], reviews: {} };
+  if (!gc.staffReview) gc.staffReview = { channel: null, staffRoles: [], reviews: {}, panelImage: null, panelThumbnail: null };
   if (!gc.staffReview.staffRoles) gc.staffReview.staffRoles = [];
   if (!gc.staffReview.reviews)    gc.staffReview.reviews    = {};
+  if (gc.staffReview.panelImage === undefined)     gc.staffReview.panelImage     = null;
+  if (gc.staffReview.panelThumbnail === undefined) gc.staffReview.panelThumbnail = null;
   return gc.staffReview;
 }
 
@@ -1718,6 +1730,35 @@ const activeGeneralVotes = new Map(); // voteId → { messageId, channelId, ques
 // UTILS
 // ════════════════════════════════════════════
 function genId() { return Math.random().toString(36).slice(2, 8); }
+
+// Parseert 'HH:MM' (24-uurs, UTC) naar { hours, minutes } of null bij ongeldige invoer.
+function parseHHMM(input) {
+  const m = input.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hours = parseInt(m[1], 10), minutes = parseInt(m[2], 10);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return { hours, minutes };
+}
+
+// Parseert 'DD-MM-YYYY' (of 'DD/MM/YYYY') naar een UTC timestamp (00:00) of null bij ongeldige invoer.
+function parseDDMMYYYY(input) {
+  const m = input.trim().match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+  if (!m) return null;
+  const day = parseInt(m[1], 10), month = parseInt(m[2], 10), year = parseInt(m[3], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  // Validate that the date didn't roll over (e.g. 31-02-2026)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return date.getTime();
+}
+
+// Combineert 'DD-MM-YYYY' en 'HH:MM' (UTC) tot een timestamp, of null bij ongeldige invoer.
+function parseDateTimeUTC(dateInput, timeInput) {
+  const dayTs = parseDDMMYYYY(dateInput);
+  const time = parseHHMM(timeInput);
+  if (dayTs === null || time === null) return null;
+  return dayTs + time.hours * 3_600_000 + time.minutes * 60_000;
+}
 
 // Cryptographically secure verification code (Part 13a)
 const crypto = require('crypto');
@@ -2935,6 +2976,11 @@ const commands = [
     { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
     { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
     { name: 'shutdown', type: 1, description: 'Shutdown session' },
+    { name: 'schedule', type: 1, description: 'Schedule a session for later (everyone sees it in their own timezone)', options: [
+      { name: 'date', type: 3, description: 'Date (DD-MM-YYYY)', required: true },
+      { name: 'time', type: 3, description: 'Time UTC (HH:MM)', required: true },
+      { name: 'link', type: 3, description: 'Join link override', required: false },
+    ]},
   ]},
   { name: 'ban', description: '[SHR] Ban user + delete all messages/threads', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'unban', description: '[SHR] Unban by ID', options: [{ name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
@@ -3054,6 +3100,31 @@ async function checkLOAExpiry() {
     const guild = client.guilds.cache.get(gId);
     if (!guild) continue;
     for (const [userId, loa] of Object.entries(lc.active)) {
+      if (userId.startsWith('pending_')) continue; // niet goedgekeurd, scheduler raakt deze niet aan
+
+      // ── LOA start: rol/nickname toepassen zodra de startdatum is bereikt ──
+      if (!loa.applied && loa.startsAt && now >= loa.startsAt) {
+        try {
+          const member = await guild.members.fetch(userId).catch(() => null);
+          if (member) {
+            if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
+            const prefix = lc.prefix ?? '[LOA]';
+            const currentNick = member.nickname ?? member.user.username;
+            const newNick = `${prefix} ${currentNick}`.slice(0, 32);
+            await member.setNickname(newNick).catch(() => {});
+          }
+          if (lc.logChannel) {
+            const ch = guild.channels.cache.get(lc.logChannel);
+            if (ch) await ch.send({ embeds: [new EmbedBuilder().setTitle('🏖️ LOA Started').setColor(0x5865F2)
+              .addFields({ name: '👤 User', value: `<@${userId}>`, inline: true }, { name: '🔴 Ends', value: `<t:${Math.floor(loa.endsAt/1000)}:R>`, inline: true })
+              .setTimestamp()] }).catch(() => {});
+          }
+          await client.users.fetch(userId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('🏖️ Your LOA has started').setColor(0x5865F2).setDescription(`Your Leave of Absence in **${guild.name}** has started.\n\nEnds: <t:${Math.floor(loa.endsAt/1000)}:R>`).setTimestamp()] })).catch(() => {});
+        } catch {}
+        loa.applied = true;
+      }
+
+      // ── LOA einde: rol/nickname terugzetten en entry verwijderen ──
       if (now < loa.endsAt) continue;
       try {
         const member = await guild.members.fetch(userId).catch(() => null);
@@ -3070,6 +3141,44 @@ async function checkLOAExpiry() {
         await client.users.fetch(userId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('✅ Your LOA has ended').setColor(0x57F287).setDescription(`Your Leave of Absence in **${guild.name}** has ended. Welcome back!`).setTimestamp()] })).catch(() => {});
       } catch {}
       delete lc.active[userId];
+    }
+    await saveGuildConfig(gId).catch(() => {});
+  }
+}
+
+// ════ SCHEDULED SESSION CHECK ════
+async function checkScheduledSessions() {
+  if (!dbReady) return;
+  const now = Date.now();
+  for (const [gId, gc] of Object.entries(config)) {
+    const sc = gc.session;
+    if (!sc?.scheduled || !Object.keys(sc.scheduled).length) continue;
+    const guild = client.guilds.cache.get(gId);
+    if (!guild) continue;
+
+    for (const [schedId, sched] of Object.entries(sc.scheduled)) {
+      if (sched.fired || now < sched.scheduledAt) continue;
+      try {
+        const ch = guild.channels.cache.get(sched.channelId);
+        const hostUser = await client.users.fetch(sched.hostId).catch(() => ({ tag: 'Unknown', id: sched.hostId, username: 'Unknown' }));
+        const vars = { userMention: `<@${sched.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: userDisplay(hostUser) ?? 'Unknown', memberCount: guild.memberCount.toString(), server: guild.name };
+        const voterMentions = sched.voters.length ? sched.voters.map(id => `<@${id}>`).join(' ') : null;
+
+        await postSessionStart(guild, sc, hostUser, sched.joinLink, vars, voterMentions);
+
+        // Disable de "I'm coming" knop op het originele bericht
+        if (ch) {
+          const origMsg = await ch.messages.fetch(sched.messageId).catch(() => null);
+          if (origMsg) {
+            const disabledRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`session_sched_vote__${schedId}`).setLabel('Session started!').setStyle(ButtonStyle.Secondary).setDisabled(true),
+            );
+            await origMsg.edit({ components: [disabledRow] }).catch(() => {});
+          }
+        }
+      } catch (e) { console.error('checkScheduledSessions error:', e); }
+      sched.fired = true;
+      delete sc.scheduled[schedId];
     }
     await saveGuildConfig(gId).catch(() => {});
   }
@@ -3148,7 +3257,8 @@ function buildTicketInactivitySetupPayload(guildId) {
 
 function buildLOASetupPayload(guildId) {
   const lc = getLOAConfig(guildId);
-  const activeList = Object.entries(lc.active);
+  const activeList = Object.entries(lc.active).filter(([uid]) => !uid.startsWith('pending_'));
+  const pendingList = Object.entries(lc.active).filter(([uid]) => uid.startsWith('pending_'));
   const embed = new EmbedBuilder().setTitle('🏖️ Leave of Absence Setup').setColor(0x5865F2)
     .addFields(
       { name: '🎭 LOA Role', value: lc.loaRole ? `<@&${lc.loaRole}>` : '*Not set*', inline: true },
@@ -3156,7 +3266,8 @@ function buildLOASetupPayload(guildId) {
       { name: '✅ Required Approvals', value: `${lc.requiredApprovals ?? 1}`, inline: true },
       { name: '📋 Log Channel', value: lc.logChannel ? `<#${lc.logChannel}>` : '*Not set*', inline: true },
       { name: '🏷️ Prefix', value: `\`${lc.prefix ?? '[LOA]'}\``, inline: true },
-      { name: '📊 Active LOAs', value: activeList.length ? activeList.map(([uid, l]) => `<@${uid}> — <t:${Math.floor(l.endsAt/1000)}:R>`).join('\n') : '*None*', inline: false },
+      { name: '📊 Active/Upcoming LOAs', value: activeList.length ? activeList.map(([uid, l]) => `<@${uid}> — 🟢 <t:${Math.floor((l.startsAt ?? 0)/1000)}:D> → 🔴 <t:${Math.floor(l.endsAt/1000)}:D>`).join('\n') : '*None*', inline: false },
+      { name: '⏳ Pending Requests', value: pendingList.length ? `${pendingList.length} awaiting approval` : '*None*', inline: false },
     );
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('loa__set_role').setLabel('LOA Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
@@ -3200,6 +3311,9 @@ client.once('clientReady', async () => {
 
   // ════ LOA EXPIRY CHECK (moved inside clientReady — Part 10c) ════
   setInterval(() => checkLOAExpiry().catch(console.error), 60_000);
+
+  // ════ SCHEDULED SESSION CHECK ════
+  setInterval(() => checkScheduledSessions().catch(console.error), 30_000);
 
   // ════ QOTD DAILY SCHEDULER ════
   // Check every minute if it's time to post QOTD
@@ -4469,6 +4583,46 @@ client.on('interactionCreate', async interaction => {
           await sCh.send({ embeds: [embed] }); // Geen ping bij shutdown
           return interaction.editReply({ content: '✅ Shutdown posted!' });
         }
+        if (sub === 'schedule') {
+          const dateStr = interaction.options.getString('date');
+          const timeStr = interaction.options.getString('time');
+          const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null;
+
+          const scheduledAt = parseDateTimeUTC(dateStr, timeStr);
+          if (scheduledAt === null) return interaction.editReply({ content: '❌ Invalid date/time. Use `DD-MM-YYYY` and `HH:MM` (UTC), e.g. `20-06-2026` and `19:00`.' });
+          if (scheduledAt <= Date.now()) return interaction.editReply({ content: '❌ The scheduled time must be in the future.' });
+
+          const schedId = genId();
+          const ts = Math.floor(scheduledAt / 1000);
+          const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
+
+          const embed = new EmbedBuilder()
+            .setTitle('🗓️ Session Scheduled!')
+            .setColor(0x5865F2)
+            .setDescription(`${replaceVars(sc.voteDescription ?? '**{host}** has scheduled a session!', vars)}\n\n🕒 **When:** <t:${ts}:F> (<t:${ts}:R>)\n\nClick the button below if you're planning to join — you'll get pinged when the session starts!`)
+            .addFields({ name: `✅ Coming (0)`, value: '*No one yet*', inline: false })
+            .setFooter({ text: `Scheduled by ${userDisplay(interaction.user)}` })
+            .setTimestamp();
+          if (sc.voteImage) embed.setImage(sc.voteImage);
+
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`session_sched_vote__${schedId}`).setLabel("I'm coming ✅").setStyle(ButtonStyle.Success),
+          );
+          const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
+
+          sc.scheduled[schedId] = {
+            hostId: interaction.user.id,
+            scheduledAt,
+            joinLink: rawLink,
+            voters: [],
+            messageId: msg.id,
+            channelId: sCh.id,
+            fired: false,
+          };
+          await saveGuildConfig(guildId);
+
+          return interaction.editReply({ content: `✅ Session scheduled for <t:${ts}:F> (<t:${ts}:R>)!` });
+        }
       }
       if (cmd === 'startvote') {
         const vc = getVoteConfig(guildId);
@@ -4927,7 +5081,8 @@ client.on('interactionCreate', async interaction => {
           const modal = new ModalBuilder().setCustomId('modal_loa_request').setTitle('Leave of Absence Request');
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_reason').setLabel('Reason for LOA').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_days').setLabel('How many days? (1-60)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(3)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_start').setLabel('Start date (DD-MM-YYYY)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. 20-06-2026').setRequired(true).setMaxLength(10)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_end').setLabel('End date (DD-MM-YYYY)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. 27-06-2026').setRequired(true).setMaxLength(10)),
           );
           return interaction.showModal(modal);
         }
@@ -4935,10 +5090,47 @@ client.on('interactionCreate', async interaction => {
         
           if (sub === 'list') {
           const active = Object.entries(lc.active).filter(([uid]) => !uid.startsWith('pending_'));
-          if (!active.length) return interaction.reply({ content: '📋 No active LOAs.', flags: MessageFlags.Ephemeral });
-          const embed = new EmbedBuilder().setTitle('🏖️ Active LOAs').setColor(0x5865F2)
-            .setDescription(active.map(([uid, l]) => `<@${uid}> — **${l.reason.slice(0,60)}**\nEnds: <t:${Math.floor(l.endsAt/1000)}:R>`).join('\n\n'))
-            .setTimestamp();
+          if (!active.length) return interaction.reply({ content: '📋 No active or upcoming LOAs.', flags: MessageFlags.Ephemeral });
+
+          // Sorteer op startdatum
+          active.sort((a, b) => (a[1].startsAt ?? 0) - (b[1].startsAt ?? 0));
+
+          const now = Date.now();
+          const oneDay  = 86_400_000;
+          const today   = new Date(); today.setUTCHours(0, 0, 0, 0);
+          const todayTs = today.getTime();
+          // Begin van deze week (maandag) en volgende week
+          const dayOfWeek = (today.getUTCDay() + 6) % 7; // 0 = maandag
+          const startOfThisWeek = todayTs - dayOfWeek * oneDay;
+          const startOfNextWeek = startOfThisWeek + 7 * oneDay;
+          const startOfWeekAfter = startOfNextWeek + 7 * oneDay;
+
+          const groups = { ongoing: [], thisWeek: [], nextWeek: [], later: [] };
+          for (const [uid, l] of active) {
+            const starts = l.startsAt ?? 0;
+            if (starts <= now && l.endsAt > now) groups.ongoing.push([uid, l]);
+            else if (starts < startOfNextWeek) groups.thisWeek.push([uid, l]);
+            else if (starts < startOfWeekAfter) groups.nextWeek.push([uid, l]);
+            else groups.later.push([uid, l]);
+          }
+
+          const formatEntry = ([uid, l]) => {
+            const startTs = Math.floor((l.startsAt ?? l.requestedAt ?? now) / 1000);
+            const endTs   = Math.floor(l.endsAt / 1000);
+            return `<@${uid}> — **${l.reason.slice(0, 60)}**\n　🟢 <t:${startTs}:D> → 🔴 <t:${endTs}:D> *(${l.days ?? '?'} day(s))*`;
+          };
+
+          const embed = new EmbedBuilder().setTitle('🏖️ LOA Agenda').setColor(0x5865F2).setTimestamp();
+          const truncField = (entries) => {
+            let value = entries.map(formatEntry).join('\n\n');
+            if (value.length > 1024) value = value.slice(0, 1000) + '\n*…and more*';
+            return value;
+          };
+          if (groups.ongoing.length)  embed.addFields({ name: '🟢 Ongoing',   value: truncField(groups.ongoing),  inline: false });
+          if (groups.thisWeek.length) embed.addFields({ name: '📅 This Week', value: truncField(groups.thisWeek), inline: false });
+          if (groups.nextWeek.length) embed.addFields({ name: '🗓️ Next Week', value: truncField(groups.nextWeek), inline: false });
+          if (groups.later.length)    embed.addFields({ name: '📆 Later',     value: truncField(groups.later),    inline: false });
+
           return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
         }
 
@@ -5021,6 +5213,17 @@ client.on('interactionCreate', async interaction => {
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
+      // ════ STAFF REVIEW PANEL — "Leave a Review" (public) ════
+      if (interaction.customId === 'sr2_panel_review') {
+        return interaction.reply({
+          content: '### ⭐ Who would you like to review?',
+          components: [new ActionRowBuilder().addComponents(
+            new UserSelectMenuBuilder().setCustomId('sr2_panel_user').setPlaceholder('Select a staff member...').setMinValues(1).setMaxValues(1)
+          )],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
       // ════ LOA SETUP BUTTONS ════
       if (interaction.customId.startsWith('loa__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -5085,15 +5288,25 @@ client.on('interactionCreate', async interaction => {
             delete lc.active[`pending_${targetId}`];
             lc.active[targetId] = loaPending;
             await saveGuildConfig(guildId);
-            const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-            if (member) {
-              if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
-              const prefix = lc.prefix ?? '[LOA]';
-              const currentNick = member.nickname ?? member.user.username;
-              const newNick = `${prefix} ${currentNick}`.slice(0, 32);
-              await member.setNickname(newNick).catch(() => {});
+
+            const startsNow = (loaPending.startsAt ?? 0) <= Date.now();
+            if (startsNow) {
+              const member = await interaction.guild.members.fetch(targetId).catch(() => null);
+              if (member) {
+                if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
+                const prefix = lc.prefix ?? '[LOA]';
+                const currentNick = member.nickname ?? member.user.username;
+                const newNick = `${prefix} ${currentNick}`.slice(0, 32);
+                await member.setNickname(newNick).catch(() => {});
+              }
+              loaPending.applied = true;
+              await saveGuildConfig(guildId);
             }
-            await client.users.fetch(targetId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('✅ LOA Approved!').setColor(0x57F287).setDescription(`Your LOA in **${interaction.guild.name}** has been **approved**!\n\nEnds: <t:${Math.floor(loaPending.endsAt/1000)}:R>`).setTimestamp()] })).catch(() => {});
+
+            const startLine = startsNow
+              ? `Your LOA in **${interaction.guild.name}** has started and will end <t:${Math.floor(loaPending.endsAt/1000)}:R>.`
+              : `Your LOA in **${interaction.guild.name}** has been **approved**!\n\nStarts: <t:${Math.floor(loaPending.startsAt/1000)}:R>\nEnds: <t:${Math.floor(loaPending.endsAt/1000)}:R>`;
+            await client.users.fetch(targetId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('✅ LOA Approved!').setColor(0x57F287).setDescription(startLine).setTimestamp()] })).catch(() => {});
           }
           await interaction.followUp({ content: `✅ LOA approved!` }).catch(() => {});
         }
@@ -5605,6 +5818,30 @@ client.on('interactionCreate', async interaction => {
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
+      }
+
+      // ════ SCHEDULED SESSION — "I'm coming" BUTTON ════
+      if (id.startsWith('session_sched_vote__')) {
+        const schedId = id.replace('session_sched_vote__', '');
+        const sc = getSessionConfig(guildId);
+        const sched = sc.scheduled?.[schedId];
+        if (!sched) return interaction.reply({ content: '❌ This schedule no longer exists.', flags: MessageFlags.Ephemeral });
+        if (sched.fired) return interaction.reply({ content: '❌ This session has already started.', flags: MessageFlags.Ephemeral });
+
+        const userId = interaction.user.id;
+        const idx = sched.voters.indexOf(userId);
+        let joined;
+        if (idx === -1) { sched.voters.push(userId); joined = true; }
+        else { sched.voters.splice(idx, 1); joined = false; }
+        await saveGuildConfig(guildId);
+
+        const count = sched.voters.length;
+        const listValue = count ? sched.voters.map(uid => `<@${uid}>`).join(', ') : '*No one yet*';
+        const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
+          .spliceFields(interaction.message.embeds[0].fields.findIndex(f => f.name?.startsWith('✅ Coming')), 1, { name: `✅ Coming (${count})`, value: listValue.slice(0, 1024), inline: false });
+
+        await interaction.update({ embeds: [updatedEmbed] });
+        return interaction.followUp({ content: joined ? "✅ You're marked as coming! You'll be pinged when the session starts." : '❌ Removed from the list.', flags: MessageFlags.Ephemeral });
       }
 
       // ════ TICKET TYPE CONFIG BUTTONS ════
@@ -6304,6 +6541,41 @@ client.on('interactionCreate', async interaction => {
           const lbEmbed = buildStaffLeaderboardEmbed(guildId);
           if (!lbEmbed) return interaction.reply({ content: '📭 No reviews have been submitted yet.', flags: MessageFlags.Ephemeral });
           return interaction.reply({ embeds: [lbEmbed], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'image') {
+          const src = getStaffReviewConfig(guildId);
+          const modal = new ModalBuilder().setCustomId('modal_sr2_image').setTitle('Set Panel Image');
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('sr2_image_url').setLabel('Image URL (large, full-width) — empty to clear').setStyle(TextInputStyle.Short).setValue(src.panelImage || '').setRequired(false).setMaxLength(500)
+          ));
+          return interaction.showModal(modal);
+        }
+        if (action === 'thumbnail') {
+          const src = getStaffReviewConfig(guildId);
+          const modal = new ModalBuilder().setCustomId('modal_sr2_thumbnail').setTitle('Set Panel Thumbnail');
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('sr2_thumbnail_url').setLabel('Thumbnail URL (small) — empty to clear').setStyle(TextInputStyle.Short).setValue(src.panelThumbnail || '').setRequired(false).setMaxLength(500)
+          ));
+          return interaction.showModal(modal);
+        }
+        if (action === 'send_panel') {
+          const src = getStaffReviewConfig(guildId);
+          if (!src.channel) return interaction.reply({ content: '❌ Set a review channel first.', flags: MessageFlags.Ephemeral });
+          const ch = interaction.guild.channels.cache.get(src.channel);
+          if (!ch) return interaction.reply({ content: '❌ Review channel not found.', flags: MessageFlags.Ephemeral });
+
+          const panelEmbed = new EmbedBuilder()
+            .setTitle('⭐ Staff Review')
+            .setColor(0x5865F2)
+            .setDescription('Had a good (or bad) experience with one of our staff members? Click the button below to leave a star rating and a written review!');
+          if (src.panelImage) panelEmbed.setImage(src.panelImage);
+          if (src.panelThumbnail) panelEmbed.setThumbnail(src.panelThumbnail);
+
+          const panelRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('sr2_panel_review').setLabel('Leave a Review').setStyle(ButtonStyle.Primary).setEmoji('⭐'),
+          );
+          await ch.send({ embeds: [panelEmbed], components: [panelRow] });
+          return interaction.reply({ content: `✅ Panel sent to <#${src.channel}>!`, flags: MessageFlags.Ephemeral });
         }
       }
 
@@ -7969,6 +8241,38 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
+    // ══ USER SELECT MENUS ══
+    if (interaction.isUserSelectMenu()) {
+      if (interaction.customId === 'sr2_panel_user') {
+        const src = getStaffReviewConfig(guildId);
+        const targetUserId = interaction.values[0];
+        if (targetUserId === interaction.user.id) return interaction.reply({ content: '❌ You cannot review yourself.', flags: MessageFlags.Ephemeral });
+        const targetMember = await interaction.guild.members.fetch(targetUserId).catch(() => null);
+        if (targetMember?.user?.bot) return interaction.reply({ content: '❌ You cannot review a bot.', flags: MessageFlags.Ephemeral });
+        if (src.staffRoles.length) {
+          const isStaff = targetMember && src.staffRoles.some(r => targetMember.roles.cache.has(r));
+          if (!isStaff) return interaction.reply({ content: `❌ <@${targetUserId}> is not a staff member.`, flags: MessageFlags.Ephemeral });
+        }
+        const ratingRow = new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`sr2_rating__${targetUserId}`)
+            .setPlaceholder('Select a star rating...')
+            .addOptions([
+              { label: '⭐ 1 — Very poor', value: '1' },
+              { label: '⭐⭐ 2 — Poor', value: '2' },
+              { label: '⭐⭐⭐ 3 — Average', value: '3' },
+              { label: '⭐⭐⭐⭐ 4 — Good', value: '4' },
+              { label: '⭐⭐⭐⭐⭐ 5 — Excellent', value: '5' },
+            ])
+        );
+        return interaction.reply({
+          content: `### ⭐ Rate <@${targetUserId}>\nSelect a star rating below. You'll then be asked to write a short review.`,
+          components: [ratingRow],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    }
+
     // ══ CHANNEL SELECT MENUS ══
     if (interaction.isChannelSelectMenu()) {
       if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
@@ -8786,11 +9090,25 @@ client.on('interactionCreate', async interaction => {
       if (mid === 'modal_loa_request') {
         const lc = getLOAConfig(guildId);
         const reason = interaction.fields.getTextInputValue('loa_reason').trim();
-        const daysRaw = parseInt(interaction.fields.getTextInputValue('loa_days').trim(), 10);
-        if (isNaN(daysRaw) || daysRaw < 1 || daysRaw > 60) return interaction.reply({ content: '❌ Days must be between 1 and 60.', flags: MessageFlags.Ephemeral });
-        const endsAt = Date.now() + daysRaw * 86_400_000;
+        const startRaw = interaction.fields.getTextInputValue('loa_start').trim();
+        const endRaw   = interaction.fields.getTextInputValue('loa_end').trim();
+
+        const startsAt = parseDDMMYYYY(startRaw);
+        const endsAtDay = parseDDMMYYYY(endRaw);
+        if (startsAt === null || endsAtDay === null) return interaction.reply({ content: '❌ Invalid date format. Please use `DD-MM-YYYY`, e.g. `20-06-2026`.', flags: MessageFlags.Ephemeral });
+
+        // Eind van de einddag (23:59:59) zodat de hele dag wordt meegerekend
+        const endsAt = endsAtDay + 86_400_000 - 1;
+
+        const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+        if (startsAt < today.getTime()) return interaction.reply({ content: '❌ Start date cannot be in the past.', flags: MessageFlags.Ephemeral });
+        if (endsAt <= startsAt) return interaction.reply({ content: '❌ End date must be after the start date.', flags: MessageFlags.Ephemeral });
+
+        const totalDays = Math.round((endsAtDay - startsAt) / 86_400_000) + 1;
+        if (totalDays > 60) return interaction.reply({ content: '❌ LOA duration cannot exceed 60 days.', flags: MessageFlags.Ephemeral });
+
         const reqId = genId();
-        const loaData = { reason, endsAt, days: daysRaw, originalNickname: interaction.member.nickname ?? null, requestedAt: Date.now() };
+        const loaData = { reason, startsAt, endsAt, days: totalDays, originalNickname: interaction.member.nickname ?? null, requestedAt: Date.now(), applied: false };
         lc.active[`pending_${interaction.user.id}`] = loaData;
         await saveGuildConfig(guildId);
         const required = lc.requiredApprovals ?? 1;
@@ -8800,8 +9118,9 @@ client.on('interactionCreate', async interaction => {
           .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
           .addFields(
             { name: '👤 Requester', value: `${userDisplay(interaction.user)} (<@${interaction.user.id}>)`, inline: true },
-            { name: '📅 Duration', value: `**${daysRaw}** day(s)`, inline: true },
-            { name: '⏰ Ends', value: `<t:${Math.floor(endsAt/1000)}:R>`, inline: true },
+            { name: '📅 Duration', value: `**${totalDays}** day(s)`, inline: true },
+            { name: '🟢 Starts', value: `<t:${Math.floor(startsAt/1000)}:D> (<t:${Math.floor(startsAt/1000)}:R>)`, inline: true },
+            { name: '🔴 Ends', value: `<t:${Math.floor(endsAt/1000)}:D> (<t:${Math.floor(endsAt/1000)}:R>)`, inline: true },
             { name: '📝 Reason', value: reason, inline: false },
             { name: `✅ Approvals (0/${required})`, value: '*None yet*', inline: false },
             { name: '📊 Status', value: '⏳ Pending', inline: false },
@@ -8898,6 +9217,26 @@ client.on('interactionCreate', async interaction => {
 
       // ── Department add ──
       // ════ STAFF REVIEW MODAL SUBMIT ════
+      if (mid === 'modal_sr2_image') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const src = getStaffReviewConfig(guildId);
+        const url = interaction.fields.getTextInputValue('sr2_image_url').trim();
+        if (url && !/^https?:\/\//i.test(url)) return interaction.reply({ content: '❌ Please provide a valid URL starting with http:// or https://', flags: MessageFlags.Ephemeral });
+        src.panelImage = url || null;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: url ? '✅ Panel image set!' : '✅ Panel image cleared!', flags: MessageFlags.Ephemeral });
+      }
+
+      if (mid === 'modal_sr2_thumbnail') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const src = getStaffReviewConfig(guildId);
+        const url = interaction.fields.getTextInputValue('sr2_thumbnail_url').trim();
+        if (url && !/^https?:\/\//i.test(url)) return interaction.reply({ content: '❌ Please provide a valid URL starting with http:// or https://', flags: MessageFlags.Ephemeral });
+        src.panelThumbnail = url || null;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: url ? '✅ Panel thumbnail set!' : '✅ Panel thumbnail cleared!', flags: MessageFlags.Ephemeral });
+      }
+
       if (mid.startsWith('modal_sr2_review__')) {
         const parts2 = mid.split('__');
         const targetUserId = parts2[2];
