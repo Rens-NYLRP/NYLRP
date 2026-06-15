@@ -1068,7 +1068,6 @@ function buildCommandListEmbed(guildId) {
       '`/notes` — View notes · **SHR**',
     ]),
     section('🎭 Roles', [
-      '`/addrole` — Add a role · **See role permissions**',
       '`/removerole` — Remove a role · **See role permissions**',
       '`/giveroles` — Add multiple roles · **See role permissions**',
       '`/promote` — Promote a user · **SHR**',
@@ -2942,7 +2941,6 @@ const commands = [
   { name: 'softban', description: '[SHR] Softban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'tempban', description: '[SHR] Temp ban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'hours', type: 4, description: 'Hours', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'kick', description: '[SHR] Kick user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
-  { name: 'addrole', description: 'Add a role to a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'removerole', description: 'Remove a role from a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true }] },
   { name: 'giveroles', description: 'Add multiple roles to a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
@@ -3868,6 +3866,13 @@ client.on('interactionCreate', async interaction => {
 
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
+
+      // ════ GLOBAL STAFF-ONLY GATE ════
+      // Alle commands zijn staff-only, behalve /reviewstaff (die mag iedereen gebruiken).
+      if (cmd !== 'reviewstaff' && !hasAnyStaff(interaction.member)) {
+        return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
+      }
+
       let user = null, member = null, reason = 'No reason provided';
       try { user   = interaction.options.getUser('user') ?? null;   } catch {}
       try { member = user ? interaction.options.getMember('user') : null; } catch {}
@@ -4105,20 +4110,6 @@ client.on('interactionCreate', async interaction => {
         try {
           await member.setNickname(nick, `Changed by ${userDisplay(interaction.user)}`);
           return interaction.editReply({ content: nick ? `✅ Nickname set to \`${nick}\`.` : `✅ Nickname cleared.` });
-        } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
-      }
-      if (cmd === 'addrole') {
-        const role = interaction.options.getRole('role');
-        const targetMember = interaction.options.getMember('user');
-        if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
-        const rp = getRolePermConfig(guildId);
-        const perms = rp[role.id];
-        const canAdd = hasSetup(interaction.member) || !perms?.addRoles?.length || perms.addRoles.some(r => interaction.member.roles.cache.has(r));
-        if (!canAdd) return interaction.reply({ content: `❌ You don't have permission to add <@&${role.id}>.`, flags: MessageFlags.Ephemeral });
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        try {
-          await targetMember.roles.add(role);
-          return interaction.editReply({ content: `✅ Added <@&${role.id}> to **${userDisplay(targetMember.user)}**.` });
         } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
       }
       if (cmd === 'removerole') {
