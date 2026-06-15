@@ -5254,7 +5254,7 @@ client.on('interactionCreate', async interaction => {
               { label: 'ERLC Logs', value: 'erlclogs', emoji: '📡' },
             );
           const select2 = new StringSelectMenuBuilder()
-            .setCustomId('setup_menu')
+            .setCustomId('setup_menu_2')
             .setPlaceholder('Select a category to configure... (2/2)')
             .addOptions(
               { label: 'Role Perms', value: 'roleperms', emoji: '🔐' },
@@ -8669,7 +8669,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       // ════ CENTRAL SETUP MENU (dropdown) ════
-      if (id === 'setup_menu') {
+      if (id === 'setup_menu' || id === 'setup_menu_2') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const payloadMap = {
           tickets:       () => buildTicketSetupPayload(guildId),
