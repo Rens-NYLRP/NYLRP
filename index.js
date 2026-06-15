@@ -1213,14 +1213,16 @@ function buildRequestSetupPayload(guildId, type) {
 
 function buildErlcLogSetupPayload(guildId) {
   const ec = getErlcLogConfig(guildId);
+  const bc = getBloxlinkConfig(guildId);
   const embed = new EmbedBuilder().setTitle('📋 ERLC Log Setup').setColor(0x5865F2)
-    .setDescription(`**Status:** ${ec.enabled ? '✅ Active' : '❌ Inactive'}\n**Server Key:** ${ec.serverKey ? '✅ Set' : '❌ Not set — use `/erlcconfig`'}\n\nSet the Discord channel for each ERLC log type. Polls every **30 seconds**.**`)
+    .setDescription(`**Status:** ${ec.enabled ? '✅ Active' : '❌ Inactive'}\n**Server Key:** ${ec.serverKey ? '✅ Set' : '❌ Not set — use `/erlcconfig`'}\n**Bloxlink Key:** ${bc.apiKey ? '✅ Set' : '❌ Not set — use `/bloxlinkconfig`'}\n\nSet the Discord channel for each ERLC log type. Polls every **30 seconds**.**`)
     .addFields(
       { name: '🔨 Kick/Ban Logs',   value: ec.kickBans  ? `<#${ec.kickBans}>`  : '*Not set*', inline: true },
       { name: '📥 Join/Leave Logs', value: ec.joinLeave ? `<#${ec.joinLeave}>` : '*Not set*', inline: true },
       { name: '⌨️ Command Logs',    value: ec.cmds      ? `<#${ec.cmds}>`      : '*Not set*', inline: true },
       { name: '🚨 Mod Call Logs',   value: ec.modCall   ? `<#${ec.modCall}>`   : '*Not set*', inline: true },
       { name: '💀 Kill Logs',       value: ec.kills     ? `<#${ec.kills}>`     : '*Not set*', inline: true },
+      { name: '🎮 In-Game Role',    value: ec.inGameRole ? `<@&${ec.inGameRole}>` : '*Not set*', inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('erlc_toggle').setLabel(ec.enabled ? '🔴 Disable' : '🟢 Enable').setStyle(ec.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
@@ -1231,6 +1233,7 @@ function buildErlcLogSetupPayload(guildId) {
   const r2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('erlc_set_modcall').setLabel('Mod Call Channel').setStyle(ButtonStyle.Primary).setEmoji('🚨'),
     new ButtonBuilder().setCustomId('erlc_set_kills').setLabel('Kill Logs Channel').setStyle(ButtonStyle.Primary).setEmoji('💀'),
+    new ButtonBuilder().setCustomId('erlc_set_inrole').setLabel('In-Game Role').setStyle(ButtonStyle.Primary).setEmoji('🎮'),
   );
   return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
 }
@@ -1901,9 +1904,31 @@ async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
 function getErlcLogConfig(guildId) {
   if (!config[guildId]) config[guildId] = {};
   const gc = config[guildId];
-  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null, kickBans: null, joinLeave: null, cmds: null, modCall: null, kills: null };
+  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null, kickBans: null, joinLeave: null, cmds: null, modCall: null, kills: null, inGameRole: null };
   if (!gc.erlcLogs.serverKey) gc.erlcLogs.serverKey = null;
+  if (gc.erlcLogs.inGameRole === undefined) gc.erlcLogs.inGameRole = null;
   return gc.erlcLogs;
+}
+
+function getBloxlinkConfig(guildId) {
+  if (!config[guildId]) config[guildId] = {};
+  const gc = config[guildId];
+  if (!gc.bloxlink) gc.bloxlink = { apiKey: null };
+  if (gc.bloxlink.apiKey === undefined) gc.bloxlink.apiKey = null;
+  return gc.bloxlink;
+}
+
+// Bloxlink Server API — reverse lookup: Roblox ID -> Discord ID(s) in this guild
+async function bloxlinkRobloxToDiscord(guildId, robloxId) {
+  const bc = getBloxlinkConfig(guildId);
+  if (!bc.apiKey) return null;
+  const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/roblox-to-discord/${robloxId}`, {
+    headers: { Authorization: bc.apiKey },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data?.discordIDs?.length ? data.discordIDs : null;
 }
 
 // ERLC polling state — bijhouden wat we al gezien hebben
