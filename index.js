@@ -1622,6 +1622,44 @@ function getMemberChainPosition(member, chain) {
   return -1;
 }
 
+// Sync de nickname prefix voor een member op basis van zijn hoogste chain-rang
+async function syncChainPrefix(member, guildId) {
+  try {
+    const cc = getChainConfig(guildId);
+    if (!cc.chain.length) return;
+
+    // Vind de hoogste chain-rang die de member heeft (chain is ascending gesorteerd, dus laatste match = hoogste)
+    let highestEntry = null;
+    for (const entry of cc.chain) {
+      if (member.roles.cache.has(entry.roleId)) highestEntry = entry;
+    }
+
+    const baseName = member.nickname ?? member.user.username;
+    const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+
+    // Strip alle bekende prefixen van links af
+    let cleanName = baseName;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const pfx of knownPrefixes) {
+        if (cleanName.startsWith(`${pfx} | `)) {
+          cleanName = cleanName.slice(`${pfx} | `.length);
+          changed = true;
+        }
+      }
+    }
+
+    if (highestEntry?.nicknamePrefix) {
+      const newNick = `${highestEntry.nicknamePrefix} | ${cleanName}`.slice(0, 32);
+      if (newNick !== baseName) await member.setNickname(newNick, 'Chain prefix sync').catch(() => {});
+    } else if (baseName !== cleanName) {
+      // Member heeft geen chain-rang meer met prefix — strip de oude prefix
+      await member.setNickname(cleanName.slice(0, 32), 'Chain prefix sync').catch(() => {});
+    }
+  } catch {}
+}
+
 // Geeft de volgende rank in de chain terug, null als al hoogste
 function getNextChainRank(currentPosition, chain) {
   const sorted = [...chain].sort((a, b) => a.position - b.position);
@@ -1664,35 +1702,8 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   // Geef nieuwe rank rol
   await targetMember.roles.add(newRole).catch(() => {});
 
-  // Nickname prefix instellen als geconfigureerd op het chain entry
-  try {
-    const baseName = targetMember.nickname ?? targetMember.user.username;
-    // Verzamel alle bekende prefixen uit de chain om ze te strippen
-    const cc = getChainConfig(guildId);
-    const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
-    // Strip alle bekende prefixen van links af (ook gestapelde zoals "M | JM | naam")
-    let cleanName = baseName;
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const pfx of knownPrefixes) {
-        if (cleanName.startsWith(`${pfx} | `)) {
-          cleanName = cleanName.slice(`${pfx} | `.length);
-          changed = true;
-        }
-      }
-      // Fallback: als er nog een ' | ' in zit na stripping, strip het eerste segment
-      // (voor onbekende/verwijderde prefixen)
-    }
-    // Als er nog steeds een ' | ' in zit maar geen bekende prefix meer — dat is de echte naam, laat staan
-    if (targetEntry.nicknamePrefix) {
-      const newNick = `${targetEntry.nicknamePrefix} | ${cleanName}`.slice(0, 32);
-      await targetMember.setNickname(newNick, `Promoted to ${newRole.name}`).catch(() => {});
-    } else if (baseName !== cleanName) {
-      // Nieuwe rank heeft geen prefix — zet de schone naam terug
-      await targetMember.setNickname(cleanName.slice(0, 32), `Promoted to ${newRole.name}`).catch(() => {});
-    }
-  } catch {}
+  // Sync nickname prefix op basis van hoogste chain-rang
+  await syncChainPrefix(targetMember, guildId);
 
   return { success: true, newRole };
 }
@@ -3705,6 +3716,25 @@ function scheduleCounterUpdate(guild) {
 }
 client.on('guildMemberAdd', member => scheduleCounterUpdate(member.guild));
 client.on('guildMemberRemove', member => scheduleCounterUpdate(member.guild));
+
+// Auto-sync chain prefix als iemands rollen veranderen
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  const oldRoles = oldMember.roles.cache;
+  const newRoles = newMember.roles.cache;
+  // Alleen reageren als de rollen daadwerkelijk veranderd zijn
+  if (oldRoles.size === newRoles.size && oldRoles.every(r => newRoles.has(r.id))) return;
+
+  const guildId = newMember.guild.id;
+  const cc = getChainConfig(guildId);
+  if (!cc.chain.length) return;
+
+  // Alleen syncen als een chain-rol veranderd is
+  const chainRoleIds = new Set(cc.chain.map(e => e.roleId));
+  const roleChanged = [...oldRoles.keys(), ...newRoles.keys()].some(id => chainRoleIds.has(id));
+  if (!roleChanged) return;
+
+  await syncChainPrefix(newMember, guildId);
+});
 
 // ════════════════════════════════════════════
 // DM MESSAGE — APPLICATION Q&A
