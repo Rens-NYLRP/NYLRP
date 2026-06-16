@@ -3558,52 +3558,100 @@ client.once('clientReady', async () => {
 
         // ── Join/Leave logs + In-Game Role ──
         if (ec.joinLeave || ec.inGameRole) {
-          const players = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
-          if (players) {
-            const current = new Set(Object.keys(players));
+          const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
+          if (playersRaw) {
+            // ERLC geeft een object terug waarbij p.Player = "Username:RobloxId"
+            // We bouwen een Map van robloxId → playerObject voor makkelijke lookup
+            const currentPlayers = new Map(); // robloxId (string) → { username, robloxId, team }
+            for (const p of Object.values(playersRaw)) {
+              const parts = String(p.Player).split(':');
+              const robloxId = parts[parts.length - 1]; // laatste deel = numerieke Roblox ID
+              const username = parts.slice(0, -1).join(':'); // alles voor de laatste : = username
+              if (robloxId) currentPlayers.set(robloxId, { username, robloxId, team: p.Team || 'None' });
+            }
+
             const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
             const bc = getBloxlinkConfig(guild.id);
+            const currentIds = new Set(currentPlayers.keys());
 
-            // Joined
-            for (const playerId of current) {
-              if (!state.players.has(playerId)) {
-                const p = players[playerId];
-                // Log channel message
+            // ── Joined ──
+            for (const [robloxId, p] of currentPlayers) {
+              if (!state.players.has(robloxId)) {
+                // Log
                 if (ch) {
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📥 Player Joined').setColor(0x57F287).addFields({ name: '👤 Player', value: p.Player, inline: true }, { name: '🎭 Team', value: p.Team || 'None', inline: true }).setTimestamp()] }).catch(() => {});
+                  await ch.send({ embeds: [new EmbedBuilder()
+                    .setTitle('📥 Speler Joined')
+                    .setColor(0x57F287)
+                    .addFields(
+                      { name: '👤 Speler', value: p.username || robloxId, inline: true },
+                      { name: '🆔 Roblox ID', value: robloxId, inline: true },
+                      { name: '🎭 Team', value: p.team, inline: true },
+                    )
+                    .setTimestamp()
+                  ] }).catch(() => {});
                 }
-                // In-game role: lookup Discord user via Bloxlink and add role
+                // In-game rol toevoegen via Bloxlink
                 if (ec.inGameRole && bc.apiKey) {
-                  // ERLC API player ID is the Roblox user ID
-                  const discordIds = await bloxlinkRobloxToDiscord(guild.id, playerId).catch(() => null);
-                  if (discordIds) {
-                    for (const discordId of discordIds) {
-                      const member = await guild.members.fetch(discordId).catch(() => null);
-                      if (member) await member.roles.add(ec.inGameRole).catch(() => {});
+                  try {
+                    const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
+                      headers: { Authorization: bc.apiKey },
+                      signal: AbortSignal.timeout(8000),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      const discordIds = data?.discordIDs ?? [];
+                      for (const discordId of discordIds) {
+                        const member = await guild.members.fetch(discordId).catch(() => null);
+                        if (member) await member.roles.add(ec.inGameRole).catch(() => {});
+                      }
                     }
-                  }
+                  } catch { /* Bloxlink niet bereikbaar, overslaan */ }
                 }
               }
             }
-            // Left
-            for (const playerId of state.players) {
-              if (!current.has(playerId)) {
+
+            // ── Left ──
+            for (const robloxId of state.players) {
+              if (!currentIds.has(robloxId)) {
+                const username = state.playerNames?.get(robloxId) ?? robloxId;
+                // Log
                 if (ch) {
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📤 Player Left').setColor(0xED4245).addFields({ name: '👤 Player', value: playerId, inline: true }).setTimestamp()] }).catch(() => {});
+                  await ch.send({ embeds: [new EmbedBuilder()
+                    .setTitle('📤 Speler Left')
+                    .setColor(0xED4245)
+                    .addFields(
+                      { name: '👤 Speler', value: username, inline: true },
+                      { name: '🆔 Roblox ID', value: robloxId, inline: true },
+                    )
+                    .setTimestamp()
+                  ] }).catch(() => {});
                 }
-                // Remove in-game role
+                // In-game rol verwijderen via Bloxlink
                 if (ec.inGameRole && bc.apiKey) {
-                  const discordIds = await bloxlinkRobloxToDiscord(guild.id, playerId).catch(() => null);
-                  if (discordIds) {
-                    for (const discordId of discordIds) {
-                      const member = await guild.members.fetch(discordId).catch(() => null);
-                      if (member) await member.roles.remove(ec.inGameRole).catch(() => {});
+                  try {
+                    const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
+                      headers: { Authorization: bc.apiKey },
+                      signal: AbortSignal.timeout(8000),
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      const discordIds = data?.discordIDs ?? [];
+                      for (const discordId of discordIds) {
+                        const member = await guild.members.fetch(discordId).catch(() => null);
+                        if (member) await member.roles.remove(ec.inGameRole).catch(() => {});
+                      }
                     }
-                  }
+                  } catch { /* Bloxlink niet bereikbaar, overslaan */ }
                 }
               }
             }
-            state.players = current;
+
+            // State bijwerken — sla ook usernames op voor leave-logs
+            state.players = currentIds;
+            if (!state.playerNames) state.playerNames = new Map();
+            for (const [robloxId, p] of currentPlayers) {
+              state.playerNames.set(robloxId, p.username);
+            }
           }
         }
 
