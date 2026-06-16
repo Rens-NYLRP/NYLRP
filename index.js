@@ -1869,6 +1869,26 @@ async function getRobloxDescription(userId) {
   return data.description ?? '';
 }
 
+// Verifieer een gebruiker — geef rol, stel nickname in, sla op
+async function applyVerification(interaction, vc, guildId, robloxUsername, robloxId, method = 'code') {
+  const nickname = `(${interaction.user.username}) | ${robloxUsername}`.slice(0, 32);
+  try { await interaction.member.setNickname(nickname, 'Roblox verificatie'); } catch {}
+  if (vc.verifiedRole) {
+    const role = interaction.guild.roles.cache.get(vc.verifiedRole);
+    if (role) await interaction.member.roles.add(role).catch(() => {});
+  }
+  if (!vc.verifiedUsers) vc.verifiedUsers = {};
+  vc.verifiedUsers[interaction.user.id] = { robloxUsername, robloxId, verifiedAt: Date.now(), method };
+  await saveGuildConfig(guildId);
+  pendingVerifications.delete(interaction.user.id);
+  const methodLabel = method === 'Bloxlink' ? '🔗 Geverifieerd via **Bloxlink**' : '✅ Geverifieerd via profielbeschrijving';
+  await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Geverifieerd!').setColor(0x57F287).addFields(
+    { name: '🎮 Roblox Gebruikersnaam', value: robloxUsername, inline: true },
+    { name: '🆔 Roblox ID', value: `${robloxId}`, inline: true },
+    { name: '📛 Nickname', value: `\`${nickname}\``, inline: false },
+  ).setDescription(`${methodLabel}\n\nJe kunt de code nu verwijderen uit je profielbeschrijving.`).setTimestamp()] });
+}
+
 function getRolePermConfig(guildId) {
   if (!config[guildId]) config[guildId] = {};
   const gc = config[guildId];
@@ -2026,8 +2046,8 @@ async function submitApplication(userId, session, appType, guild) {
   const applicant = await client.users.fetch(userId).catch(() => null);
 
   const answerFields = appType.questions.map((q, i) => ({
-    name: `❓ ${q.slice(0, 250)}`,
-    value: (session.answers[i] ?? '*No answer*').slice(0, 1024),
+    name: `❓ ${q.slice(0, 245)}`,
+    value: (session.answers[i] ?? '*No answer*').slice(0, 1000), // iets onder 1024 voor marge
     inline: false,
   }));
 
@@ -2048,53 +2068,46 @@ async function submitApplication(userId, session, appType, guild) {
     : `<@${userId}>`;
 
   const headerFields = [
-    { name: '👤 Applicant', value: applicantDisplay.slice(0, 1024), inline: true },
-    { name: '🆔 User ID',   value: String(userId).slice(0, 1024), inline: true },
+    { name: '👤 Applicant', value: applicantDisplay.slice(0, 1000), inline: true },
+    { name: '🆔 User ID',   value: String(userId).slice(0, 1000), inline: true },
     { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
   ];
 
-  // Helper: bereken embed size (Discord telt title + description + fields + footer)
+  // Bereken de werkelijke embed character-grootte (alle name + value + title + description + footer)
   const fieldSize = f => (f.name?.length ?? 0) + (f.value?.length ?? 0);
-  const EMBED_MAX = 5800; // iets onder 6000 als veiligheidsmarge
-  const MAX_FIELDS = 24; // laat 1 slot over als veiligheidsmarge (hard limit is 25)
+  const EMBED_MAX = 5500; // ruime marge onder de 6000 Discord-limiet
+  const MAX_FIELDS = 24;
 
-  // Bouw embeds waarbij we per embed de totale grootte bewaken
+  const makeTitle = (isFirstEmbed, pg) => isFirstEmbed
+    ? `📋 Nieuwe Sollicitatie — ${appType.emoji || ''} ${appType.label}`.slice(0, 256)
+    : `📋 Sollicitatie (vervolg) — ${appType.label} — Pagina ${pg}`.slice(0, 256);
+  const makeFooter = (isLast, pg) =>
+    `Application ID: ${appId}${!isLast ? ' • Vervolg hieronder ↓' : ''}`.slice(0, 2048);
+
   const embeds = [];
   let currentFields = [...headerFields];
   let isFirst = true;
   let page = 1;
-
-  const calcTitleLen = (isFirstEmbed) => {
-    const t = isFirstEmbed
-      ? `📋 New Application — ${appType.emoji || ''} ${appType.label}`.slice(0, 256)
-      : `📋 Application (continued) — ${appType.label} — Page ${page}`.slice(0, 256);
-    return t.length;
-  };
-  const footerLen = `Application ID: ${appId} • Continued below ↓`.length;
-
-  let currentSize = calcTitleLen(true) + footerLen + headerFields.reduce((s, f) => s + fieldSize(f), 0);
+  let currentSize = makeTitle(true, 1).length + makeFooter(false, 1).length
+    + headerFields.reduce((s, f) => s + fieldSize(f), 0);
 
   const flushEmbed = (isLast) => {
-    const rawTitle = isFirst
-      ? `📋 New Application — ${appType.emoji || ''} ${appType.label}`
-      : `📋 Application (continued) — ${appType.label} — Page ${page}`;
-    const title = rawTitle.slice(0, 256);
-    const footer = `Application ID: ${appId}${!isLast ? ' • Continued below ↓' : ''}`.slice(0, 2048);
     const eb = new EmbedBuilder()
-      .setTitle(title)
+      .setTitle(makeTitle(isFirst, page))
       .setColor(0x5865F2)
       .addFields(...currentFields)
-      .setFooter({ text: footer });
+      .setFooter({ text: makeFooter(isLast, page) });
     if (isFirst) { eb.setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null); eb.setTimestamp(); }
     embeds.push(eb);
     isFirst = false;
     page++;
     currentFields = [];
-    currentSize = calcTitleLen(false) + footerLen;
+    currentSize = makeTitle(false, page).length + makeFooter(false, page).length;
   };
 
   for (const field of answerFields) {
     const fSize = fieldSize(field);
+    // Split naar nieuw embed als we over de limiet gaan of het max aantal velden bereiken
     if (currentFields.length >= MAX_FIELDS || (currentSize + fSize > EMBED_MAX && currentFields.length > 0)) {
       flushEmbed(false);
     }
@@ -7409,33 +7422,20 @@ client.on('interactionCreate', async interaction => {
 
       if (id === 'verify_confirm') {
         const pending = pendingVerifications.get(interaction.user.id);
-        if (!pending) return interaction.reply({ content: '❌ No pending verification. Click **Verify** again to start over.', flags: MessageFlags.Ephemeral });
+        if (!pending) return interaction.reply({ content: '❌ Geen verificatie in behandeling. Klik opnieuw op **Verifiëren** om opnieuw te beginnen.', flags: MessageFlags.Ephemeral });
         if (Date.now() > pending.expires) {
           pendingVerifications.delete(interaction.user.id);
-          return interaction.reply({ content: '❌ Verification expired (15 minutes). Click **Verify** again to start over.', flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: '❌ Verificatie verlopen (15 minuten). Klik opnieuw op **Verifiëren** om opnieuw te beginnen.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
           const description = await getRobloxDescription(pending.robloxId);
           if (!description.includes(pending.code)) {
-            return interaction.editReply({ content: `❌ Code **${pending.code}** not found in your Roblox profile description.\n\n1. Go to [your Roblox profile](https://www.roblox.com/users/${pending.robloxId}/profile)\n2. Click **Edit Profile**\n3. Paste \`${pending.code}\` anywhere in your description\n4. Save and click **✅ Done, check my profile** again` });
+            return interaction.editReply({ content: `❌ Code **${pending.code}** niet gevonden in je Roblox profielbeschrijving.\n\n1. Ga naar je [Roblox profiel](https://www.roblox.com/users/${pending.robloxId}/profile)\n2. Klik op **Profiel bewerken**\n3. Plak \`${pending.code}\` ergens in je beschrijving\n4. Sla op en klik nogmaals op **✅ Klaar, check mijn profiel**` });
           }
-          // Code gevonden — verifieer de gebruiker
           const vc = getVerificationConfig(guildId);
-          const nickname = `(${interaction.user.username}) | ${pending.robloxUsername}`.slice(0, 32);
-          try { await interaction.member.setNickname(nickname, 'Roblox verification'); } catch {}
-          if (vc.verifiedRole) { const role = interaction.guild.roles.cache.get(vc.verifiedRole); if (role) await interaction.member.roles.add(role); }
-          // Sla verificatie op in config
-          if (!vc.verifiedUsers) vc.verifiedUsers = {};
-          vc.verifiedUsers[interaction.user.id] = { robloxUsername: pending.robloxUsername, robloxId: pending.robloxId, verifiedAt: Date.now() };
-          await saveGuildConfig(guildId);
-          pendingVerifications.delete(interaction.user.id);
-          return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Verified!').setColor(0x57F287).addFields(
-            { name: '🎮 Roblox Username', value: pending.robloxUsername, inline: true },
-            { name: '🆔 Roblox ID', value: `${pending.robloxId}`, inline: true },
-            { name: '📛 Nickname', value: `\`${nickname}\``, inline: false },
-          ).setDescription('You can now remove the code from your profile description.').setTimestamp()] });
-        } catch (e) { return interaction.editReply({ content: `❌ Could not check your profile. Try again later.` }); }
+          await applyVerification(interaction, vc, guildId, pending.robloxUsername, pending.robloxId, 'code');
+        } catch (e) { return interaction.editReply({ content: `❌ Kon je profiel niet controleren. Probeer het later opnieuw.` }); }
       }
 
       if (id.startsWith('rating__')) {
@@ -9241,8 +9241,6 @@ client.on('interactionCreate', async interaction => {
     // ══ MODALS ══
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
-
-      // ── Infractions ──
       if (mid.startsWith('modal_ticketv2type_edit__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const typeId = mid.replace('modal_ticketv2type_edit__', '');
@@ -9788,42 +9786,72 @@ client.on('interactionCreate', async interaction => {
       if (mid === 'modal_verify_username') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const vc = getVerificationConfig(guildId);
+        const bc = getBloxlinkConfig(guildId);
         const robloxUsername = interaction.fields.getTextInputValue('roblox_username').trim();
+
         try {
           const robloxUser = await getRobloxUser(robloxUsername);
-          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox user **${robloxUsername}** not found. Check the spelling and try again.` });
-          // Genereer unieke code
+          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox gebruiker **${robloxUsername}** niet gevonden. Controleer de spelling en probeer opnieuw.` });
+
+          // ── Stap 1: Bloxlink check ──
+          // Kijk of de Discord-gebruiker via Bloxlink al gekoppeld is aan dit Roblox account
+          if (bc.apiKey) {
+            try {
+              const bloxRes = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/discord-to-roblox/${interaction.user.id}`, {
+                headers: { Authorization: bc.apiKey },
+                signal: AbortSignal.timeout(8000),
+              });
+              if (bloxRes.ok) {
+                const bloxData = await bloxRes.json();
+                const linkedRobloxId = bloxData?.robloxID ? String(bloxData.robloxID) : null;
+                if (linkedRobloxId && linkedRobloxId === String(robloxUser.id)) {
+                  // Match — direct verifiëren via Bloxlink
+                  await applyVerification(interaction, vc, guildId, robloxUser.name, robloxUser.id, 'Bloxlink');
+                  return;
+                } else if (linkedRobloxId && linkedRobloxId !== String(robloxUser.id)) {
+                  // Bloxlink zegt een ander account — laat het weten maar ga door met code-methode
+                  // (gebruiker kan zijn Bloxlink-account hebben gewijzigd)
+                }
+              }
+            } catch { /* Bloxlink niet beschikbaar, ga door met code-methode */ }
+          }
+
+          // ── Stap 2: Fallback — code in Roblox profielbeschrijving ──
           const code = `VERIFY-${genVerificationCode()}`;
           pendingVerifications.set(interaction.user.id, {
             code,
             robloxUsername: robloxUser.name,
             robloxId: robloxUser.id,
-            expires: Date.now() + 15 * 60 * 1000, // 15 minuten
+            expires: Date.now() + 15 * 60 * 1000,
           });
           const confirmRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setLabel('✏️ Edit my Roblox Profile').setStyle(ButtonStyle.Link).setURL(`https://www.roblox.com/users/${robloxUser.id}/profile`),
-            new ButtonBuilder().setCustomId('verify_confirm').setLabel('✅ Done, check my profile').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setLabel('✏️ Bewerk mijn Roblox Profiel').setStyle(ButtonStyle.Link).setURL(`https://www.roblox.com/users/${robloxUser.id}/profile`),
+            new ButtonBuilder().setCustomId('verify_confirm').setLabel('✅ Klaar, check mijn profiel').setStyle(ButtonStyle.Success),
           );
+          const bloxlinkNote = bc.apiKey
+            ? `\n> ⚠️ Je Bloxlink account komt niet overeen met **${robloxUser.name}**. Verifieer via de onderstaande code, of update je Bloxlink verificatie via \`/verify\` in een Bloxlink-server.`
+            : '';
           return interaction.editReply({
             embeds: [new EmbedBuilder()
-              .setTitle('🔐 Step 2 — Add the code to your Roblox profile')
+              .setTitle('🔐 Stap 2 — Voeg de code toe aan je Roblox profiel')
               .setColor(0xFEE75C)
               .setDescription([
-                `**Found:** ${robloxUser.name} (ID: ${robloxUser.id})`,
+                `**Gevonden:** ${robloxUser.name} (ID: ${robloxUser.id})`,
+                bloxlinkNote,
                 ``,
-                `**1.** Go to your [Roblox profile](https://www.roblox.com/users/${robloxUser.id}/profile)`,
-                `**2.** Click **Edit Profile**`,
-                `**3.** Paste this code anywhere in your **description:**`,
+                `**1.** Ga naar je [Roblox profiel](https://www.roblox.com/users/${robloxUser.id}/profile)`,
+                `**2.** Klik op **Profiel bewerken**`,
+                `**3.** Plak deze code ergens in je **beschrijving:**`,
                 `\`\`\`${code}\`\`\``,
-                `**4.** Save your profile`,
-                `**5.** Click the button below`,
+                `**4.** Sla je profiel op`,
+                `**5.** Klik op de knop hieronder`,
                 ``,
-                `⏳ This code expires in **15 minutes**.`,
+                `⏳ Deze code verloopt over **15 minuten**.`,
               ].join('\n'))
             ],
             components: [confirmRow],
           });
-        } catch (e) { return interaction.editReply({ content: `❌ Could not reach Roblox. Try again later.` }); }
+        } catch (e) { return interaction.editReply({ content: `❌ Kon Roblox niet bereiken. Probeer het later opnieuw.` }); }
       }
 
       if (mid.startsWith('modal_reqapprovals__')) {
