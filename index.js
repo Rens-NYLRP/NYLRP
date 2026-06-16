@@ -1546,7 +1546,7 @@ function isChannelSelectButton(id) {
     'vc_channel', 'vc_deploy',
     'am_log', 'tr_setup__channel', 'tr_setup__announce_channel',
     'cmdlist__channel', 'erlc_set_kickbans', 'erlc_set_joinleave',
-    'erlc_set_cmds', 'erlc_set_modcall', 'erlc_set_kills',
+    'erlc_set_cmds', 'erlc_set_modcall', 'erlc_set_kills', 'erlc_set_inrole',
     'ap_review_channel', 'ap_log_channel',
     'vote_setup__log', 'vote_setup__announce_channel',
   ];
@@ -3095,6 +3095,8 @@ const commands = [
     { name: 'end', type: 1, description: '[Staff] End someone\'s LOA early', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   ]},
   { name: 'setup', description: '[SHR] Open the setup menu' },
+  { name: 'erlcconfig', description: '[SHR] Set the ERLC server API key' },
+  { name: 'bloxlinkconfig', description: '[SHR] Set the Bloxlink server API key (for in-game role feature)' },
   { name: 'reviewstaff', description: 'Leave a review for a staff member or view the leaderboard', options: [
     { name: 'staff', type: 6, description: 'Which staff member do you want to review?', required: false },
     { name: 'leaderboard', type: 5, description: 'Show the staff review leaderboard', required: false },
@@ -3511,28 +3513,54 @@ client.once('clientReady', async () => {
         }
         const state = erlcState.get(guild.id);
 
-        // ── Join/Leave logs ──
-        if (ec.joinLeave) {
-          const ch = guild.channels.cache.get(ec.joinLeave);
-          if (ch) {
-            const players = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
-            if (players) {
-              const current = new Set(Object.keys(players));
-              // Joined
-              for (const id of current) {
-                if (!state.players.has(id)) {
-                  const p = players[id];
+        // ── Join/Leave logs + In-Game Role ──
+        if (ec.joinLeave || ec.inGameRole) {
+          const players = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
+          if (players) {
+            const current = new Set(Object.keys(players));
+            const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
+            const bc = getBloxlinkConfig(guild.id);
+
+            // Joined
+            for (const playerId of current) {
+              if (!state.players.has(playerId)) {
+                const p = players[playerId];
+                // Log channel message
+                if (ch) {
                   await ch.send({ embeds: [new EmbedBuilder().setTitle('📥 Player Joined').setColor(0x57F287).addFields({ name: '👤 Player', value: p.Player, inline: true }, { name: '🎭 Team', value: p.Team || 'None', inline: true }).setTimestamp()] }).catch(() => {});
                 }
-              }
-              // Left
-              for (const id of state.players) {
-                if (!current.has(id)) {
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📤 Player Left').setColor(0xED4245).addFields({ name: '👤 Player', value: id, inline: true }).setTimestamp()] }).catch(() => {});
+                // In-game role: lookup Discord user via Bloxlink and add role
+                if (ec.inGameRole && bc.apiKey) {
+                  // ERLC API player ID is the Roblox user ID
+                  const discordIds = await bloxlinkRobloxToDiscord(guild.id, playerId).catch(() => null);
+                  if (discordIds) {
+                    for (const discordId of discordIds) {
+                      const member = await guild.members.fetch(discordId).catch(() => null);
+                      if (member) await member.roles.add(ec.inGameRole).catch(() => {});
+                    }
+                  }
                 }
               }
-              state.players = current;
             }
+            // Left
+            for (const playerId of state.players) {
+              if (!current.has(playerId)) {
+                if (ch) {
+                  await ch.send({ embeds: [new EmbedBuilder().setTitle('📤 Player Left').setColor(0xED4245).addFields({ name: '👤 Player', value: playerId, inline: true }).setTimestamp()] }).catch(() => {});
+                }
+                // Remove in-game role
+                if (ec.inGameRole && bc.apiKey) {
+                  const discordIds = await bloxlinkRobloxToDiscord(guild.id, playerId).catch(() => null);
+                  if (discordIds) {
+                    for (const discordId of discordIds) {
+                      const member = await guild.members.fetch(discordId).catch(() => null);
+                      if (member) await member.roles.remove(ec.inGameRole).catch(() => {});
+                    }
+                  }
+                }
+              }
+            }
+            state.players = current;
           }
         }
 
@@ -4399,6 +4427,18 @@ client.on('interactionCreate', async interaction => {
         modal.addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder().setCustomId('erlc_server_key').setLabel('ERLC Server Key').setStyle(TextInputStyle.Short).setValue(ec.serverKey || '').setPlaceholder('Paste your ERLC server key here...').setRequired(true)
+          )
+        );
+        return interaction.showModal(modal);
+      }
+
+      if (cmd === 'bloxlinkconfig') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+        const bc = getBloxlinkConfig(guildId);
+        const modal = new ModalBuilder().setCustomId('modal_bloxlinkconfig').setTitle('Bloxlink Server API Key');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('bloxlink_api_key').setLabel('Bloxlink Server API Key').setStyle(TextInputStyle.Short).setValue(bc.apiKey || '').setPlaceholder('Get this from blox.link/dashboard/developer').setRequired(true)
           )
         );
         return interaction.showModal(modal);
@@ -6562,6 +6602,19 @@ client.on('interactionCreate', async interaction => {
         };
         const entry = channelMap[id];
         if (entry) return interaction.reply({ content: `### ${entry.label}`, components: [channelDropdown(entry.cid, 'Select channel...')], flags: MessageFlags.Ephemeral });
+        if (id === 'erlc_set_inrole') {
+          return interaction.reply({
+            content: '### 🎮 In-Game Role\n*Leden die in de ERLC server zitten krijgen deze rol automatisch. De rol wordt verwijderd zodra ze de server verlaten. Vereist een Bloxlink API key (`/bloxlinkconfig`) en dat Bloxlink in je server staat.*',
+            components: [new ActionRowBuilder().addComponents(
+              new RoleSelectMenuBuilder()
+                .setCustomId('erlc_inrole_save')
+                .setPlaceholder('Selecteer de in-game rol...')
+                .setMinValues(0)
+                .setMaxValues(1)
+            )],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
       }
 
       // ════ TRAINING SETUP BUTTONS ════
@@ -7940,6 +7993,19 @@ client.on('interactionCreate', async interaction => {
       if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
       const ids = interaction.values;
 
+      // ════ ERLC IN-GAME ROLE SELECT ════
+      if (interaction.customId === 'erlc_inrole_save') {
+        const ec = getErlcLogConfig(guildId);
+        ec.inGameRole = ids[0] || null;
+        await saveGuildConfig(guildId);
+        return interaction.reply({
+          content: ids[0]
+            ? `✅ In-game rol ingesteld op <@&${ids[0]}>! Leden die in de ERLC server zitten krijgen deze rol automatisch.`
+            : `✅ In-game rol verwijderd.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
       // ════ GIVEROLES SELECT ════
       if (interaction.customId.startsWith('giveroles__')) {
         const targetUserId = interaction.customId.replace('giveroles__', '');
@@ -8112,7 +8178,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       // All other role selects: main server only (department servers can still set overrides)
-      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('sd_ping_roles') && !interaction.customId.startsWith('sd_allowed_roles') && !interaction.customId.startsWith('load_role') && !interaction.customId.startsWith('load_approval_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role')) {
+      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('sd_ping_roles') && !interaction.customId.startsWith('sd_allowed_roles') && !interaction.customId.startsWith('load_role') && !interaction.customId.startsWith('load_approval_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role') && interaction.customId !== 'erlc_inrole_save') {
         return interaction.reply({ content: '❌ Role configuration can only be done on the main server.', flags: MessageFlags.Ephemeral });
       }
 
@@ -8587,9 +8653,9 @@ client.on('interactionCreate', async interaction => {
           const sel = new StringSelectMenuBuilder()
             .setCustomId('coc_sel_prefix')
             .setPlaceholder('Select rank to set nickname prefix for...')
-            .addOptions(cc.chain.map((e, i) => {
+            .addOptions(cc.chain.slice(0, 25).map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, description: e.nicknamePrefix ? `Prefix: ${e.nicknamePrefix}` : 'No prefix set', value: String(e.roleId) };
+              return { label: `${i + 1}. ${role?.name ?? String(e.roleId)}`.slice(0, 100), description: (e.nicknamePrefix ? `Prefix: ${e.nicknamePrefix}` : 'No prefix set').slice(0, 100), value: String(e.roleId || i) };
             }));
           return interaction.reply({ content: '### 🏷️ Select rank to configure nickname prefix\n*When promoted to this rank, the prefix is automatically set before the username.*', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -8599,9 +8665,9 @@ client.on('interactionCreate', async interaction => {
           const sel = new StringSelectMenuBuilder()
             .setCustomId('coc_remove_rank')
             .setPlaceholder('Select rank to remove...')
-            .addOptions(cc.chain.map((e, i) => {
+            .addOptions(cc.chain.slice(0, 25).map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+              return { label: `${i + 1}. ${role?.name ?? String(e.roleId)}`.slice(0, 100), value: String(e.roleId || i) };
             }));
           return interaction.reply({ content: '### ➖ Select rank to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -8611,9 +8677,9 @@ client.on('interactionCreate', async interaction => {
           const sel = new StringSelectMenuBuilder()
             .setCustomId('coc_move_up')
             .setPlaceholder('Select rank to move up...')
-            .addOptions(cc.chain.map((e, i) => {
+            .addOptions(cc.chain.slice(0, 25).map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+              return { label: `${i + 1}. ${role?.name ?? String(e.roleId)}`.slice(0, 100), value: String(e.roleId || i) };
             }));
           return interaction.reply({ content: '### ⬆️ Select rank to move one position up', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -8623,9 +8689,9 @@ client.on('interactionCreate', async interaction => {
           const sel = new StringSelectMenuBuilder()
             .setCustomId('coc_move_down')
             .setPlaceholder('Select rank to move down...')
-            .addOptions(cc.chain.map((e, i) => {
+            .addOptions(cc.chain.slice(0, 25).map((e, i) => {
               const role = interaction.guild.roles.cache.get(e.roleId);
-              return { label: `${i + 1}. ${role?.name ?? e.roleId}`, value: String(e.roleId) };
+              return { label: `${i + 1}. ${role?.name ?? String(e.roleId)}`.slice(0, 100), value: String(e.roleId || i) };
             }));
           return interaction.reply({ content: '### ⬇️ Select rank to move one position down', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
@@ -9639,6 +9705,27 @@ client.on('interactionCreate', async interaction => {
           return interaction.reply({ content: `✅ ERLC Server Key saved and **verified**! The connection works.`, flags: MessageFlags.Ephemeral });
         } catch (e) {
           return interaction.reply({ content: `⚠️ Key saved but **could not connect** to ERLC (${e.message}). Double check the key is correct.`, flags: MessageFlags.Ephemeral });
+        }
+      }
+
+      if (mid === 'modal_bloxlinkconfig') {
+        const key = interaction.fields.getTextInputValue('bloxlink_api_key').trim();
+        const bc = getBloxlinkConfig(guildId);
+        bc.apiKey = key;
+        await saveGuildConfig(guildId);
+        // Test the key
+        try {
+          const testRes = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/discord-to-roblox/1`, {
+            headers: { Authorization: key },
+            signal: AbortSignal.timeout(8000),
+          });
+          // 404 = user not found but key is valid; 401/403 = bad key
+          if (testRes.status === 401 || testRes.status === 403) {
+            return interaction.reply({ content: `⚠️ Key saved but Bloxlink returned **unauthorized** (${testRes.status}). Double-check the key at blox.link/dashboard/developer.`, flags: MessageFlags.Ephemeral });
+          }
+          return interaction.reply({ content: `✅ Bloxlink API Key saved and **verified**! The in-game role feature is now active.`, flags: MessageFlags.Ephemeral });
+        } catch (e) {
+          return interaction.reply({ content: `⚠️ Key saved but **could not reach Bloxlink** (${e.message}). Check your key and try again.`, flags: MessageFlags.Ephemeral });
         }
       }
 
