@@ -1665,15 +1665,34 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   await targetMember.roles.add(newRole).catch(() => {});
 
   // Nickname prefix instellen als geconfigureerd op het chain entry
-  if (targetEntry.nicknamePrefix) {
-    try {
-      const baseName = targetMember.nickname ?? targetMember.user.username;
-      // Strip oude prefix (alles voor ' | ') als die er al in zit
-      const cleanName = baseName.includes(' | ') ? baseName.split(' | ').slice(1).join(' | ') : baseName;
+  try {
+    const baseName = targetMember.nickname ?? targetMember.user.username;
+    // Verzamel alle bekende prefixen uit de chain om ze te strippen
+    const cc = getChainConfig(guildId);
+    const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+    // Strip alle bekende prefixen van links af (ook gestapelde zoals "M | JM | naam")
+    let cleanName = baseName;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const pfx of knownPrefixes) {
+        if (cleanName.startsWith(`${pfx} | `)) {
+          cleanName = cleanName.slice(`${pfx} | `.length);
+          changed = true;
+        }
+      }
+      // Fallback: als er nog een ' | ' in zit na stripping, strip het eerste segment
+      // (voor onbekende/verwijderde prefixen)
+    }
+    // Als er nog steeds een ' | ' in zit maar geen bekende prefix meer — dat is de echte naam, laat staan
+    if (targetEntry.nicknamePrefix) {
       const newNick = `${targetEntry.nicknamePrefix} | ${cleanName}`.slice(0, 32);
       await targetMember.setNickname(newNick, `Promoted to ${newRole.name}`).catch(() => {});
-    } catch {}
-  }
+    } else if (baseName !== cleanName) {
+      // Nieuwe rank heeft geen prefix — zet de schone naam terug
+      await targetMember.setNickname(cleanName.slice(0, 32), `Promoted to ${newRole.name}`).catch(() => {});
+    }
+  } catch {}
 
   return { success: true, newRole };
 }
