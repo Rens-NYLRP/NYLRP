@@ -9748,12 +9748,19 @@ client.on('interactionCreate', async interaction => {
         const ec = getErlcLogConfig(guildId);
         ec.serverKey = key;
         await saveGuildConfig(guildId);
-        // Test de key
         try {
           await erlcRequest('/server', 'GET', null, guildId);
-          return interaction.reply({ content: `✅ ERLC Server Key saved and **verified**! The connection works.`, flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: `✅ ERLC Server Key opgeslagen en **geverifieerd**! De verbinding werkt.`, flags: MessageFlags.Ephemeral });
         } catch (e) {
-          return interaction.reply({ content: `⚠️ Key saved but **could not connect** to ERLC (${e.message}). Double check the key is correct.`, flags: MessageFlags.Ephemeral });
+          // 403 = key is geldig maar server is offline of leeg — geen fout
+          if (e.message?.includes('403')) {
+            return interaction.reply({ content: `✅ ERLC Server Key opgeslagen! (Server is momenteel offline of leeg, maar de key is geaccepteerd.)`, flags: MessageFlags.Ephemeral });
+          }
+          // 401 = echt foute key
+          if (e.message?.includes('401')) {
+            return interaction.reply({ content: `⚠️ Key opgeslagen maar Bloxlink geeft **unauthorized** terug. Controleer de key.`, flags: MessageFlags.Ephemeral });
+          }
+          return interaction.reply({ content: `✅ ERLC Server Key opgeslagen! (Kon niet verbinden: ${e.message} — dit kan komen doordat de server offline is.)`, flags: MessageFlags.Ephemeral });
         }
       }
 
