@@ -789,6 +789,8 @@ function getInfractionConfig(guildId) {
   };
   if (!gc.infractions.hierarchy)          gc.infractions.hierarchy          = [];
   if (!gc.infractions.userStrikes)        gc.infractions.userStrikes        = {};
+  if (!gc.infractions.warningCounts)      gc.infractions.warningCounts      = {}; // userId → 0-3
+  if (!gc.infractions.strikeCounts)       gc.infractions.strikeCounts       = {}; // userId → 0-3
   if (!gc.infractions.userHistory)        gc.infractions.userHistory        = {};
   if (!gc.infractions.logChannel)         gc.infractions.logChannel         = null;
   if (!gc.infractions.embedTitle)         gc.infractions.embedTitle         = '⚠️ {levelLabel} — {username}';
@@ -809,13 +811,27 @@ const INFRACTION_PROGRESSION = [
   { label: 'Strike 3',    category: 'Strike' },
   { label: 'Termination', category: 'Termination' },
 ];
+// Warnings occupy levels 1-3, Strikes 4-6, Termination 7.
+// Warnings and Strikes are SEPARATE tracks:
+//   type 'warning' → increments warningCount (max 3), maps to level 1/2/3
+//   type 'strike'  → increments strikeCount  (max 3), maps to level 4/5/6; 3 strikes → level 7 (Termination)
+// The role assigned is always based on the HIGHEST active level across both tracks.
+
 function getProgressionEntry(level) {
   const idx = Math.max(0, Math.min(level - 1, INFRACTION_PROGRESSION.length - 1));
   return INFRACTION_PROGRESSION[idx];
 }
 
+// Returns the effective display level for a user: highest of warningLevel and strikeLevel.
+function getEffectiveLevel(ic, userId) {
+  const wc = ic.warningCounts?.[userId] ?? 0; // 0-3
+  const sc = ic.strikeCounts?.[userId]  ?? 0; // 0-3
+  const warnLevel  = Math.min(wc, 3);         // levels 1-3
+  const strikeLevel = sc >= 3 ? 7 : sc > 0 ? 3 + sc : 0; // 4, 5, 6, or 7 for termination
+  return Math.max(warnLevel, strikeLevel);
+}
+
 // Removes all progression-level roles from a member, then assigns the role for `level` (if any).
-// `level` is 1-7 (Termination = 7). level <= 0 means no role assigned.
 async function applyInfractionLevelRole(member, ic, level) {
   for (const entry of ic.hierarchy) {
     if (entry?.roleId && member.roles.cache.has(entry.roleId)) {
