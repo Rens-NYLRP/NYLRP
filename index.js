@@ -1389,8 +1389,10 @@ function hasStaff(m) {
 function hasSHR(m) {
   if (!m?.roles?.cache) return false;
   const pc = getPermissionsConfig(m.guild?.id);
+  // If SHR roles are configured, check them
   if (pc.shrRoles?.length) return pc.shrRoles.some(id => m.roles.cache.has(id));
-  return false;
+  // No SHR roles configured → fall back to server admin/owner (hasSetup)
+  return hasSetup(m);
 }
 function hasSetup(m) {
   if (!m) return false;
@@ -1622,13 +1624,17 @@ function getMemberChainPosition(member, chain) {
   return -1;
 }
 
-// Sync de nickname prefix voor een member op basis van zijn hoogste chain-rang
+// Sync the nickname prefix for a member based on their highest chain rank.
+// Rules:
+//  - All known chain prefixes are stripped first (prevents stacking)
+//  - "On Duty" suffix (added by ERLC in-game role) is preserved at the end
+//  - Final format: [PREFIX | ] cleanName [ | On Duty]
 async function syncChainPrefix(member, guildId) {
   try {
     const cc = getChainConfig(guildId);
     if (!cc.chain.length) return;
 
-    // Vind de hoogste chain-rang die de member heeft (chain is ascending gesorteerd, dus laatste match = hoogste)
+    // Find the highest chain rank the member holds (chain is ascending, last match = highest)
     let highestEntry = null;
     for (const entry of cc.chain) {
       if (member.roles.cache.has(entry.roleId)) highestEntry = entry;
@@ -1637,26 +1643,35 @@ async function syncChainPrefix(member, guildId) {
     const baseName = member.nickname ?? member.user.username;
     const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
 
-    // Strip alle bekende prefixen van links af
-    let cleanName = baseName;
+    // Detect and preserve "On Duty" suffix
+    const ON_DUTY_SUFFIX = ' | On Duty';
+    const hasOnDuty = baseName.endsWith(ON_DUTY_SUFFIX);
+    let workingName = hasOnDuty ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
+
+    // Strip ALL known prefixes from the left (handles stacked prefixes like "M | JM | name")
     let changed = true;
     while (changed) {
       changed = false;
       for (const pfx of knownPrefixes) {
-        if (cleanName.startsWith(`${pfx} | `)) {
-          cleanName = cleanName.slice(`${pfx} | `.length);
+        if (workingName.startsWith(`${pfx} | `)) {
+          workingName = workingName.slice(`${pfx} | `.length);
           changed = true;
         }
       }
     }
+    const cleanName = workingName;
 
+    // Build new nickname
+    let newNick;
     if (highestEntry?.nicknamePrefix) {
-      const newNick = `${highestEntry.nicknamePrefix} | ${cleanName}`.slice(0, 32);
-      if (newNick !== baseName) await member.setNickname(newNick, 'Chain prefix sync').catch(() => {});
-    } else if (baseName !== cleanName) {
-      // Member heeft geen chain-rang meer met prefix — strip de oude prefix
-      await member.setNickname(cleanName.slice(0, 32), 'Chain prefix sync').catch(() => {});
+      newNick = `${highestEntry.nicknamePrefix} | ${cleanName}`;
+    } else {
+      newNick = cleanName;
     }
+    if (hasOnDuty) newNick += ON_DUTY_SUFFIX;
+    newNick = newNick.slice(0, 32);
+
+    if (newNick !== baseName) await member.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
 }
 
@@ -1983,6 +1998,112 @@ async function bloxlinkRobloxToDiscord(guildId, robloxId) {
 
 // ERLC polling state — bijhouden wat we al gezien hebben
 const erlcState = new Map(); // guildId → { players: Set, kills: Set, modCalls: Set, cmds: Set, bans: Set }
+
+// ── Poll state ──
+// pollState: messageId → { question, options: [{label, votes: Set<userId>}], createdBy, guildId, channelId, resultChannelId, closeAt, closed }
+const pollState = new Map();
+
+function buildPollEmbed(poll, messageId, closed = false) {
+  const totalVotes = poll.options.reduce((s, o) => s + o.votes.size, 0);
+  const BAR_LEN = 12;
+  const description = poll.options.map((o, i) => {
+    const count = o.votes.size;
+    const pct   = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+    const filled = Math.round((pct / 100) * BAR_LEN);
+    const bar   = '█'.repeat(filled) + '░'.repeat(BAR_LEN - filled);
+    return `**${i + 1}. ${o.label}**\n\`${bar}\` **${pct}%** (${count} vote${count !== 1 ? 's' : ''})`;
+  }).join('\n\n');
+
+  const closeStr = poll.closeAt
+    ? (closed ? `Closed <t:${Math.floor(poll.closeAt / 1000)}:R>` : `Closes <t:${Math.floor(poll.closeAt / 1000)}:R> • <t:${Math.floor(poll.closeAt / 1000)}:f>`)
+    : (closed ? 'Closed manually' : 'No close date set');
+
+  return new EmbedBuilder()
+    .setTitle(`📊 ${poll.question}`)
+    .setDescription(description)
+    .setColor(closed ? 0xED4245 : 0x5865F2)
+    .addFields(
+      { name: '🗳️ Total Votes', value: `${totalVotes}`, inline: true },
+      { name: closed ? '🔴 Status' : '🟢 Status', value: closed ? 'Closed' : 'Open', inline: true },
+      { name: '📅 ' + (closed ? 'Closed' : 'Closes'), value: closeStr, inline: true },
+    )
+    .setFooter({ text: `Poll by ${poll.createdBy} • ID: ${messageId}` })
+    .setTimestamp();
+}
+
+function buildPollComponents(poll, messageId, closed = false) {
+  if (closed) return [];
+  const OPTION_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣'];
+  const rows = [];
+  // Up to 5 buttons per row, max 8 options = 2 rows of 4
+  const chunks = [];
+  for (let i = 0; i < poll.options.length; i += 4) chunks.push(poll.options.slice(i, i + 4));
+  for (const [ci, chunk] of chunks.entries()) {
+    const row = new ActionRowBuilder();
+    for (const [oi, opt] of chunk.entries()) {
+      const idx = ci * 4 + oi;
+      row.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`poll_vote__${messageId}__${idx}`)
+          .setLabel(opt.label.slice(0, 80))
+          .setEmoji(OPTION_EMOJIS[idx])
+          .setStyle(ButtonStyle.Primary)
+      );
+    }
+    rows.push(row);
+  }
+  // Close poll button for staff (separate row)
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`poll_close__${messageId}`)
+      .setLabel('Close Poll & Show Results')
+      .setStyle(ButtonStyle.Danger)
+      .setEmoji('🔴')
+  ));
+  return rows;
+}
+
+async function closePoll(messageId, guild, reason = 'Scheduled') {
+  const poll = pollState.get(messageId);
+  if (!poll || poll.closed) return;
+  poll.closed = true;
+
+  // Update the original message
+  const channel = guild.channels.cache.get(poll.channelId);
+  if (channel) {
+    const msg = await channel.messages.fetch(messageId).catch(() => null);
+    if (msg) {
+      await msg.edit({ embeds: [buildPollEmbed(poll, messageId, true)], components: [] }).catch(() => {});
+    }
+  }
+
+  // Post results
+  const resultCh = guild.channels.cache.get(poll.resultChannelId ?? poll.channelId);
+  if (resultCh) {
+    const totalVotes = poll.options.reduce((s, o) => s + o.votes.size, 0);
+    const sorted = [...poll.options].sort((a, b) => b.votes.size - a.votes.size);
+    const winner = sorted[0];
+    const OPTION_EMOJIS = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣'];
+    const resultsDesc = poll.options.map((o, i) => {
+      const pct = totalVotes > 0 ? Math.round((o.votes.size / totalVotes) * 100) : 0;
+      const isWinner = o.label === winner.label;
+      return `${isWinner ? '🏆' : OPTION_EMOJIS[i]} **${o.label}** — ${o.votes.size} vote${o.votes.size !== 1 ? 's' : ''} (${pct}%)`;
+    }).join('\n');
+
+    await resultCh.send({ embeds: [new EmbedBuilder()
+      .setTitle(`📊 Poll Results — ${poll.question}`)
+      .setColor(0x57F287)
+      .setDescription(resultsDesc)
+      .addFields(
+        { name: '🏆 Winner',      value: winner.votes.size > 0 ? winner.label : 'No votes cast', inline: true },
+        { name: '🗳️ Total Votes', value: `${totalVotes}`,                                          inline: true },
+        { name: '📋 Closed',      value: reason,                                                    inline: true },
+      )
+      .setFooter({ text: `Poll by ${poll.createdBy}` })
+      .setTimestamp()
+    ] }).catch(() => {});
+  }
+}
 
 function roleDropdown(customId, placeholder, min = 1, max = 10) {
   return new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(customId).setPlaceholder(placeholder).setMinValues(min).setMaxValues(max));
@@ -2364,22 +2485,33 @@ function buildInfractionSetupPayload(guildId) {
 
 function buildPermissionsSetupPayload(guildId) {
   const pc = getPermissionsConfig(guildId);
-  const fmt = (arr) => arr.length ? arr.map(r => `<@&${r}>`).join(', ') : '*Not set*';
+  const fmt = (arr) => arr?.length ? arr.map(r => `<@&${r}>`).join(', ') : '*Not set*';
+  const shrValue = pc.shrRoles?.length
+    ? pc.shrRoles.map(r => `<@&${r}>`).join(', ')
+    : '⚠️ *Not set — server owner & Admins have full access by default*';
   const embed = new EmbedBuilder()
     .setTitle('🔐 Permissions Setup')
     .setColor(0x5865F2)
-    .setDescription('Configure which roles have access to each permission level.')
+    .setDescription(
+      'Configure which roles have access to each permission level.\n\n' +
+      '**Permission hierarchy (highest → lowest):**\n' +
+      '⭐ **SHR** — Full override for **all** commands. No restrictions.\n' +
+      '👑 **Admin** — Setup & configuration commands.\n' +
+      '🛡️ **Mod** — Moderation commands (ban, kick, mute, warn, etc.).\n' +
+      '👤 **Staff** — Basic staff commands (close ticket, warn, etc.).\n\n' +
+      '> If SHR roles are not set, server owner and Admins automatically get full access.'
+    )
     .addFields(
-      { name: '👑 Admin Roles',  value: fmt(pc.adminRoles),  inline: false },
-      { name: '🛡️ Mod Roles',   value: fmt(pc.modRoles),    inline: false },
-      { name: '👤 Staff Roles',  value: fmt(pc.staffRoles),  inline: false },
-      { name: '⭐ SHR Roles',    value: fmt(pc.shrRoles),    inline: false },
+      { name: '⭐ SHR Roles — Full Override',  value: shrValue,              inline: false },
+      { name: '👑 Admin Roles',                 value: fmt(pc.adminRoles),    inline: true  },
+      { name: '🛡️ Mod Roles',                  value: fmt(pc.modRoles),      inline: true  },
+      { name: '👤 Staff Roles',                 value: fmt(pc.staffRoles),    inline: true  },
     );
   const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('perms__shr').setLabel('SHR Roles (Full Override)').setStyle(ButtonStyle.Success).setEmoji('⭐'),
     new ButtonBuilder().setCustomId('perms__admin').setLabel('Admin Roles').setStyle(ButtonStyle.Primary).setEmoji('👑'),
     new ButtonBuilder().setCustomId('perms__mod').setLabel('Mod Roles').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
     new ButtonBuilder().setCustomId('perms__staff').setLabel('Staff Roles').setStyle(ButtonStyle.Primary).setEmoji('👤'),
-    new ButtonBuilder().setCustomId('perms__shr').setLabel('SHR Roles').setStyle(ButtonStyle.Primary).setEmoji('⭐'),
   );
   return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
 }
@@ -3031,12 +3163,18 @@ const commands = [
   { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
   { name: 'serverinfo', description: 'Server information' },
   { name: 'roleinfo', description: 'Role information', options: [{ name: 'role', type: 8, description: 'Which role?', required: true }] },
-  { name: 'poll', description: 'Create a poll', options: [
-    { name: 'question', type: 3, description: 'Question', required: true },
-    { name: 'option1', type: 3, description: 'Option 1', required: true },
-    { name: 'option2', type: 3, description: 'Option 2', required: true },
-    { name: 'option3', type: 3, description: 'Option 3', required: false },
-    { name: 'option4', type: 3, description: 'Option 4', required: false },
+  { name: 'poll', description: 'Create a poll with up to 8 options and a close date', options: [
+    { name: 'question',   type: 3, description: 'The poll question',              required: true  },
+    { name: 'option1',    type: 3, description: 'Option 1',                        required: true  },
+    { name: 'option2',    type: 3, description: 'Option 2',                        required: true  },
+    { name: 'option3',    type: 3, description: 'Option 3',                        required: false },
+    { name: 'option4',    type: 3, description: 'Option 4',                        required: false },
+    { name: 'option5',    type: 3, description: 'Option 5',                        required: false },
+    { name: 'option6',    type: 3, description: 'Option 6',                        required: false },
+    { name: 'option7',    type: 3, description: 'Option 7',                        required: false },
+    { name: 'option8',    type: 3, description: 'Option 8',                        required: false },
+    { name: 'close_date', type: 3, description: 'Close date (DD-MM-YYYY HH:MM or DD-MM-YYYY)', required: false },
+    { name: 'channel',    type: 7, description: 'Channel to post results in (default: same channel)', required: false },
   ]},
   { name: 'userinfo', description: 'User information', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'warn', description: 'Warn a user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true }] },
@@ -3560,53 +3698,95 @@ client.once('clientReady', async () => {
         if (ec.joinLeave || ec.inGameRole) {
           const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
           if (playersRaw) {
-            // ERLC geeft een object terug waarbij p.Player = "Username:RobloxId"
-            // We bouwen een Map van robloxId → playerObject voor makkelijke lookup
-            const currentPlayers = new Map(); // robloxId (string) → { username, robloxId, team }
+            // ERLC returns { [internalKey]: { Player: "Username:RobloxId", Team, Permission, Callsign } }
+            // The Roblox ID is the last segment of Player after splitting on ':'
+            const currentPlayers = new Map(); // robloxId → { username, team }
             for (const p of Object.values(playersRaw)) {
-              const parts = String(p.Player).split(':');
-              const robloxId = parts[parts.length - 1]; // laatste deel = numerieke Roblox ID
-              const username = parts.slice(0, -1).join(':'); // alles voor de laatste : = username
-              if (robloxId) currentPlayers.set(robloxId, { username, robloxId, team: p.Team || 'None' });
+              const raw = String(p.Player ?? '');
+              const colonIdx = raw.lastIndexOf(':');
+              if (colonIdx === -1) continue;
+              const robloxId = raw.slice(colonIdx + 1).trim();
+              const username = raw.slice(0, colonIdx).trim();
+              if (robloxId && /^\d+$/.test(robloxId)) {
+                currentPlayers.set(robloxId, { username, team: p.Team || 'Civilian' });
+              }
             }
 
+            const currentIds = new Set(currentPlayers.keys());
             const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
             const bc = getBloxlinkConfig(guild.id);
-            const currentIds = new Set(currentPlayers.keys());
+            const ON_DUTY_SUFFIX = ' | On Duty';
+
+            // Helper: apply in-game role + On Duty suffix via Bloxlink
+            const applyInGameRole = async (robloxId) => {
+              if (!ec.inGameRole || !bc.apiKey) return;
+              try {
+                const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
+                  headers: { Authorization: bc.apiKey },
+                  signal: AbortSignal.timeout(10000),
+                });
+                if (!res.ok) {
+                  console.warn(`[ERLC] Bloxlink roblox-to-discord ${robloxId} → HTTP ${res.status}`);
+                  return;
+                }
+                const data = await res.json();
+                const discordIds = Array.isArray(data?.discordIDs) ? data.discordIDs : [];
+                if (!discordIds.length) console.warn(`[ERLC] Bloxlink found no Discord IDs for Roblox ID ${robloxId}`);
+                for (const discordId of discordIds) {
+                  const member = await guild.members.fetch(discordId).catch(() => null);
+                  if (!member) continue;
+                  // Add role
+                  await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC] Could not add in-game role to ${discordId}: ${e.message}`));
+                  // Add On Duty suffix to nickname
+                  const currentNick = member.nickname ?? member.user.username;
+                  if (!currentNick.endsWith(ON_DUTY_SUFFIX)) {
+                    await member.setNickname((currentNick + ON_DUTY_SUFFIX).slice(0, 32), 'ERLC On Duty').catch(() => {});
+                  }
+                }
+              } catch (e) { console.warn(`[ERLC] Bloxlink error for ${robloxId}: ${e.message}`); }
+            };
+
+            // Helper: remove in-game role + On Duty suffix via Bloxlink
+            const removeInGameRole = async (robloxId) => {
+              if (!ec.inGameRole || !bc.apiKey) return;
+              try {
+                const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
+                  headers: { Authorization: bc.apiKey },
+                  signal: AbortSignal.timeout(10000),
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                const discordIds = Array.isArray(data?.discordIDs) ? data.discordIDs : [];
+                for (const discordId of discordIds) {
+                  const member = await guild.members.fetch(discordId).catch(() => null);
+                  if (!member) continue;
+                  // Remove role
+                  await member.roles.remove(ec.inGameRole).catch(() => {});
+                  // Remove On Duty suffix
+                  const currentNick = member.nickname ?? member.user.username;
+                  if (currentNick.endsWith(ON_DUTY_SUFFIX)) {
+                    await member.setNickname(currentNick.slice(0, -ON_DUTY_SUFFIX.length).slice(0, 32), 'ERLC Off Duty').catch(() => {});
+                  }
+                }
+              } catch { /* Bloxlink unavailable */ }
+            };
 
             // ── Joined ──
             for (const [robloxId, p] of currentPlayers) {
               if (!state.players.has(robloxId)) {
-                // Log
                 if (ch) {
                   await ch.send({ embeds: [new EmbedBuilder()
-                    .setTitle('📥 Speler Joined')
+                    .setTitle('📥 Player Joined')
                     .setColor(0x57F287)
                     .addFields(
-                      { name: '👤 Speler', value: p.username || robloxId, inline: true },
-                      { name: '🆔 Roblox ID', value: robloxId, inline: true },
-                      { name: '🎭 Team', value: p.team, inline: true },
+                      { name: '👤 Player',    value: p.username || robloxId, inline: true },
+                      { name: '🆔 Roblox ID', value: robloxId,               inline: true },
+                      { name: '🎭 Team',      value: p.team,                 inline: true },
                     )
                     .setTimestamp()
                   ] }).catch(() => {});
                 }
-                // In-game rol toevoegen via Bloxlink
-                if (ec.inGameRole && bc.apiKey) {
-                  try {
-                    const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                      headers: { Authorization: bc.apiKey },
-                      signal: AbortSignal.timeout(8000),
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      const discordIds = data?.discordIDs ?? [];
-                      for (const discordId of discordIds) {
-                        const member = await guild.members.fetch(discordId).catch(() => null);
-                        if (member) await member.roles.add(ec.inGameRole).catch(() => {});
-                      }
-                    }
-                  } catch { /* Bloxlink niet bereikbaar, overslaan */ }
-                }
+                await applyInGameRole(robloxId);
               }
             }
 
@@ -3614,39 +3794,22 @@ client.once('clientReady', async () => {
             for (const robloxId of state.players) {
               if (!currentIds.has(robloxId)) {
                 const username = state.playerNames?.get(robloxId) ?? robloxId;
-                // Log
                 if (ch) {
                   await ch.send({ embeds: [new EmbedBuilder()
-                    .setTitle('📤 Speler Left')
+                    .setTitle('📤 Player Left')
                     .setColor(0xED4245)
                     .addFields(
-                      { name: '👤 Speler', value: username, inline: true },
+                      { name: '👤 Player',    value: username,  inline: true },
                       { name: '🆔 Roblox ID', value: robloxId, inline: true },
                     )
                     .setTimestamp()
                   ] }).catch(() => {});
                 }
-                // In-game rol verwijderen via Bloxlink
-                if (ec.inGameRole && bc.apiKey) {
-                  try {
-                    const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                      headers: { Authorization: bc.apiKey },
-                      signal: AbortSignal.timeout(8000),
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      const discordIds = data?.discordIDs ?? [];
-                      for (const discordId of discordIds) {
-                        const member = await guild.members.fetch(discordId).catch(() => null);
-                        if (member) await member.roles.remove(ec.inGameRole).catch(() => {});
-                      }
-                    }
-                  } catch { /* Bloxlink niet bereikbaar, overslaan */ }
-                }
+                await removeInGameRole(robloxId);
               }
             }
 
-            // State bijwerken — sla ook usernames op voor leave-logs
+            // Update state
             state.players = currentIds;
             if (!state.playerNames) state.playerNames = new Map();
             for (const [robloxId, p] of currentPlayers) {
@@ -4249,31 +4412,43 @@ client.on('interactionCreate', async interaction => {
           return interaction.reply({ content: '❌ This channel is not an open ticket.', flags: MessageFlags.Ephemeral });
         }
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
-        const ch = interaction.channel;
-        const tc = getTicketConfig(guildId);
-        if (tc.transcriptChannel) {
-          const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
-          if (trCh) {
-            const msgs = await ch.messages.fetch({ limit: 100 });
-            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp).map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${userDisplay(m.author)}: ${m.content || '[embed]'}`).join('\n');
-            await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] });
-          }
-        }
-        for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
-        pendingCloseReqs.delete(ch.id);
-        await interaction.reply({ content: `🔒 Ticket closed by **${userDisplay(interaction.user)}**. Deleting in 3 seconds...` });
-        setTimeout(() => ch.delete().catch(() => {}), 3000);
+        // Open modal to collect close reason
+        const modal = new ModalBuilder().setCustomId('modal_ticket_close').setTitle('Close Ticket');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('close_reason')
+              .setLabel('Reason for closing this ticket')
+              .setStyle(TextInputStyle.Paragraph)
+              .setPlaceholder('Describe why this ticket is being closed...')
+              .setRequired(true)
+              .setMaxLength(500)
+          ),
+        );
+        return interaction.showModal(modal);
       }
+
       if (cmd === 'closerequest') {
+        const closeRecord = await getTicketRecord(interaction.channel.id);
+        if (!closeRecord || closeRecord.status === 'closed') {
+          return interaction.reply({ content: '❌ This channel is not an open ticket.', flags: MessageFlags.Ephemeral });
+        }
         const ch = interaction.channel;
         if (pendingCloseReqs.has(ch.id)) return interaction.reply({ content: '❌ A close request is already pending.', flags: MessageFlags.Ephemeral });
-        const embed = new EmbedBuilder().setTitle('🔒 Close Request').setDescription(`**${userDisplay(interaction.user)}** has requested to close this ticket.\n\nStaff can accept or deny below.`).setColor(0xFEE75C).setTimestamp();
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('closereq__accept').setLabel('Accept & Close').setStyle(ButtonStyle.Danger).setEmoji('✅'),
-          new ButtonBuilder().setCustomId('closereq__deny').setLabel('Deny').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
+        // Open modal to collect reason
+        const modal = new ModalBuilder().setCustomId('modal_closerequest').setTitle('Request Ticket Close');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('closereq_reason')
+              .setLabel('Reason for requesting closure')
+              .setStyle(TextInputStyle.Paragraph)
+              .setPlaceholder('Explain why you believe this ticket can be closed...')
+              .setRequired(true)
+              .setMaxLength(500)
+          ),
         );
-        const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
-        pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, messageId: msg.id });
+        return interaction.showModal(modal);
       }
 
       if (cmd === 'trainrequest') {
@@ -4344,6 +4519,7 @@ client.on('interactionCreate', async interaction => {
       }
       if (cmd === 'roleinfo') { const role = interaction.options.getRole('role'); return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`🎭 ${role.name}`).setColor(role.color || 0x5865F2).addFields({ name: '🆔 ID', value: role.id, inline: true }, { name: '🎨 Color', value: role.hexColor, inline: true }, { name: '👥 Members', value: `${role.members.size}`, inline: true }).setTimestamp()], flags: MessageFlags.Ephemeral }); }
       if (cmd === 'poll') {
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         const question = interaction.options.getString('question');
         const opts = [interaction.options.getString('option1'), interaction.options.getString('option2'), interaction.options.getString('option3'), interaction.options.getString('option4')].filter(Boolean);
         const emojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣'];
@@ -4357,8 +4533,18 @@ client.on('interactionCreate', async interaction => {
       }
       if (cmd === 'warn') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', flags: MessageFlags.Ephemeral });
-        await addWarning(guildId, user.id, { reason, moderator: userDisplay(interaction.user), date: new Date().toUTCString() });
-        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('⚠️ Warning Issued').setColor(0xFEE75C).addFields({ name: 'User', value: userDisplay(user), inline: true }, { name: 'Warnings', value: `${getWarnings(guildId, user.id).length}`, inline: true }, { name: 'Reason', value: reason }).setTimestamp()], flags: MessageFlags.Ephemeral });
+        const targetUser = interaction.options.getUser('user');
+        if (!targetUser) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId(`modal_warn__${targetUser.id}`).setTitle('Issue Warning');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('warn_reason').setLabel('Reason for this warning').setStyle(TextInputStyle.Paragraph).setPlaceholder('Describe why this warning is being issued...').setRequired(true).setMaxLength(1000)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('warn_evidence').setLabel('Evidence (optional)').setStyle(TextInputStyle.Short).setPlaceholder('Link to screenshot, message ID, etc.').setRequired(false).setMaxLength(500)
+          ),
+        );
+        return interaction.showModal(modal);
       }
       if (cmd === 'mute') {
         if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', flags: MessageFlags.Ephemeral });
@@ -4459,6 +4645,15 @@ client.on('interactionCreate', async interaction => {
         const targetMember = interaction.options.getMember('user');
         if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
         const rp = getRolePermConfig(guildId);
+        const cc = getChainConfig(guildId);
+        const callerPosition = getMemberChainPosition(interaction.member, cc.chain);
+
+        // Hierarchy: cannot remove a chain role equal to or above your own rank
+        const chainEntry = cc.chain.find(e => e.roleId === role.id);
+        if (chainEntry && (callerPosition === -1 || chainEntry.position >= callerPosition)) {
+          return interaction.reply({ content: `❌ You cannot remove a rank equal to or above your own from another member.`, flags: MessageFlags.Ephemeral });
+        }
+
         const perms = rp[role.id];
         const canRemove = hasSetup(interaction.member) || !perms?.removeRoles?.length || perms.removeRoles.some(r => interaction.member.roles.cache.has(r));
         if (!canRemove) return interaction.reply({ content: `❌ You don't have permission to remove <@&${role.id}>.`, flags: MessageFlags.Ephemeral });
@@ -4475,13 +4670,24 @@ client.on('interactionCreate', async interaction => {
         const roleIds = rolesRaw.match(/\d{17,20}/g) ?? [];
         if (!roleIds.length) return interaction.reply({ content: '❌ No valid role IDs found.', flags: MessageFlags.Ephemeral });
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        let added = 0, failed = 0;
+        const cc = getChainConfig(guildId);
+        const callerPosition = getMemberChainPosition(interaction.member, cc.chain);
+        let added = 0, failed = 0, denied = 0;
         for (const rid of roleIds) {
           const role = interaction.guild.roles.cache.get(rid);
           if (!role) { failed++; continue; }
+          // Hierarchy: cannot assign a chain role equal to or above your own
+          const chainEntry = cc.chain.find(e => e.roleId === rid);
+          if (chainEntry && (callerPosition === -1 || chainEntry.position >= callerPosition)) {
+            denied++;
+            continue;
+          }
           try { await targetMember.roles.add(role); added++; } catch { failed++; }
         }
-        return interaction.editReply({ content: `✅ Added **${added}** role(s) to **${userDisplay(targetMember.user)}**${failed ? ` (${failed} failed)` : ''}.` });
+        let msg = `✅ Added **${added}** role(s) to **${userDisplay(targetMember.user)}**`;
+        if (denied) msg += `\n❌ **${denied}** role(s) denied — rank too high or equal to yours`;
+        if (failed) msg += `\n⚠️ **${failed}** role(s) failed (missing permissions or role not found)`;
+        return interaction.editReply({ content: msg });
       }
       if (cmd === 'verify') {
         const vc = getVerificationConfig(guildId);
@@ -4623,13 +4829,33 @@ client.on('interactionCreate', async interaction => {
         const isAtTop = currentPosition === cc.chain[cc.chain.length - 1]?.position;
         if (isAtTop) return interaction.editReply({ content: '❌ This member is already at the highest rank in the chain.' });
 
-        // SHR override: spring naar een specifieke rank (moet wel in de chain staan)
+        // ── Hierarchy enforcement ──
+        // The caller can only promote someone to a rank STRICTLY BELOW their own.
+        // SHR bypass is intentionally removed — no exceptions.
+        const callerPosition = getMemberChainPosition(interaction.member, cc.chain);
+        const callerEntry    = callerPosition !== -1 ? cc.chain.find(e => e.position === callerPosition) : null;
+
+        // SHR override: skip to specific rank
         let skipTo = null;
         if (overrideRole) {
           if (!cc.chain.some(e => e.roleId === overrideRole.id)) {
             return interaction.editReply({ content: '❌ That role is not part of the Chain of Command.' });
           }
+          const overrideEntry = cc.chain.find(e => e.roleId === overrideRole.id);
+          // Caller must be strictly above the target rank they want to assign
+          if (callerPosition === -1 || overrideEntry.position >= callerPosition) {
+            const callerRoleName = callerEntry ? (interaction.guild.roles.cache.get(callerEntry.roleId)?.name ?? 'Unknown') : 'None';
+            return interaction.editReply({ content: `❌ You cannot assign a rank equal to or above your own.\n> Your rank: **${callerRoleName}** (position ${callerPosition})\n> Target rank: **${interaction.guild.roles.cache.get(overrideRole.id)?.name}** (position ${overrideEntry.position})` });
+          }
           skipTo = overrideRole.id;
+        } else {
+          // One-step promote: check that the next rank is below the caller's rank
+          const nextEntry = getNextChainRank(currentPosition, cc.chain);
+          if (nextEntry && (callerPosition === -1 || nextEntry.position >= callerPosition)) {
+            const callerRoleName = callerEntry ? (interaction.guild.roles.cache.get(callerEntry.roleId)?.name ?? 'Unknown') : 'None';
+            const nextRoleName   = interaction.guild.roles.cache.get(nextEntry.roleId)?.name ?? 'Unknown';
+            return interaction.editReply({ content: `❌ You cannot promote someone to a rank equal to or above your own.\n> Your rank: **${callerRoleName}** (position ${callerPosition})\n> Next rank: **${nextRoleName}** (position ${nextEntry.position})` });
+          }
         }
 
         const result = await promoteInChain(interaction.guild, targetMember, interaction.user, guildId, skipTo);
@@ -4934,112 +5160,44 @@ client.on('interactionCreate', async interaction => {
 
       if (cmd === 'infract') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const ic = getInfractionConfig(guildId);
+        const targetUser = interaction.options.getUser('user');
+        const infrType   = interaction.options.getString('type'); // 'warning' | 'strike'
+        if (!targetUser) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
 
-        const targetMember = interaction.options.getMember('user');
-        const targetUser   = interaction.options.getUser('user');
-        const infrType     = interaction.options.getString('type'); // 'warning' | 'strike'
-        const infrReason   = interaction.options.getString('reason');
-        if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
-
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-        // Progress one level (max 7 = Termination), regardless of warning/strike choice
-        if (!ic.userStrikes) ic.userStrikes = {};
-        if (!ic.userHistory) ic.userHistory = {};
-        const maxLevel    = INFRACTION_PROGRESSION.length; // 7
-        const currentLevel = ic.userStrikes[targetUser.id] ?? 0;
-        const newLevel    = Math.min(currentLevel + 1, maxLevel);
-        ic.userStrikes[targetUser.id] = newLevel;
-
-        const progEntry  = getProgressionEntry(newLevel);
-        const levelLabel = progEntry.label;
-        const typeLabel  = infrType === 'strike' ? 'Strike' : 'Warning';
-
-        // Update history
-        if (!ic.userHistory[targetUser.id]) ic.userHistory[targetUser.id] = [];
-        ic.userHistory[targetUser.id].push({
-          type: typeLabel, reason: infrReason, moderator: userDisplay(interaction.user),
-          date: new Date().toUTCString(), level: newLevel,
-        });
-
-        // Rol toewijzen volgens progressie level
-        await applyInfractionLevelRole(targetMember, ic, newLevel);
-
-        await saveGuildConfig(guildId);
-
-        // Variabelen
-        const replaceVarsInfr = (text) => {
-          if (!text) return text;
-          return text
-            .replace(/{user}/g,             targetUser.id)
-            .replace(/{userMention}/g,      `<@${targetUser.id}>`)
-            .replace(/{username}/g,         targetUser.username)
-            .replace(/{reason}/g,           infrReason)
-            .replace(/{moderator}/g,        userDisplay(interaction.user))
-            .replace(/{type}/g,             typeLabel)
-            .replace(/{levelLabel}/g,       levelLabel)
-            .replace(/{progressionLevel}/g, `${newLevel}`)
-            .replace(/{maxLevel}/g,         `${maxLevel}`)
-            .replace(/{server}/g,           interaction.guild.name);
-        };
-
-        const isTermination = newLevel >= maxLevel;
-        const levelRoleId   = ic.hierarchy[newLevel - 1]?.roleId;
-
-        // Embed in channel
-        const infrEmbed = new EmbedBuilder()
-          .setTitle(replaceVarsInfr(ic.embedTitle))
-          .setDescription(replaceVarsInfr(ic.embedDescription))
-          .setColor(hexToInt(ic.embedColor))
-          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})${isTermination ? ' — TERMINATION' : ''} • By ${userDisplay(interaction.user)}` })
-          .setTimestamp();
-
-        // Ping de gebruiker in het kanaal
-        await interaction.channel.send({ content: `<@${targetUser.id}>`, embeds: [infrEmbed] }).catch(() => {});
-        await interaction.editReply({ content: `✅ ${typeLabel} issued — user is now at **${levelLabel}** (${newLevel}/${maxLevel}).` });
-
-        // DM naar gebruiker
-        await targetUser.send({ embeds: [new EmbedBuilder()
-          .setTitle(replaceVarsInfr(ic.embedTitle))
-          .setDescription(replaceVarsInfr(ic.dmMessage))
-          .setColor(hexToInt(ic.embedColor))
-          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})` })
-          .setTimestamp()
-        ]}).catch(() => {});
-
-        // Log channel
-        if (ic.logChannel) {
-          const logCh = interaction.guild.channels.cache.get(ic.logChannel);
-          if (logCh) {
-            await logCh.send({ embeds: [new EmbedBuilder()
-              .setTitle(`⚠️ Infraction Logged — ${levelLabel}`)
-              .setColor(hexToInt(ic.embedColor))
-              .addFields(
-                { name: '👤 User',       value: `${userDisplay(targetUser)} (<@${targetUser.id}>)`, inline: true  },
-                { name: '📋 Type',       value: typeLabel,           inline: true  },
-                { name: '📊 Progression', value: `${levelLabel} (${newLevel}/${maxLevel})`, inline: true  },
-                { name: '🎭 Role Given', value: levelRoleId ? `<@&${levelRoleId}>` : '*None*', inline: true },
-                { name: '📝 Reason',     value: infrReason,           inline: false },
-                { name: '👮 Moderator',  value: userDisplay(interaction.user),  inline: true  },
-              )
-              .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-              .setTimestamp()
-            ]}).catch(() => {});
-
-            // Extra termination warning
-            if (isTermination) {
-              await logCh.send({ embeds: [new EmbedBuilder()
-                .setTitle('🚨 Termination Reached')
-                .setColor(0x992D22)
-                .setDescription(replaceVarsInfr(ic.terminationMessage))
-                .setTimestamp()
-              ]}).catch(() => {});
-            }
-          }
-        }
-        return;
+        const isStrike = infrType === 'strike';
+        const modal = new ModalBuilder()
+          .setCustomId(`modal_infract__${infrType}__${targetUser.id}`)
+          .setTitle(isStrike ? '🔴 Issue Strike' : '🟡 Issue Warning');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('infract_reason')
+              .setLabel(`Reason for this ${isStrike ? 'strike' : 'warning'}`)
+              .setStyle(TextInputStyle.Paragraph)
+              .setPlaceholder('Describe the rule violation or behaviour...')
+              .setRequired(true)
+              .setMaxLength(1000)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('infract_evidence')
+              .setLabel('Evidence (optional)')
+              .setStyle(TextInputStyle.Short)
+              .setPlaceholder('Screenshot link, message link, etc.')
+              .setRequired(false)
+              .setMaxLength(500)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('infract_notes')
+              .setLabel('Moderator notes (optional, internal only)')
+              .setStyle(TextInputStyle.Paragraph)
+              .setPlaceholder('Internal notes — not shown to the user')
+              .setRequired(false)
+              .setMaxLength(500)
+          ),
+        );
+        return interaction.showModal(modal);
       }
 
       if (cmd === 'infractions') {
@@ -6513,10 +6671,21 @@ client.on('interactionCreate', async interaction => {
       if (id.startsWith('perms__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const level = id.replace('perms__', '');
-        const labelMap = { admin: 'Admin', mod: 'Mod', staff: 'Staff', shr: 'SHR' };
+        const labelMap = {
+          admin: 'Admin',
+          mod:   'Mod',
+          staff: 'Staff',
+          shr:   'SHR (Full Override)',
+        };
+        const descMap = {
+          shr:   '### ⭐ Select **SHR** roles\n> SHR has **full override** for all commands — no rank restrictions, no permission checks. If left empty, server owner and Admins get full access automatically.',
+          admin: '### 👑 Select **Admin** roles\n> Admins can use setup and configuration commands.',
+          mod:   '### 🛡️ Select **Mod** roles\n> Mods can use moderation commands (ban, kick, mute, warn, etc.).',
+          staff: '### 👤 Select **Staff** roles\n> Staff can use basic commands (close ticket, warn, view infractions, etc.).',
+        };
         if (!labelMap[level]) return;
         return interaction.reply({
-          content: `### 🔐 Select **${labelMap[level]}** roles`,
+          content: descMap[level] ?? `### 🔐 Select **${labelMap[level]}** roles`,
           components: [new ActionRowBuilder().addComponents(
             new RoleSelectMenuBuilder()
               .setCustomId(`perms_save__${level}`)
@@ -6993,23 +7162,54 @@ client.on('interactionCreate', async interaction => {
 
       // ════ CLOSE REQUEST ════
       if (id === 'closereq__accept' || id === 'closereq__deny') {
-        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         const ch = interaction.channel;
         const req = pendingCloseReqs.get(ch.id);
         if (!req) return interaction.reply({ content: '❌ No pending close request.', flags: MessageFlags.Ephemeral });
+
+        // Only the ticket opener can accept or deny
+        const ticketRecord = await getTicketRecord(ch.id).catch(() => null);
+        const openerId = ticketRecord?.userId ?? req.openerID;
+        if (interaction.user.id !== openerId) {
+          return interaction.reply({ content: '❌ Only the ticket opener can accept or deny this close request.', flags: MessageFlags.Ephemeral });
+        }
+
         if (id === 'closereq__deny') {
           pendingCloseReqs.delete(ch.id);
-          return interaction.update({ embeds: [new EmbedBuilder().setTitle('❌ Close Request Denied').setColor(0xED4245).setDescription(`**${userDisplay(interaction.user)}** denied the close request.`).setTimestamp()], components: [] });
+          return interaction.update({ embeds: [new EmbedBuilder()
+            .setTitle('❌ Close Request Denied')
+            .setColor(0xED4245)
+            .setDescription(`**${userDisplay(interaction.user)}** denied the close request.\n\nThis ticket will remain open.`)
+            .setTimestamp()
+          ], components: [] });
         }
+
+        // Accept — close the ticket
         pendingCloseReqs.delete(ch.id);
         const tc = getTicketConfig(guildId);
         if (tc.transcriptChannel) {
           const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
-          if (trCh) { const msgs = await ch.messages.fetch({ limit: 100 }); const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp).map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${userDisplay(m.author)}: ${m.content || '[embed]'}`).join('\n'); await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] }); }
+          if (trCh) {
+            const msgs = await ch.messages.fetch({ limit: 100 });
+            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+              .map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${userDisplay(m.author)}: ${m.content || '[embed]'}`).join('\n');
+            await trCh.send({ embeds: [new EmbedBuilder()
+              .setTitle(`📋 Transcript: ${ch.name}`)
+              .setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``)
+              .addFields({ name: '📝 Close Reason', value: req.reason || 'No reason provided.', inline: false })
+              .setColor(0x5865F2)
+              .setTimestamp()
+            ] });
+          }
         }
         for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
-        await interaction.update({ embeds: [new EmbedBuilder().setTitle('✅ Ticket Closed').setColor(0x57F287).setDescription(`Closed by **${userDisplay(interaction.user)}**. Deleting in 3 seconds...`).setTimestamp()], components: [] });
-        setTimeout(() => ch.delete().catch(() => {}), 3000);
+        await updateTicketRecord(ch.id, { status: 'closed', closedAt: new Date() }).catch(() => {});
+        await interaction.update({ embeds: [new EmbedBuilder()
+          .setTitle('✅ Ticket Closed')
+          .setColor(0x57F287)
+          .setDescription(`Accepted by **${userDisplay(interaction.user)}** (ticket opener).\n\n**Close Reason:** ${req.reason || 'No reason provided.'}\n\nDeleting in 5 seconds...`)
+          .setTimestamp()
+        ], components: [] });
+        setTimeout(() => ch.delete().catch(() => {}), 5000);
         return;
       }
 
@@ -8109,10 +8309,22 @@ client.on('interactionCreate', async interaction => {
         const targetMember = await interaction.guild.members.fetch(targetUserId).catch(() => null);
         if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
         const rp = getRolePermConfig(guildId);
+        const cc = getChainConfig(guildId);
+        const callerPosition = getMemberChainPosition(interaction.member, cc.chain);
         const added = [], denied = [];
         for (const roleId of ids) {
           const role = interaction.guild.roles.cache.get(roleId);
           if (!role) continue;
+
+          // ── Hierarchy enforcement: if the role is a chain role, caller must be strictly above it ──
+          const chainEntry = cc.chain.find(e => e.roleId === roleId);
+          if (chainEntry) {
+            if (callerPosition === -1 || chainEntry.position >= callerPosition) {
+              denied.push(`${role.name} (rank too high)`);
+              continue;
+            }
+          }
+
           const perms = rp[roleId];
           const canAdd = perms?.addRoles?.length
             ? perms.addRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
@@ -8123,7 +8335,7 @@ client.on('interactionCreate', async interaction => {
         }
         let msg = '';
         if (added.length)  msg += `✅ Added: **${added.join(', ')}**\n`;
-        if (denied.length) msg += `❌ No permission: **${denied.join(', ')}**`;
+        if (denied.length) msg += `❌ Not allowed: **${denied.join(', ')}**`;
         return interaction.reply({ content: msg.trim() || '⚠️ Nothing changed.', flags: MessageFlags.Ephemeral });
       }
 
@@ -9289,6 +9501,81 @@ client.on('interactionCreate', async interaction => {
     // ══ MODALS ══
     if (interaction.isModalSubmit()) {
       const mid = interaction.customId;
+
+      // ── Ticket close with reason ──
+      if (mid === 'modal_ticket_close') {
+        const closeRecord = await getTicketRecord(interaction.channel.id).catch(() => null);
+        if (!closeRecord || closeRecord.status === 'closed') {
+          return interaction.reply({ content: '❌ This channel is not an open ticket.', flags: MessageFlags.Ephemeral });
+        }
+        const reason = interaction.fields.getTextInputValue('close_reason').trim();
+        const ch = interaction.channel;
+        await interaction.deferReply();
+        const tc = getTicketConfig(guildId);
+        if (tc.transcriptChannel) {
+          const trCh = interaction.guild.channels.cache.get(tc.transcriptChannel);
+          if (trCh) {
+            const msgs = await ch.messages.fetch({ limit: 100 });
+            const text = msgs.sort((a, b) => a.createdTimestamp - b.createdTimestamp)
+              .map(m => `[${new Date(m.createdTimestamp).toUTCString()}] ${userDisplay(m.author)}: ${m.content || '[embed]'}`).join('\n');
+            await trCh.send({ embeds: [new EmbedBuilder()
+              .setTitle(`📋 Transcript: ${ch.name}`)
+              .setDescription(`\`\`\`\n${text.slice(0, 3900) || 'No messages.'}\n\`\`\``)
+              .addFields({ name: '📝 Close Reason', value: reason, inline: false })
+              .setColor(0x5865F2)
+              .setTimestamp()
+            ] });
+          }
+        }
+        for (const [uid, cid] of openTickets.entries()) { if (cid === ch.id) { openTickets.delete(uid); break; } }
+        pendingCloseReqs.delete(ch.id);
+        await updateTicketRecord(ch.id, { status: 'closed', closedAt: new Date() }).catch(() => {});
+        await logTicketAction(interaction.guild, guildId, 'closed', { channel: ch.id, by: interaction.user.id, extra: reason }).catch(() => {});
+        await interaction.editReply({ embeds: [new EmbedBuilder()
+          .setTitle('🔒 Ticket Closed')
+          .setColor(0xED4245)
+          .addFields(
+            { name: '👮 Closed by', value: userDisplay(interaction.user), inline: true },
+            { name: '📝 Reason',    value: reason,                         inline: false },
+          )
+          .setDescription('This ticket has been closed. Deleting in 5 seconds...')
+          .setTimestamp()
+        ] });
+        setTimeout(() => ch.delete().catch(() => {}), 5000);
+        return;
+      }
+
+      // ── Close request with reason (ticket opener accepts/denies) ──
+      if (mid === 'modal_closerequest') {
+        const closeRecord = await getTicketRecord(interaction.channel.id).catch(() => null);
+        if (!closeRecord || closeRecord.status === 'closed') {
+          return interaction.reply({ content: '❌ This channel is not an open ticket.', flags: MessageFlags.Ephemeral });
+        }
+        const ch = interaction.channel;
+        if (pendingCloseReqs.has(ch.id)) return interaction.reply({ content: '❌ A close request is already pending.', flags: MessageFlags.Ephemeral });
+        const reason = interaction.fields.getTextInputValue('closereq_reason').trim();
+        const openerID = closeRecord?.userId ?? null;
+
+        const embed = new EmbedBuilder()
+          .setTitle('🔒 Close Request')
+          .setColor(0xFEE75C)
+          .setDescription(`**${userDisplay(interaction.user)}** has requested to close this ticket.\n\n**Only the ticket opener can accept or deny this request.**`)
+          .addFields(
+            { name: '📝 Reason',        value: reason,                                                       inline: false },
+            { name: '🎫 Ticket Opener', value: openerID ? `<@${openerID}>` : 'Unknown',                      inline: true  },
+            { name: '👮 Requested by',  value: `<@${interaction.user.id}>`,                                  inline: true  },
+          )
+          .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('closereq__accept').setLabel('Accept & Close').setStyle(ButtonStyle.Danger).setEmoji('✅'),
+          new ButtonBuilder().setCustomId('closereq__deny').setLabel('Deny').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
+        );
+        const msg = await interaction.reply({ embeds: [embed], components: [row], fetchReply: true });
+        pendingCloseReqs.set(ch.id, { requesterId: interaction.user.id, openerID, reason, messageId: msg.id });
+        return;
+      }
+
       if (mid.startsWith('modal_ticketv2type_edit__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const typeId = mid.replace('modal_ticketv2type_edit__', '');
@@ -9789,6 +10076,175 @@ client.on('interactionCreate', async interaction => {
         if (t) vc.panelTitle = t; if (d) vc.panelDescription = d; if (c) vc.panelColor = c; vc.panelImage = im || null;
         await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Updated!', flags: MessageFlags.Ephemeral });
       }
+      // ── Warning modal ──
+      if (mid.startsWith('modal_warn__')) {
+        const targetId = mid.replace('modal_warn__', '');
+        const targetUser   = await client.users.fetch(targetId).catch(() => null);
+        const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+        if (!targetUser) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
+        if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
+
+        const reason   = interaction.fields.getTextInputValue('warn_reason').trim();
+        const evidence = interaction.fields.getTextInputValue('warn_evidence')?.trim() || null;
+
+        await addWarning(guildId, targetId, { reason, evidence, moderator: userDisplay(interaction.user), date: new Date().toUTCString() });
+        const warnCount = getWarnings(guildId, targetId).length;
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        // Public embed in channel
+        const warnEmbed = new EmbedBuilder()
+          .setTitle('⚠️ Warning Issued')
+          .setColor(0xFEE75C)
+          .addFields(
+            { name: '👤 User',         value: `${userDisplay(targetUser)} (<@${targetId}>)`, inline: true },
+            { name: '⚠️ Warning #',   value: `${warnCount}`,                                 inline: true },
+            { name: '📝 Reason',       value: reason,                                         inline: false },
+            ...(evidence ? [{ name: '🔗 Evidence', value: evidence, inline: false }] : []),
+            { name: '👮 Issued by',    value: userDisplay(interaction.user),                  inline: true },
+          )
+          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+          .setTimestamp();
+
+        await interaction.channel.send({ content: `<@${targetId}>`, embeds: [warnEmbed] }).catch(() => {});
+        await interaction.editReply({ content: `✅ Warning issued to **${userDisplay(targetUser)}** (Warning #${warnCount}).` });
+
+        // DM the user
+        await targetUser.send({ embeds: [new EmbedBuilder()
+          .setTitle('⚠️ You received a Warning')
+          .setColor(0xFEE75C)
+          .addFields(
+            { name: '📝 Reason',    value: reason, inline: false },
+            { name: '🏠 Server',    value: interaction.guild.name, inline: true },
+            { name: '⚠️ Warning #', value: `${warnCount}`, inline: true },
+          )
+          .setTimestamp()
+        ] }).catch(() => {});
+        return;
+      }
+
+      // ── Infraction modal (Warning / Strike via progression system) ──
+      if (mid.startsWith('modal_infract__')) {
+        const parts     = mid.split('__'); // ['modal_infract', type, userId]
+        const infrType  = parts[1]; // 'warning' | 'strike'
+        const targetId  = parts[2];
+        const targetUser   = await client.users.fetch(targetId).catch(() => null);
+        const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+        if (!targetUser) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+
+        const infrReason   = interaction.fields.getTextInputValue('infract_reason').trim();
+        const infrEvidence = interaction.fields.getTextInputValue('infract_evidence')?.trim() || null;
+        const infrNotes    = interaction.fields.getTextInputValue('infract_notes')?.trim() || null;
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const ic = getInfractionConfig(guildId);
+        if (!ic.userStrikes)  ic.userStrikes  = {};
+        if (!ic.userHistory)  ic.userHistory  = {};
+
+        const maxLevel     = INFRACTION_PROGRESSION.length;
+        const currentLevel = ic.userStrikes[targetId] ?? 0;
+        const newLevel     = Math.min(currentLevel + 1, maxLevel);
+        ic.userStrikes[targetId] = newLevel;
+
+        const progEntry  = getProgressionEntry(newLevel);
+        const levelLabel = progEntry.label;
+        const typeLabel  = infrType === 'strike' ? 'Strike' : 'Warning';
+        const typeColor  = infrType === 'strike' ? 0xED4245 : 0xFEE75C;
+        const typeIcon   = infrType === 'strike' ? '🔴' : '🟡';
+
+        if (!ic.userHistory[targetId]) ic.userHistory[targetId] = [];
+        ic.userHistory[targetId].push({
+          type: typeLabel, reason: infrReason, evidence: infrEvidence,
+          moderator: userDisplay(interaction.user), date: new Date().toUTCString(), level: newLevel,
+        });
+
+        if (targetMember) await applyInfractionLevelRole(targetMember, ic, newLevel);
+        await saveGuildConfig(guildId);
+
+        const replaceVars = (text) => {
+          if (!text) return text;
+          return text
+            .replace(/{user}/g,             targetId)
+            .replace(/{userMention}/g,      `<@${targetId}>`)
+            .replace(/{username}/g,         targetUser.username)
+            .replace(/{reason}/g,           infrReason)
+            .replace(/{moderator}/g,        userDisplay(interaction.user))
+            .replace(/{type}/g,             typeLabel)
+            .replace(/{levelLabel}/g,       levelLabel)
+            .replace(/{progressionLevel}/g, `${newLevel}`)
+            .replace(/{maxLevel}/g,         `${maxLevel}`)
+            .replace(/{server}/g,           interaction.guild.name);
+        };
+
+        const isTermination = newLevel >= maxLevel;
+        const levelRoleId   = ic.hierarchy[newLevel - 1]?.roleId;
+
+        // Public embed
+        const infrEmbed = new EmbedBuilder()
+          .setTitle(replaceVars(ic.embedTitle) || `${typeIcon} ${typeLabel} — ${levelLabel}`)
+          .setDescription(replaceVars(ic.embedDescription) || null)
+          .setColor(typeColor)
+          .addFields(
+            { name: '👤 User',         value: `${userDisplay(targetUser)} (<@${targetId}>)`,             inline: true },
+            { name: '📋 Type',         value: typeLabel,                                                  inline: true },
+            { name: '📊 Progression',  value: `${levelLabel} (${newLevel}/${maxLevel})`,                 inline: true },
+            ...(levelRoleId ? [{ name: '🎭 Role',   value: `<@&${levelRoleId}>`, inline: true }] : []),
+            { name: '📝 Reason',       value: infrReason,                                                 inline: false },
+            ...(infrEvidence ? [{ name: '🔗 Evidence', value: infrEvidence, inline: false }] : []),
+            { name: '👮 Issued by',    value: userDisplay(interaction.user),                              inline: true },
+          )
+          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})${isTermination ? ' — TERMINATION' : ''}` })
+          .setTimestamp();
+
+        await interaction.channel.send({ content: `<@${targetId}>`, embeds: [infrEmbed] }).catch(() => {});
+        await interaction.editReply({ content: `✅ ${typeLabel} issued — **${userDisplay(targetUser)}** is now at **${levelLabel}** (${newLevel}/${maxLevel}).` });
+
+        // DM the user
+        await targetUser.send({ embeds: [new EmbedBuilder()
+          .setTitle(replaceVars(ic.embedTitle) || `${typeIcon} ${typeLabel} Received`)
+          .setDescription(replaceVars(ic.dmMessage) || `You have received a **${typeLabel}** in **${interaction.guild.name}**.`)
+          .setColor(typeColor)
+          .addFields({ name: '📝 Reason', value: infrReason, inline: false })
+          .setFooter({ text: `${levelLabel} (${newLevel}/${maxLevel})` })
+          .setTimestamp()
+        ] }).catch(() => {});
+
+        // Log channel
+        if (ic.logChannel) {
+          const logCh = interaction.guild.channels.cache.get(ic.logChannel);
+          if (logCh) {
+            const logEmbed = new EmbedBuilder()
+              .setTitle(`${typeIcon} ${typeLabel} Logged — ${levelLabel}`)
+              .setColor(typeColor)
+              .addFields(
+                { name: '👤 User',         value: `${userDisplay(targetUser)} (<@${targetId}>)`,  inline: true  },
+                { name: '📋 Type',         value: typeLabel,                                        inline: true  },
+                { name: '📊 Progression',  value: `${levelLabel} (${newLevel}/${maxLevel})`,       inline: true  },
+                { name: '🎭 Role Given',   value: levelRoleId ? `<@&${levelRoleId}>` : '*None*',   inline: true  },
+                { name: '📝 Reason',       value: infrReason,                                       inline: false },
+                ...(infrEvidence ? [{ name: '🔗 Evidence',       value: infrEvidence, inline: false }] : []),
+                ...(infrNotes    ? [{ name: '🔒 Internal Notes', value: infrNotes,    inline: false }] : []),
+                { name: '👮 Moderator',    value: userDisplay(interaction.user),                    inline: true  },
+              )
+              .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+              .setTimestamp();
+            await logCh.send({ embeds: [logEmbed] }).catch(() => {});
+            if (isTermination) {
+              await logCh.send({ embeds: [new EmbedBuilder()
+                .setTitle('🚨 Termination Reached')
+                .setColor(0x992D22)
+                .setDescription(replaceVars(ic.terminationMessage))
+                .setTimestamp()
+              ] }).catch(() => {});
+            }
+          }
+        }
+        return;
+      }
+
       if (mid === 'modal_erlcconfig') {
         const key = interaction.fields.getTextInputValue('erlc_server_key').trim();
         const ec = getErlcLogConfig(guildId);
