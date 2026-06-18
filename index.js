@@ -2168,7 +2168,7 @@ async function sendNextQuestion(userId, session, appType) {
 async function submitApplication(userId, session, appType, guild) {
   const ac = getApplicationConfig(session.guildId);
 
-  // Determine review channel: type-level override > panel-level override > global
+  // Determine review channel
   let reviewChannelId = ac.reviewChannel;
   if (session.panelId) {
     const panel = ac.panels.find(p => p.id === session.panelId);
@@ -2181,16 +2181,9 @@ async function submitApplication(userId, session, appType, guild) {
   if (!reviewCh) throw new Error('Review channel not found.');
 
   const applicant = await client.users.fetch(userId).catch(() => null);
-
-  const answerFields = appType.questions.map((q, i) => ({
-    name: `❓ ${q.slice(0, 245)}`,
-    value: (session.answers[i] ?? '*No answer*').slice(0, 1000), // iets onder 1024 voor marge
-    inline: false,
-  }));
-
   const appId = genId();
 
-  // Bewaar de submission zodat we later (bij accept/deny) een transcript kunnen sturen
+  // Save submission for accept/deny lookup
   ac.submissions[appId] = {
     userId,
     typeId: appType.id,
@@ -2200,58 +2193,41 @@ async function submitApplication(userId, session, appType, guild) {
   };
   await saveGuildConfig(session.guildId);
 
-  const applicantDisplay = applicant
-    ? `${userDisplay(applicant)} (<@${userId}>)`
-    : `<@${userId}>`;
+  // Build transcript as a .txt file — completely avoids Discord embed size limits
+  const transcriptLines = [
+    `APPLICATION TRANSCRIPT`,
+    `======================`,
+    `ID:        ${appId}`,
+    `Type:      ${appType.label}`,
+    `Applicant: ${applicant ? applicant.tag : userId} (${userId})`,
+    `Submitted: ${new Date().toUTCString()}`,
+    ``,
+    ...appType.questions.map((q, i) => [
+      `Q${i + 1}: ${q}`,
+      `A${i + 1}: ${session.answers[i] ?? '(no answer)'}`,
+      ``,
+    ].join('\n')),
+  ].join('\n');
+  const transcriptFile = new AttachmentBuilder(
+    Buffer.from(transcriptLines, 'utf-8'),
+    { name: `application-${appId}.txt` }
+  );
 
-  const headerFields = [
-    { name: '👤 Applicant', value: applicantDisplay.slice(0, 1000), inline: true },
-    { name: '🆔 User ID',   value: String(userId).slice(0, 1000), inline: true },
-    { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
-  ];
-
-  // Bereken de werkelijke embed character-grootte (alle name + value + title + description + footer)
-  const fieldSize = f => (f.name?.length ?? 0) + (f.value?.length ?? 0);
-  const EMBED_MAX = 5500; // ruime marge onder de 6000 Discord-limiet
-  const MAX_FIELDS = 24;
-
-  const makeTitle = (isFirstEmbed, pg) => isFirstEmbed
-    ? `📋 Nieuwe Sollicitatie — ${appType.emoji || ''} ${appType.label}`.slice(0, 256)
-    : `📋 Sollicitatie (vervolg) — ${appType.label} — Pagina ${pg}`.slice(0, 256);
-  const makeFooter = (isLast, pg) =>
-    `Application ID: ${appId}${!isLast ? ' • Vervolg hieronder ↓' : ''}`.slice(0, 2048);
-
-  const embeds = [];
-  let currentFields = [...headerFields];
-  let isFirst = true;
-  let page = 1;
-  let currentSize = makeTitle(true, 1).length + makeFooter(false, 1).length
-    + headerFields.reduce((s, f) => s + fieldSize(f), 0);
-
-  const flushEmbed = (isLast) => {
-    const eb = new EmbedBuilder()
-      .setTitle(makeTitle(isFirst, page))
-      .setColor(0x5865F2)
-      .addFields(...currentFields)
-      .setFooter({ text: makeFooter(isLast, page) });
-    if (isFirst) { eb.setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null); eb.setTimestamp(); }
-    embeds.push(eb);
-    isFirst = false;
-    page++;
-    currentFields = [];
-    currentSize = makeTitle(false, page).length + makeFooter(false, page).length;
-  };
-
-  for (const field of answerFields) {
-    const fSize = fieldSize(field);
-    // Split naar nieuw embed als we over de limiet gaan of het max aantal velden bereiken
-    if (currentFields.length >= MAX_FIELDS || (currentSize + fSize > EMBED_MAX && currentFields.length > 0)) {
-      flushEmbed(false);
-    }
-    currentFields.push(field);
-    currentSize += fSize;
-  }
-  if (currentFields.length > 0) flushEmbed(true);
+  // Compact header embed (always stays well under 6000 chars)
+  const headerEmbed = new EmbedBuilder()
+    .setTitle(`📋 New Application — ${appType.emoji || ''} ${appType.label}`.slice(0, 256))
+    .setColor(0x5865F2)
+    .addFields(
+      { name: '👤 Applicant', value: `<@${userId}>`,          inline: true },
+      { name: '🆔 User ID',   value: String(userId),          inline: true },
+      { name: '📅 Submitted', value: new Date().toUTCString(), inline: false },
+      { name: '🆔 App ID',    value: `\`${appId}\``,          inline: true },
+      { name: '📝 Questions', value: `${appType.questions.length}`, inline: true },
+    )
+    .setDescription('📄 All answers are in the attached transcript file.')
+    .setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null)
+    .setFooter({ text: `Application ID: ${appId}` })
+    .setTimestamp();
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`app__accept__${userId}__${appType.id}__${appId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
@@ -2259,14 +2235,7 @@ async function submitApplication(userId, session, appType, guild) {
     new ButtonBuilder().setCustomId(`app__deny__${userId}__${appType.id}__${appId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
   );
 
-  // Discord limit: max 10 embeds per message
-  // Stuur eerste batch met buttons, rest zonder (buttons op laatste bericht)
-  const EMBEDS_PER_MSG = 10;
-  for (let i = 0; i < embeds.length; i += EMBEDS_PER_MSG) {
-    const batch = embeds.slice(i, i + EMBEDS_PER_MSG);
-    const isLastBatch = i + EMBEDS_PER_MSG >= embeds.length;
-    await reviewCh.send({ embeds: batch, components: isLastBatch ? [row] : [] });
-  }
+  await reviewCh.send({ embeds: [headerEmbed], files: [transcriptFile], components: [row] });
   return appId;
 }
 
@@ -4007,18 +3976,26 @@ client.on('messageCreate', async message => {
   }
 
   // Record the answer
-  if (content.length > 12000) {
-    await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ **Answer too long!** Max 12,000 characters. Your answer was ${content.length} characters.\n\nPlease shorten your answer and try again.`)] });
+  if (content.length > 4000) {
+    await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setDescription(`❌ **Answer too long!** Max 4,000 characters. Your answer was ${content.length} characters.\n\nPlease shorten your answer and try again.`)] });
     return;
   }
   session.answers.push(content);
+
+  // Delete the user's answer message so it's hidden (ephemeral-style privacy)
+  await message.delete().catch(() => {});
+
   const nextIndex = session.questionIndex + 1;
 
   if (nextIndex < appType.questions.length) {
     // More questions remain
     session.questionIndex = nextIndex;
 
-    await message.channel.send({ embeds: [new EmbedBuilder().setColor(0x57F287).setDescription(`✅ **Answer recorded!**`).setFooter({ text: `${nextIndex}/${appType.questions.length} answered` })] });
+    await message.channel.send({ embeds: [new EmbedBuilder()
+      .setColor(0x57F287)
+      .setDescription(`✅ **Answer recorded and hidden.**`)
+      .setFooter({ text: `${nextIndex}/${appType.questions.length} answered — your answers are private until submission` })
+    ] });
 
     // Send next question
     const sent = await sendNextQuestion(userId, session, appType);
@@ -4031,17 +4008,38 @@ client.on('messageCreate', async message => {
 
     await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xFEE75C).setTitle('⏳ Submitting…').setDescription('All questions answered! Submitting your application…')] });
 
+    // Build transcript text file (avoids ALL embed size limits)
+    const transcriptLines = [
+      `APPLICATION TRANSCRIPT`,
+      `======================`,
+      `Type:      ${appType.label}`,
+      `Applicant: ${message.author.tag} (${userId})`,
+      `Submitted: ${new Date().toUTCString()}`,
+      ``,
+      ...appType.questions.map((q, i) => [
+        `Q${i + 1}: ${q}`,
+        `A${i + 1}: ${session.answers[i] ?? '(no answer)'}`,
+        ``,
+      ].join('\n')),
+    ].join('\n');
+    const transcriptBuffer = Buffer.from(transcriptLines, 'utf-8');
+    const transcriptFile   = new AttachmentBuilder(transcriptBuffer, { name: `application-${userId}-${Date.now()}.txt` });
+
     try {
       const guild = await client.guilds.fetch(session.guildId).catch(() => null);
       if (!guild) throw new Error('Server not found.');
 
       const appId = await submitApplication(userId, session, appType, guild);
 
-      await message.channel.send({ embeds: [new EmbedBuilder()
-        .setTitle('✅ Application Submitted!')
-        .setColor(0x57F287)
-        .setDescription(`Your **${appType.label}** application has been submitted for review.\n\nYou will receive a DM when a decision has been made.\n\n**Application ID:** \`${appId}\``)
-        .setTimestamp()] });
+      // Send transcript to user
+      await message.channel.send({
+        embeds: [new EmbedBuilder()
+          .setTitle('✅ Application Submitted!')
+          .setColor(0x57F287)
+          .setDescription(`Your **${appType.label}** application has been submitted for review.\n\nYou will receive a DM when a decision has been made.\n\n**Application ID:** \`${appId}\`\n\n📄 Your answers are attached below as a transcript.`)
+          .setTimestamp()],
+        files: [transcriptFile],
+      });
 
       // Log
       const logChId = ac.logChannel;
@@ -4058,7 +4056,14 @@ client.on('messageCreate', async message => {
       }
     } catch (e) {
       console.error('App submit error:', e);
-      await message.channel.send({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('❌ Submission Failed').setDescription(`Could not submit your application: **${e.message}**\n\nPlease contact a staff member.`)] });
+      // Even on failure — send transcript to user so answers aren't lost
+      await message.channel.send({
+        embeds: [new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle('❌ Submission Failed')
+          .setDescription(`Could not submit your application: **${e.message}**\n\nPlease contact a staff member.\n\n📄 Your answers are saved in the transcript below so they are not lost.`)],
+        files: [new AttachmentBuilder(transcriptBuffer, { name: `application-failed-${userId}-${Date.now()}.txt` })],
+      });
     }
   }
 });
