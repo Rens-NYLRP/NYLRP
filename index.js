@@ -592,7 +592,11 @@ function getAntipingConfig(guildId) {
     muteMinutes: 5,
     logChannel: null,
     warnMessage: '⚠️ {user}, you are not allowed to ping @everyone or @here in this server.',
+    protectedUsers: [],  // user IDs that cannot be pinged directly
+    protectedRoles: [],  // role IDs — anyone with one of these roles cannot be pinged
   };
+  if (!Array.isArray(gc.antiping.protectedUsers)) gc.antiping.protectedUsers = [];
+  if (!Array.isArray(gc.antiping.protectedRoles)) gc.antiping.protectedRoles = [];
   return gc.antiping;
 }
 
@@ -2570,15 +2574,17 @@ function buildDepartmentsSetupPayload(guildId) {
 function buildAntipingSetupPayload(guildId) {
   const ap = getAntipingConfig(guildId);
   const embed = new EmbedBuilder().setTitle('🔔 Antiping Setup').setColor(0xED4245)
-    .setDescription('Prevent non-staff from using @everyone and @here.\n\n**Actions:** `delete` | `delete+warn` | `delete+mute`')
+    .setDescription('Prevent non-staff from using @everyone/@here, and block direct pings to protected users/roles.\n\n**Actions:** `delete` | `delete+warn` | `delete+mute`')
     .addFields(
-      { name: '✅ Enabled',       value: ap.enabled ? 'Yes' : 'No',                                           inline: true },
-      { name: '⚙️ Action',        value: ap.action || 'delete',                                               inline: true },
-      { name: '⏱️ Mute (min)',    value: `${ap.muteMinutes ?? 5}`,                                            inline: true },
-      { name: '📋 Log Channel',   value: ap.logChannel ? `<#${ap.logChannel}>` : '*Not set*',                 inline: true },
-      { name: '🔑 Exempt Roles',  value: ap.exemptRoles?.length ? ap.exemptRoles.map(r => `<@&${r}>`).join(', ') : '*None (staff auto-exempt)*', inline: false },
-      { name: '📢 Exempt Channels', value: ap.exemptChannels?.length ? ap.exemptChannels.map(c => `<#${c}>`).join(', ') : '*None*', inline: false },
-      { name: '💬 Warn Message',  value: `\`\`\`${String(ap.warnMessage ?? '').slice(0, 100)}\`\`\``,        inline: false },
+      { name: '✅ Enabled',             value: ap.enabled ? 'Yes' : 'No',                                                                             inline: true },
+      { name: '⚙️ Action',              value: ap.action || 'delete',                                                                                 inline: true },
+      { name: '⏱️ Mute (min)',          value: `${ap.muteMinutes ?? 5}`,                                                                              inline: true },
+      { name: '📋 Log Channel',         value: ap.logChannel ? `<#${ap.logChannel}>` : '*Not set*',                                                   inline: true },
+      { name: '🔑 Exempt Roles',        value: ap.exemptRoles?.length ? ap.exemptRoles.map(r => `<@&${r}>`).join(', ') : '*None (staff auto-exempt)*', inline: false },
+      { name: '📢 Exempt Channels',     value: ap.exemptChannels?.length ? ap.exemptChannels.map(c => `<#${c}>`).join(', ') : '*None*',               inline: false },
+      { name: '🛡️ Protected Users',    value: ap.protectedUsers?.length ? ap.protectedUsers.map(u => `<@${u}>`).join(', ') : '*None*',               inline: false },
+      { name: '🛡️ Protected Roles',    value: ap.protectedRoles?.length ? ap.protectedRoles.map(r => `<@&${r}>`).join(', ') : '*None*',              inline: false },
+      { name: '💬 Warn Message',        value: `\`\`\`${String(ap.warnMessage ?? '').slice(0, 100)}\`\`\``,                                     inline: false },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('ap_toggle').setLabel(ap.enabled ? 'Disable' : 'Enable').setStyle(ap.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(ap.enabled ? '🔴' : '🟢'),
@@ -2588,6 +2594,8 @@ function buildAntipingSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('ap_exempt_channels').setLabel('Exempt Channels').setStyle(ButtonStyle.Primary).setEmoji('📢'),
   );
   const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ap_protected_users').setLabel('Protected Users').setStyle(ButtonStyle.Danger).setEmoji('🛡️'),
+    new ButtonBuilder().setCustomId('ap_protected_roles').setLabel('Protected Roles').setStyle(ButtonStyle.Danger).setEmoji('🛡️'),
     new ButtonBuilder().setCustomId('ap_warn_message').setLabel('Warn Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
   );
   return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
@@ -4377,9 +4385,9 @@ client.on('messageCreate', async message => {
   if (!am.enabled || !am.keywords.length) return;
   try {
     const ap = getAntipingConfig(guildId);
-    // Only trigger on direct pings — skip if this message is a reply to another message
-    const isReply = !!message.reference?.messageId;
-    if (ap.enabled && !isReply && (message.content.includes('@everyone') || message.content.includes('@here'))) {
+    if (ap.enabled) {
+      // Only trigger on direct pings — skip if this message is a reply to another message
+      const isReply = !!message.reference?.messageId;
       const member = message.member;
       if (member) {
         const isExempt = hasAnyStaff(member)
@@ -4387,40 +4395,103 @@ client.on('messageCreate', async message => {
           || member.permissions.has(PermissionFlagsBits.MentionEveryone)
           || (ap.exemptRoles?.length && ap.exemptRoles.some(r => member.roles.cache.has(r)))
           || (ap.exemptChannels?.length && ap.exemptChannels.includes(message.channel.id));
+
         if (!isExempt) {
-          // Strip @everyone/@here from the message and resend without the ping going through
-          const stripped = message.content
-            .replace(/@everyone/g, '@\u200beveryone')
-            .replace(/@here/g, '@\u200bhere');
-          await message.delete().catch(() => {});
-          // Resend the message content without the ping (zero-width space breaks the mention)
-          if (stripped.trim()) {
-            await message.channel.send({
-              content: `**${message.author.username}:** ${stripped}`,
-              allowedMentions: { parse: [] },
-            }).catch(() => {});
+          // ── @everyone / @here ──
+          if (!isReply && (message.content.includes('@everyone') || message.content.includes('@here'))) {
+            const stripped = message.content
+              .replace(/@everyone/g, '@\u200beveryone')
+              .replace(/@here/g, '@\u200bhere');
+            await message.delete().catch(() => {});
+            if (stripped.trim()) {
+              await message.channel.send({
+                content: `**${message.author.username}:** ${stripped}`,
+                allowedMentions: { parse: [] },
+              }).catch(() => {});
+            }
+            const warnText = (ap.warnMessage || '⚠️ {user}, you are not allowed to ping @everyone or @here.')
+              .replace(/{user}/g, `<@${message.author.id}>`);
+            const warnMsg = await message.channel.send({ content: warnText, allowedMentions: { parse: [] } }).catch(() => null);
+            if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 5000);
+            if (ap.action === 'delete+warn') {
+              await addWarning(guildId, message.author.id, { reason: 'Antiping: used @everyone/@here', moderator: 'Antiping', date: new Date().toUTCString() });
+            } else if (ap.action === 'delete+mute') {
+              await member.timeout((ap.muteMinutes ?? 5) * 60000, 'Antiping: used @everyone/@here').catch(() => {});
+            }
+            if (ap.logChannel) {
+              const logCh = message.guild.channels.cache.get(ap.logChannel);
+              if (logCh) await logCh.send({ embeds: [new EmbedBuilder()
+                .setTitle('🔔 Antiping Triggered')
+                .setColor(0xED4245)
+                .addFields(
+                  { name: '👤 User',    value: `${userDisplay(message.author)} (<@${message.author.id}>)`, inline: true },
+                  { name: '📢 Channel', value: `<#${message.channel.id}>`,                         inline: true },
+                  { name: '⚙️ Action',  value: ap.action || 'delete',                              inline: true },
+                  { name: '💬 Message', value: message.content.slice(0, 500),                       inline: false },
+                ).setTimestamp()
+              ]}).catch(() => {});
+            }
           }
-          const warnText = (ap.warnMessage || '⚠️ {user}, you are not allowed to ping @everyone or @here.')
-            .replace(/{user}/g, `<@${message.author.id}>`);
-          const warnMsg = await message.channel.send({ content: warnText, allowedMentions: { parse: [] } }).catch(() => null);
-          if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 5000);
-          if (ap.action === 'delete+warn') {
-            await addWarning(guildId, message.author.id, { reason: 'Antiping: used @everyone/@here', moderator: 'Antiping', date: new Date().toUTCString() });
-          } else if (ap.action === 'delete+mute') {
-            await member.timeout((ap.muteMinutes ?? 5) * 60000, 'Antiping: used @everyone/@here').catch(() => {});
-          }
-          if (ap.logChannel) {
-            const logCh = message.guild.channels.cache.get(ap.logChannel);
-            if (logCh) await logCh.send({ embeds: [new EmbedBuilder()
-              .setTitle('🔔 Antiping Triggered')
-              .setColor(0xED4245)
-              .addFields(
-                { name: '👤 User',    value: `${userDisplay(message.author)} (<@${message.author.id}>)`, inline: true },
-                { name: '📢 Channel', value: `<#${message.channel.id}>`,                         inline: true },
-                { name: '⚙️ Action',  value: ap.action || 'delete',                              inline: true },
-                { name: '💬 Message', value: message.content.slice(0, 500),                       inline: false },
-              ).setTimestamp()
-            ]}).catch(() => {});
+
+          // ── Protected users / roles — direct user pings ──
+          const hasProtected = (ap.protectedUsers?.length || ap.protectedRoles?.length) && message.mentions.users.size > 0;
+          if (!isReply && hasProtected) {
+            // Find which mentioned users are protected
+            const blockedPings = [];
+            for (const [uid, mentionedUser] of message.mentions.users) {
+              // Protected by user ID
+              if (ap.protectedUsers?.includes(uid)) {
+                blockedPings.push(uid);
+                continue;
+              }
+              // Protected because they have a protected role
+              if (ap.protectedRoles?.length) {
+                const mentionedMember = message.guild.members.cache.get(uid);
+                if (mentionedMember && ap.protectedRoles.some(rid => mentionedMember.roles.cache.has(rid))) {
+                  blockedPings.push(uid);
+                }
+              }
+            }
+            if (blockedPings.length) {
+              // Resend the message with all protected pings neutralised (zero-width space)
+              let stripped = message.content;
+              for (const uid of blockedPings) {
+                stripped = stripped.replace(new RegExp(`<@!?${uid}>`, 'g'), `@\u200b${message.guild.members.cache.get(uid)?.user.username ?? uid}`);
+              }
+              await message.delete().catch(() => {});
+              if (stripped.trim()) {
+                await message.channel.send({
+                  content: `**${message.author.username}:** ${stripped}`,
+                  allowedMentions: { parse: [] },
+                }).catch(() => {});
+              }
+              const protectedMentions = blockedPings.map(uid => {
+                const m = message.guild.members.cache.get(uid);
+                return m ? userDisplay(m.user) : uid;
+              }).join(', ');
+              const warnText = `⚠️ <@${message.author.id}>, you are not allowed to ping **${protectedMentions}**.`;
+              const warnMsg = await message.channel.send({ content: warnText, allowedMentions: { parse: [] } }).catch(() => null);
+              if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 5000);
+              if (ap.action === 'delete+warn') {
+                await addWarning(guildId, message.author.id, { reason: `Antiping: pinged protected user(s): ${protectedMentions}`, moderator: 'Antiping', date: new Date().toUTCString() });
+              } else if (ap.action === 'delete+mute') {
+                await member.timeout((ap.muteMinutes ?? 5) * 60000, 'Antiping: pinged protected user').catch(() => {});
+              }
+              if (ap.logChannel) {
+                const logCh = message.guild.channels.cache.get(ap.logChannel);
+                if (logCh) await logCh.send({ embeds: [new EmbedBuilder()
+                  .setTitle('🔔 Protected Ping Blocked')
+                  .setColor(0xED4245)
+                  .addFields(
+                    { name: '👤 Sender',          value: `${userDisplay(message.author)} (<@${message.author.id}>)`, inline: true },
+                    { name: '📢 Channel',          value: `<#${message.channel.id}>`,                                inline: true },
+                    { name: '⚙️ Action',           value: ap.action || 'delete',                                     inline: true },
+                    { name: '🛡️ Blocked Pings',   value: blockedPings.map(u => `<@${u}>`).join(', '),               inline: false },
+                    { name: '💬 Message',          value: message.content.slice(0, 500),                             inline: false },
+                  ).setTimestamp()
+                ]}).catch(() => {});
+              }
+            }
           }
         }
       }
@@ -5907,6 +5978,7 @@ client.on('interactionCreate', async interaction => {
               { label: 'Verification', value: 'verification', emoji: '✅' },
               { label: 'Applications', value: 'applications', emoji: '📋' },
               { label: 'Automod', value: 'automod', emoji: '🛡️' },
+              { label: 'Anti-Ping', value: 'antiping', emoji: '🔔' },
               { label: 'Counters', value: 'counters', emoji: '📊' },
               { label: 'Training', value: 'training', emoji: '🎓' },
               { label: 'ERLC Logs', value: 'erlclogs', emoji: '📡' },
@@ -7148,6 +7220,7 @@ client.on('interactionCreate', async interaction => {
           applications:  () => buildApplicationSetupPayload(guildId),
           savedmessages: () => buildSavedMessagesPayload(guildId),
           automod:       () => buildAutomodSetupPayload(guildId),
+          antiping:      () => buildAntipingSetupPayload(guildId),
           counters:      () => buildCounterSetupPayload(guildId),
           training:      () => buildTrainingSetupPayload(guildId),
           erlclogs:      () => buildErlcLogSetupPayload(guildId),
@@ -7418,6 +7491,24 @@ client.on('interactionCreate', async interaction => {
           const modal = new ModalBuilder().setCustomId('modal_ap_warn_message').setTitle('Antiping Warn Message');
           modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('ap_warn_msg').setLabel('Message (use {user})').setStyle(TextInputStyle.Paragraph).setValue(ap.warnMessage || '').setRequired(false).setMaxLength(500)));
           return interaction.showModal(modal);
+        }
+        if (id === 'ap_protected_users') {
+          return interaction.reply({
+            content: '### 🛡️ Select protected users\n*These users cannot be directly pinged by non-exempt members*',
+            components: [new ActionRowBuilder().addComponents(
+              new UserSelectMenuBuilder().setCustomId('apingd_protected_users').setPlaceholder('Select users...').setMinValues(0).setMaxValues(10)
+            )],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (id === 'ap_protected_roles') {
+          return interaction.reply({
+            content: '### 🛡️ Select protected roles\n*Members who have any of these roles cannot be directly pinged by non-exempt members*',
+            components: [new ActionRowBuilder().addComponents(
+              new RoleSelectMenuBuilder().setCustomId('apingd_protected_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10)
+            )],
+            flags: MessageFlags.Ephemeral,
+          });
         }
       }
 
@@ -9012,6 +9103,18 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Exempt roles: ${interaction.values.length ? interaction.values.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
       }
+      if (interaction.customId === 'apingd_protected_users') {
+        const ap = getAntipingConfig(guildId);
+        ap.protectedUsers = interaction.values;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Protected users: ${interaction.values.length ? interaction.values.map(u => `<@${u}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'apingd_protected_roles') {
+        const ap = getAntipingConfig(guildId);
+        ap.protectedRoles = interaction.values;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Protected roles: ${interaction.values.length ? interaction.values.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
+      }
       if (interaction.customId === 'rppd_whitelist_users') {
         const rppW = getRolePingProtectionConfig(guildId);
         if (!rppW.allowedUsers) rppW.allowedUsers = [];
@@ -9444,6 +9547,7 @@ client.on('interactionCreate', async interaction => {
           applications:  () => buildApplicationSetupPayload(guildId),
           savedmessages: () => buildSavedMessagesPayload(guildId),
           automod:       () => buildAutomodSetupPayload(guildId),
+          antiping:      () => buildAntipingSetupPayload(guildId),
           counters:      () => buildCounterSetupPayload(guildId),
           training:      () => buildTrainingSetupPayload(guildId),
           staffreview:   () => buildStaffReviewSetupPayload(guildId),
