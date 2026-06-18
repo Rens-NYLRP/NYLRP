@@ -772,6 +772,46 @@ function getLOAConfig(guildId) {
   return gc.loa;
 }
 
+function getBirthdayConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.birthdays) gc.birthdays = {
+    enabled: true,
+    channel: null,           // announcement channel
+    pingRole: null,          // optional role to ping in announcement
+    message: '🎂 Happy Birthday, {userMention}! 🎉\n\nWe hope you have an amazing day, **{username}**! 🥳',
+    lastPosted: {},          // userId → 'YYYY-MM-DD' (last year this user's birthday was announced, prevents duplicate posts)
+    users: {},               // userId → { month: 1-12, day: 1-31, year: number|null, setAt: ISOString }
+  };
+  if (gc.birthdays.enabled === undefined) gc.birthdays.enabled = true;
+  if (!gc.birthdays.lastPosted) gc.birthdays.lastPosted = {};
+  if (!gc.birthdays.users) gc.birthdays.users = {};
+  return gc.birthdays;
+}
+
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+function formatBirthdayDate(month, day) {
+  return `${MONTH_NAMES[month - 1]} ${day}`;
+}
+
+// Returns a Date object for the next occurrence of this month/day (today or in the future)
+function getNextBirthdayOccurrence(month, day, now = new Date()) {
+  const year = now.getUTCFullYear();
+  let next = new Date(Date.UTC(year, month - 1, day));
+  const todayMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  if (next < todayMidnight) {
+    next = new Date(Date.UTC(year + 1, month - 1, day));
+  }
+  return next;
+}
+
+// Returns the number of days until the next occurrence (0 = today)
+function daysUntilBirthday(month, day, now = new Date()) {
+  const next = getNextBirthdayOccurrence(month, day, now);
+  const todayMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  return Math.round((next - todayMidnight) / 86_400_000);
+}
+
 function getInfractionConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.infractions) gc.infractions = {
@@ -3260,6 +3300,23 @@ const commands = [
     { name: 'list', type: 1, description: 'View all active LOAs' },
     { name: 'end', type: 1, description: '[Staff] End someone\'s LOA early', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   ]},
+  { name: 'birthday', description: 'Birthday system commands', options: [
+    { name: 'set',    type: 1, description: 'Set your birthday', options: [
+      { name: 'month', type: 4, description: 'Birth month', required: true, choices: [
+        { name: 'January', value: 1 }, { name: 'February', value: 2 }, { name: 'March', value: 3 },
+        { name: 'April', value: 4 }, { name: 'May', value: 5 }, { name: 'June', value: 6 },
+        { name: 'July', value: 7 }, { name: 'August', value: 8 }, { name: 'September', value: 9 },
+        { name: 'October', value: 10 }, { name: 'November', value: 11 }, { name: 'December', value: 12 },
+      ]},
+      { name: 'day',   type: 4, description: 'Birth day (1-31)', required: true, min_value: 1, max_value: 31 },
+      { name: 'year',  type: 4, description: 'Birth year (optional, kept private — only used to show age)', required: false, min_value: 1900, max_value: 2020 },
+    ]},
+    { name: 'view',   type: 1, description: 'View a member\'s upcoming birthday', options: [
+      { name: 'user', type: 6, description: 'Who? (default: you)', required: false },
+    ]},
+    { name: 'remove', type: 1, description: 'Remove your saved birthday' },
+    { name: 'list',   type: 1, description: 'View all upcoming birthdays this year' },
+  ]},
   { name: 'setup', description: '[SHR] Open the setup menu' },
   { name: 'erlcconfig', description: '[SHR] Set the ERLC server API key' },
   { name: 'bloxlinkconfig', description: '[SHR] Set the Bloxlink server API key (for in-game role feature)' },
@@ -3508,6 +3565,39 @@ function buildLOASetupPayload(guildId) {
   return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
 }
 
+function buildBirthdaySetupPayload(guildId) {
+  const bc = getBirthdayConfig(guildId);
+  const total = Object.keys(bc.users).length;
+  const upcoming = Object.entries(bc.users)
+    .map(([uid, e]) => ({ uid, ...e, daysUntil: daysUntilBirthday(e.month, e.day) }))
+    .sort((a, b) => a.daysUntil - b.daysUntil)
+    .slice(0, 5);
+
+  const upcomingText = upcoming.length
+    ? upcoming.map(e => `<@${e.uid}> — **${formatBirthdayDate(e.month, e.day)}** (${e.daysUntil === 0 ? '🎉 Today!' : e.daysUntil === 1 ? 'Tomorrow' : `in ${e.daysUntil}d`})`).join('\n')
+    : '*No birthdays saved yet*';
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎂 Birthday System Setup')
+    .setColor(0x5865F2)
+    .setDescription('Staff can set their birthday with `/birthday set`. The bot automatically posts a celebration message on the day.\n\n**Variables:** `{userMention}` `{username}` `{server}`')
+    .addFields(
+      { name: '✅ Enabled',          value: bc.enabled ? 'Yes' : 'No',                              inline: true },
+      { name: '📢 Announce Channel', value: bc.channel ? `<#${bc.channel}>` : '*Not set*',           inline: true },
+      { name: '🔔 Ping Role',        value: bc.pingRole ? `<@&${bc.pingRole}>` : '*None*',           inline: true },
+      { name: '📊 Total Saved',      value: `${total}`,                                              inline: true },
+      { name: '💬 Message',          value: `\`\`\`${String(bc.message).slice(0, 200)}\`\`\``,        inline: false },
+      { name: '🗓️ Next 5 Upcoming',  value: upcomingText,                                            inline: false },
+    );
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('bday__toggle').setLabel(bc.enabled ? 'Disable' : 'Enable').setStyle(bc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(bc.enabled ? '🔴' : '🟢'),
+    new ButtonBuilder().setCustomId('bday__set_channel').setLabel('Announce Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('bday__set_role').setLabel('Ping Role').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
+    new ButtonBuilder().setCustomId('bday__set_message').setLabel('Edit Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
+  );
+  return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
+}
+
 client.once('clientReady', async () => {
   console.log(`✅ Bot online as ${userDisplay(client.user)} | DB: ${dbReady ? '✅ Verbonden' : '❌ Niet verbonden'}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
@@ -3544,6 +3634,39 @@ client.once('clientReady', async () => {
   // ════ SCHEDULED SESSION CHECK ════
   setInterval(() => checkScheduledSessions().catch(console.error), 30_000);
 
+  // ════ STARTUP CHAIN PREFIX SCAN ════
+  // After a short delay (let cache populate), scan all guilds and fix missing prefixes
+  setTimeout(async () => {
+    console.log('🔄 Running startup chain prefix scan...');
+    let fixed = 0;
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const cc = getChainConfig(guild.id);
+        if (!cc.chain.length) continue;
+        const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+        if (!knownPrefixes.length) continue;
+        // Fetch all members (may be large — use chunks if needed)
+        await guild.members.fetch().catch(() => {});
+        for (const member of guild.members.cache.values()) {
+          if (member.user.bot) continue;
+          // Check if this member has any chain role
+          const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
+          if (!hasChainRole) continue;
+          // Check if their nickname already starts with the correct prefix
+          const baseName = member.nickname ?? member.user.username;
+          const ON_DUTY_SUFFIX = ' | On Duty';
+          const workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
+          const alreadyHasCorrectPrefix = knownPrefixes.some(pfx => workingName.startsWith(`${pfx} | `));
+          if (!alreadyHasCorrectPrefix) {
+            await syncChainPrefix(member, guild.id).catch(() => {});
+            fixed++;
+          }
+        }
+      } catch (e) { console.error(`Chain prefix scan error [${guild.name}]:`, e.message); }
+    }
+    console.log(`✅ Chain prefix scan complete — fixed ${fixed} member(s).`);
+  }, 15_000); // 15s delay to let cache settle
+
   // ════ QOTD DAILY SCHEDULER ════
   // Check every minute if it's time to post QOTD
   setInterval(async () => {
@@ -3560,6 +3683,51 @@ client.once('clientReady', async () => {
         if (currentTime !== qc.time) continue;
         await postQOTD(guild, guild.id).catch(e => console.error(`QOTD error [${guild.name}]:`, e));
       } catch { /* skip guild */ }
+    }
+  }, 60_000);
+
+  // ════ BIRTHDAY DAILY SCHEDULER ════
+  // Check every minute (at a fixed time of 09:00 UTC) for birthdays today
+  setInterval(async () => {
+    if (!dbReady) return;
+    const now = new Date();
+    const currentTime = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
+    if (currentTime !== '09:00') return; // post once a day at 09:00 UTC
+    const todayKey = `${now.getUTCFullYear()}-${now.getUTCMonth() + 1}-${now.getUTCDate()}`;
+
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const bc = getBirthdayConfig(guild.id);
+        if (!bc.enabled || !bc.channel) continue;
+        const ch = guild.channels.cache.get(bc.channel);
+        if (!ch) continue;
+
+        for (const [userId, entry] of Object.entries(bc.users)) {
+          if (entry.month !== now.getUTCMonth() + 1 || entry.day !== now.getUTCDate()) continue;
+          if (bc.lastPosted[userId] === todayKey) continue; // already posted today
+
+          const member = await guild.members.fetch(userId).catch(() => null);
+          const vars = {
+            userMention: `<@${userId}>`,
+            username: member ? userDisplay(member.user) : `<@${userId}>`,
+            server: guild.name,
+          };
+          const text = replaceVars(bc.message, vars);
+          await ch.send({
+            content: bc.pingRole ? `<@&${bc.pingRole}>` : undefined,
+            embeds: [new EmbedBuilder()
+              .setTitle('🎂 Happy Birthday!')
+              .setColor(0xFEE75C)
+              .setDescription(text)
+              .setThumbnail(member?.user.displayAvatarURL({ dynamic: true }) ?? null)
+              .setTimestamp()
+            ],
+          }).catch(() => {});
+
+          bc.lastPosted[userId] = todayKey;
+        }
+        await saveGuildConfig(guild.id).catch(() => {});
+      } catch (e) { console.error(`Birthday scheduler error [${guild.name}]:`, e.message); }
     }
   }, 60_000);
 
@@ -4284,6 +4452,10 @@ client.on('guildMemberAdd', async member => {
       if (roles.length) await member.roles.add(roles);
     }
   } catch (e) { console.error('Autorole error:', e); }
+  try {
+    // Sync chain prefix on join (in case they re-join with a stored role)
+    await syncChainPrefix(member, guildId);
+  } catch (e) { console.error('Chain prefix sync on join error:', e); }
   try {
     const wc = getWelcomerConfig(guildId);
     if (!wc.enabled || !wc.channel) return;
@@ -5577,6 +5749,94 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
+      if (cmd === 'birthday') {
+        const sub = interaction.options.getSubcommand();
+        const bc = getBirthdayConfig(guildId);
+
+        if (sub === 'set') {
+          const month = interaction.options.getInteger('month');
+          const day   = interaction.options.getInteger('day');
+          const year  = interaction.options.getInteger('year') ?? null;
+
+          // Validate day for the given month (handles Feb 30 etc.)
+          const daysInMonth = new Date(Date.UTC(2024, month, 0)).getUTCDate(); // 2024 = leap year, allows Feb 29
+          if (day > daysInMonth) {
+            return interaction.reply({ content: `❌ **${MONTH_NAMES[month - 1]}** doesn't have a day ${day}. That month only has ${daysInMonth} days.`, flags: MessageFlags.Ephemeral });
+          }
+
+          bc.users[interaction.user.id] = { month, day, year, setAt: new Date().toISOString() };
+          await saveGuildConfig(guildId);
+
+          return interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('🎂 Birthday Saved!')
+            .setColor(0x57F287)
+            .setDescription(`Your birthday has been set to **${formatBirthdayDate(month, day)}**${year ? ` (${year})` : ''}.\n\nYou'll be celebrated automatically when the day comes around! 🎉`)
+            .setTimestamp()
+          ], flags: MessageFlags.Ephemeral });
+        }
+
+        if (sub === 'remove') {
+          if (!bc.users[interaction.user.id]) {
+            return interaction.reply({ content: '❌ You don\'t have a birthday saved.', flags: MessageFlags.Ephemeral });
+          }
+          delete bc.users[interaction.user.id];
+          delete bc.lastPosted[interaction.user.id];
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: '✅ Your birthday has been removed.', flags: MessageFlags.Ephemeral });
+        }
+
+        if (sub === 'view') {
+          const target = interaction.options.getUser('user') ?? interaction.user;
+          const entry = bc.users[target.id];
+          if (!entry) {
+            return interaction.reply({ content: target.id === interaction.user.id ? '❌ You haven\'t set your birthday yet. Use `/birthday set` to add it!' : `❌ **${userDisplay(target)}** hasn't set their birthday yet.`, flags: MessageFlags.Ephemeral });
+          }
+          const daysUntil = daysUntilBirthday(entry.month, entry.day);
+          const nextOccurrence = getNextBirthdayOccurrence(entry.month, entry.day);
+          let whenText;
+          if (daysUntil === 0) whenText = '🎉 **Today!**';
+          else if (daysUntil === 1) whenText = 'Tomorrow!';
+          else whenText = `In **${daysUntil}** day${daysUntil !== 1 ? 's' : ''} — <t:${Math.floor(nextOccurrence.getTime() / 1000)}:D>`;
+
+          let age = null;
+          if (entry.year) {
+            age = nextOccurrence.getUTCFullYear() - entry.year;
+          }
+
+          const embed = new EmbedBuilder()
+            .setTitle(`🎂 ${userDisplay(target)}'s Birthday`)
+            .setColor(0x5865F2)
+            .addFields(
+              { name: '📅 Date',      value: formatBirthdayDate(entry.month, entry.day), inline: true },
+              { name: '⏳ Upcoming',  value: whenText,                                    inline: true },
+              ...(age ? [{ name: '🎈 Turning', value: `${age}`, inline: true }] : []),
+            )
+            .setThumbnail(target.displayAvatarURL({ dynamic: true }));
+          return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        }
+
+        if (sub === 'list') {
+          const entries = Object.entries(bc.users);
+          if (!entries.length) {
+            return interaction.reply({ content: '❌ No birthdays have been set yet. Use `/birthday set` to add yours!', flags: MessageFlags.Ephemeral });
+          }
+          const withDays = entries.map(([uid, e]) => ({ uid, ...e, daysUntil: daysUntilBirthday(e.month, e.day) }));
+          withDays.sort((a, b) => a.daysUntil - b.daysUntil);
+
+          const lines = withDays.slice(0, 25).map(e => {
+            const when = e.daysUntil === 0 ? '🎉 Today!' : e.daysUntil === 1 ? 'Tomorrow' : `In ${e.daysUntil}d`;
+            return `<@${e.uid}> — **${formatBirthdayDate(e.month, e.day)}** (${when})`;
+          });
+
+          const embed = new EmbedBuilder()
+            .setTitle('🎂 Upcoming Birthdays')
+            .setColor(0x5865F2)
+            .setDescription(lines.join('\n'))
+            .setFooter({ text: `${entries.length} birthday(s) saved${entries.length > 25 ? ' — showing next 25' : ''}` });
+          return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+        }
+      }
+
       if (cmd === 'setup') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         // Department servers get a limited setup menu; main server and unconfigured servers get the full menu
@@ -5624,6 +5884,8 @@ client.on('interactionCreate', async interaction => {
               { label: 'LOA', value: 'loa', emoji: '🏖️' },
               { label: 'Chain of Command', value: 'chainofcommand', emoji: '⛓️' },
               { label: 'Sticky Messages', value: 'stickymessages', emoji: '📌' },
+              { label: 'Ticket Inactivity', value: 'ticketinactivity', emoji: '⏱️' },
+              { label: 'Birthdays', value: 'birthdays', emoji: '🎂' },
             );
           const row = new ActionRowBuilder().addComponents(select);
           const row2 = new ActionRowBuilder().addComponents(select2);
@@ -5668,6 +5930,28 @@ client.on('interactionCreate', async interaction => {
         if (action === 'set_prefix') {
           const modal = new ModalBuilder().setCustomId('modal_loa_prefix').setTitle('LOA Nickname Prefix');
           modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_prefix_val').setLabel('Prefix (e.g. [LOA])').setStyle(TextInputStyle.Short).setValue(lc.prefix ?? '[LOA]').setRequired(true).setMaxLength(20)));
+          return interaction.showModal(modal);
+        }
+      }
+
+      // ════ BIRTHDAY SETUP BUTTONS ════
+      if (interaction.customId.startsWith('bday__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const action = interaction.customId.replace('bday__', '');
+        const bc = getBirthdayConfig(guildId);
+
+        if (action === 'toggle') {
+          bc.enabled = !bc.enabled;
+          await saveGuildConfig(guildId);
+          return interaction.reply({ ...buildBirthdaySetupPayload(guildId) });
+        }
+        if (action === 'set_channel') return interaction.reply({ content: '### 📢 Select the birthday announcement channel', components: [channelDropdown('bdayd_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        if (action === 'set_role') return interaction.reply({ content: '### 🔔 Select a role to ping in birthday announcements (optional)', components: [roleDropdown('bdayd_role', 'Select role...', 0, 1)], flags: MessageFlags.Ephemeral });
+        if (action === 'set_message') {
+          const modal = new ModalBuilder().setCustomId('modal_bday_message').setTitle('Birthday Announcement Message');
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('bday_message_val').setLabel('Message (supports {userMention} {username} {server})').setStyle(TextInputStyle.Paragraph).setValue(bc.message).setRequired(true).setMaxLength(1000)
+          ));
           return interaction.showModal(modal);
         }
       }
@@ -8469,6 +8753,12 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ LOA role set to <@&${ids[0]}>!`, flags: MessageFlags.Ephemeral });
       }
+      if (interaction.customId === 'bdayd_role') {
+        const bc = getBirthdayConfig(guildId);
+        bc.pingRole = ids[0] || null;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: ids[0] ? `✅ Birthday ping role set to <@&${ids[0]}>!` : '✅ Birthday ping role removed.', flags: MessageFlags.Ephemeral });
+      }
       if (interaction.customId === 'load_approval_roles') {
         const lc = getLOAConfig(guildId);
         lc.approvalRoles = ids;
@@ -8508,7 +8798,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       // All other role selects: main server only (department servers can still set overrides)
-      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('sd_ping_roles') && !interaction.customId.startsWith('sd_allowed_roles') && !interaction.customId.startsWith('load_role') && !interaction.customId.startsWith('load_approval_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role') && interaction.customId !== 'erlc_inrole_save') {
+      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('sd_ping_roles') && !interaction.customId.startsWith('sd_allowed_roles') && !interaction.customId.startsWith('load_role') && !interaction.customId.startsWith('load_approval_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role') && interaction.customId !== 'erlc_inrole_save' && interaction.customId !== 'bdayd_role') {
         return interaction.reply({ content: '❌ Role configuration can only be done on the main server.', flags: MessageFlags.Ephemeral });
       }
 
@@ -8864,6 +9154,13 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ LOA log channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
       }
 
+      if (interaction.customId === 'bdayd_channel') {
+        const bc = getBirthdayConfig(guildId);
+        bc.channel = chId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Birthday announcement channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+
       if (interaction.customId === 'inf_log_channel') {
         const ic = getInfractionConfig(guildId);
         ic.logChannel = chId;
@@ -9121,6 +9418,8 @@ client.on('interactionCreate', async interaction => {
           roleping:      () => buildRolePingProtectionSetupPayload(guildId),
           botconfig:     () => buildBotConfigSetupPayload(guildId),
           chainofcommand:() => buildChainSetupPayload(guildId),
+          ticketinactivity: () => buildTicketInactivitySetupPayload(guildId),
+          birthdays:        () => buildBirthdaySetupPayload(guildId),
         };
         const builder = payloadMap[val];
         if (!builder) return interaction.reply({ content: '❌ Unknown category.', flags: MessageFlags.Ephemeral });
@@ -9720,6 +10019,13 @@ client.on('interactionCreate', async interaction => {
         lc.prefix = interaction.fields.getTextInputValue('loa_prefix_val').trim();
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ LOA prefix set to \`${lc.prefix}\`.`, flags: MessageFlags.Ephemeral });
+      }
+
+      if (mid === 'modal_bday_message') {
+        const bc = getBirthdayConfig(guildId);
+        bc.message = interaction.fields.getTextInputValue('bday_message_val').trim();
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: '✅ Birthday message updated!', flags: MessageFlags.Ephemeral });
       }
 
       if (mid === 'modal_inf_embed') {
