@@ -3301,7 +3301,7 @@ const commands = [
     { name: 'end', type: 1, description: '[Staff] End someone\'s LOA early', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   ]},
   { name: 'birthday', description: 'Birthday system commands', options: [
-    { name: 'set',    type: 1, description: 'Set your birthday', options: [
+    { name: 'set',    type: 1, description: 'Set your birthday (SHR: set for someone else)', options: [
       { name: 'month', type: 4, description: 'Birth month', required: true, choices: [
         { name: 'January', value: 1 }, { name: 'February', value: 2 }, { name: 'March', value: 3 },
         { name: 'April', value: 4 }, { name: 'May', value: 5 }, { name: 'June', value: 6 },
@@ -3310,11 +3310,14 @@ const commands = [
       ]},
       { name: 'day',   type: 4, description: 'Birth day (1-31)', required: true, min_value: 1, max_value: 31 },
       { name: 'year',  type: 4, description: 'Birth year (optional, kept private — only used to show age)', required: false, min_value: 1900, max_value: 2020 },
+      { name: 'user',  type: 6, description: '[SHR] Set the birthday for someone else', required: false },
     ]},
     { name: 'view',   type: 1, description: 'View a member\'s upcoming birthday', options: [
       { name: 'user', type: 6, description: 'Who? (default: you)', required: false },
     ]},
-    { name: 'remove', type: 1, description: 'Remove your saved birthday' },
+    { name: 'remove', type: 1, description: 'Remove your saved birthday (SHR: remove for someone else)', options: [
+      { name: 'user', type: 6, description: '[SHR] Remove the birthday for someone else', required: false },
+    ]},
     { name: 'list',   type: 1, description: 'View all upcoming birthdays this year' },
   ]},
   { name: 'setup', description: '[SHR] Open the setup menu' },
@@ -3713,8 +3716,11 @@ client.once('clientReady', async () => {
             server: guild.name,
           };
           const text = replaceVars(bc.message, vars);
+          // Always ping the birthday person; optionally also ping the configured role
+          const pingParts = [`<@${userId}>`];
+          if (bc.pingRole) pingParts.push(`<@&${bc.pingRole}>`);
           await ch.send({
-            content: bc.pingRole ? `<@&${bc.pingRole}>` : undefined,
+            content: pingParts.join(' '),
             embeds: [new EmbedBuilder()
               .setTitle('🎂 Happy Birthday!')
               .setColor(0xFEE75C)
@@ -4371,7 +4377,9 @@ client.on('messageCreate', async message => {
   if (!am.enabled || !am.keywords.length) return;
   try {
     const ap = getAntipingConfig(guildId);
-    if (ap.enabled && (message.content.includes('@everyone') || message.content.includes('@here'))) {
+    // Only trigger on direct pings — skip if this message is a reply to another message
+    const isReply = !!message.reference?.messageId;
+    if (ap.enabled && !isReply && (message.content.includes('@everyone') || message.content.includes('@here'))) {
       const member = message.member;
       if (member) {
         const isExempt = hasAnyStaff(member)
@@ -4380,10 +4388,21 @@ client.on('messageCreate', async message => {
           || (ap.exemptRoles?.length && ap.exemptRoles.some(r => member.roles.cache.has(r)))
           || (ap.exemptChannels?.length && ap.exemptChannels.includes(message.channel.id));
         if (!isExempt) {
+          // Strip @everyone/@here from the message and resend without the ping going through
+          const stripped = message.content
+            .replace(/@everyone/g, '@\u200beveryone')
+            .replace(/@here/g, '@\u200bhere');
           await message.delete().catch(() => {});
+          // Resend the message content without the ping (zero-width space breaks the mention)
+          if (stripped.trim()) {
+            await message.channel.send({
+              content: `**${message.author.username}:** ${stripped}`,
+              allowedMentions: { parse: [] },
+            }).catch(() => {});
+          }
           const warnText = (ap.warnMessage || '⚠️ {user}, you are not allowed to ping @everyone or @here.')
             .replace(/{user}/g, `<@${message.author.id}>`);
-          const warnMsg = await message.channel.send({ content: warnText }).catch(() => null);
+          const warnMsg = await message.channel.send({ content: warnText, allowedMentions: { parse: [] } }).catch(() => null);
           if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 5000);
           if (ap.action === 'delete+warn') {
             await addWarning(guildId, message.author.id, { reason: 'Antiping: used @everyone/@here', moderator: 'Antiping', date: new Date().toUTCString() });
@@ -5757,6 +5776,19 @@ client.on('interactionCreate', async interaction => {
           const month = interaction.options.getInteger('month');
           const day   = interaction.options.getInteger('day');
           const year  = interaction.options.getInteger('year') ?? null;
+          const targetUser = interaction.options.getUser('user') ?? null;
+
+          // SHR check when setting for someone else
+          if (targetUser && targetUser.id !== interaction.user.id) {
+            if (!hasSHR(interaction.member)) {
+              return interaction.reply({ content: '❌ Only SHR can set a birthday for someone else.', flags: MessageFlags.Ephemeral });
+            }
+          }
+
+          const subjectId = targetUser?.id ?? interaction.user.id;
+          const subjectDisplay = targetUser && targetUser.id !== interaction.user.id
+            ? userDisplay(targetUser)
+            : 'Your';
 
           // Validate day for the given month (handles Feb 30 etc.)
           const daysInMonth = new Date(Date.UTC(2024, month, 0)).getUTCDate(); // 2024 = leap year, allows Feb 29
@@ -5764,25 +5796,37 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: `❌ **${MONTH_NAMES[month - 1]}** doesn't have a day ${day}. That month only has ${daysInMonth} days.`, flags: MessageFlags.Ephemeral });
           }
 
-          bc.users[interaction.user.id] = { month, day, year, setAt: new Date().toISOString() };
+          bc.users[subjectId] = { month, day, year, setAt: new Date().toISOString(), setBy: interaction.user.id };
           await saveGuildConfig(guildId);
 
+          const isForOther = targetUser && targetUser.id !== interaction.user.id;
           return interaction.reply({ embeds: [new EmbedBuilder()
             .setTitle('🎂 Birthday Saved!')
             .setColor(0x57F287)
-            .setDescription(`Your birthday has been set to **${formatBirthdayDate(month, day)}**${year ? ` (${year})` : ''}.\n\nYou'll be celebrated automatically when the day comes around! 🎉`)
+            .setDescription(
+              isForOther
+                ? `**${userDisplay(targetUser)}'s** birthday has been set to **${formatBirthdayDate(month, day)}**${year ? ` (${year})` : ''} by ${userDisplay(interaction.user)}.`
+                : `Your birthday has been set to **${formatBirthdayDate(month, day)}**${year ? ` (${year})` : ''}.\n\nYou'll be celebrated automatically when the day comes around! 🎉`
+            )
             .setTimestamp()
           ], flags: MessageFlags.Ephemeral });
         }
 
         if (sub === 'remove') {
-          if (!bc.users[interaction.user.id]) {
-            return interaction.reply({ content: '❌ You don\'t have a birthday saved.', flags: MessageFlags.Ephemeral });
+          // SHR can pass a user option to remove someone else's birthday
+          const targetUser = interaction.options.getUser('user') ?? null;
+          const isForOther = targetUser && targetUser.id !== interaction.user.id;
+          if (isForOther && !hasSHR(interaction.member)) {
+            return interaction.reply({ content: '❌ Only SHR can remove a birthday for someone else.', flags: MessageFlags.Ephemeral });
           }
-          delete bc.users[interaction.user.id];
-          delete bc.lastPosted[interaction.user.id];
+          const subjectId = isForOther ? targetUser.id : interaction.user.id;
+          if (!bc.users[subjectId]) {
+            return interaction.reply({ content: isForOther ? `❌ **${userDisplay(targetUser)}** doesn't have a birthday saved.` : '❌ You don\'t have a birthday saved.', flags: MessageFlags.Ephemeral });
+          }
+          delete bc.users[subjectId];
+          delete bc.lastPosted[subjectId];
           await saveGuildConfig(guildId);
-          return interaction.reply({ content: '✅ Your birthday has been removed.', flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: isForOther ? `✅ Birthday removed for **${userDisplay(targetUser)}**.` : '✅ Your birthday has been removed.', flags: MessageFlags.Ephemeral });
         }
 
         if (sub === 'view') {
