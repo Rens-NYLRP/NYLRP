@@ -2019,12 +2019,24 @@ setInterval(() => {
 
 const ERLC_BASE = 'https://api.policeroleplay.community/v1';
 async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
-  const key = guildId ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY) : process.env.ERLC_API_KEY;
-  const opts = { method, headers: { 'Server-Key': key, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(8000) };
+  const key = guildId
+    ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY)
+    : process.env.ERLC_API_KEY;
+  if (!key) throw new Error('ERLC: No server key configured.');
+  const opts = { method, headers: { 'Server-Key': key, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000) };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${ERLC_BASE}${p}`, opts);
-  if (!res.ok) throw new Error(`ERLC ${res.status}: ${res.statusText}`);
-  return res.json();
+  if (res.status === 422) {
+    // 422 = private server is empty / no active session — not a real error
+    return p.includes('players') ? {} : [];
+  }
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`ERLC ${res.status}: ${errText}`);
+  }
+  const text = await res.text();
+  if (!text || text.trim() === '') return p.includes('players') ? {} : [];
+  try { return JSON.parse(text); } catch { return p.includes('players') ? {} : []; }
 }
 
 function getErlcLogConfig(guildId) {
@@ -2049,10 +2061,10 @@ async function bloxlinkRobloxToDiscord(guildId, robloxId) {
   const bc = getBloxlinkConfig(guildId);
   if (!bc.apiKey) return null;
   const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/roblox-to-discord/${robloxId}`, {
-    headers: { Authorization: bc.apiKey },
+    headers: { 'api-key': bc.apiKey },
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) return null;
+  if (!res.ok) { console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`); return null; }
   const data = await res.json();
   return data?.discordIDs?.length ? data.discordIDs : null;
 }
@@ -3890,7 +3902,7 @@ client.once('clientReady', async () => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
                 const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { Authorization: bc.apiKey },
+                  headers: { 'api-key': bc.apiKey },
                   signal: AbortSignal.timeout(10000),
                 });
                 if (!res.ok) {
@@ -10750,7 +10762,7 @@ client.on('interactionCreate', async interaction => {
         // Test the key
         try {
           const testRes = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/discord-to-roblox/1`, {
-            headers: { Authorization: key },
+            headers: { 'api-key': key },
             signal: AbortSignal.timeout(8000),
           });
           // 404 = user not found but key is valid; 401/403 = bad key
