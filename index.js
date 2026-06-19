@@ -3870,7 +3870,7 @@ client.once('clientReady', async () => {
         if (!ec.enabled) continue;
 
         if (!erlcState.has(guild.id)) {
-          erlcState.set(guild.id, { players: new Set(), kills: new Set(), modCalls: new Set(), cmds: new Set(), bans: new Set() });
+          erlcState.set(guild.id, { players: new Set(), kills: new Set(), modCalls: new Set(), cmds: new Set(), bans: new Set(), firstPoll: true });
         }
         const state = erlcState.get(guild.id);
 
@@ -3931,10 +3931,13 @@ client.once('clientReady', async () => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
                 const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { Authorization: bc.apiKey },
+                  headers: { 'api-key': bc.apiKey },
                   signal: AbortSignal.timeout(10000),
                 });
-                if (!res.ok) return;
+                if (!res.ok) {
+                  console.warn(`[ERLC] Bloxlink roblox-to-discord (remove) ${robloxId} → HTTP ${res.status}`);
+                  return;
+                }
                 const data = await res.json();
                 const discordIds = Array.isArray(data?.discordIDs) ? data.discordIDs : [];
                 for (const discordId of discordIds) {
@@ -3948,13 +3951,14 @@ client.once('clientReady', async () => {
                     await member.setNickname(currentNick.slice(0, -ON_DUTY_SUFFIX.length).slice(0, 32), 'ERLC Off Duty').catch(() => {});
                   }
                 }
-              } catch { /* Bloxlink unavailable */ }
+              } catch (e) { console.warn(`[ERLC] Bloxlink remove error for ${robloxId}: ${e.message}`); }
             };
 
             // ── Joined ──
             for (const [robloxId, p] of currentPlayers) {
               if (!state.players.has(robloxId)) {
-                if (ch) {
+                // On first poll after (re)start: apply role silently — don't spam join messages
+                if (ch && !state.firstPoll) {
                   await ch.send({ embeds: [new EmbedBuilder()
                     .setTitle('📥 Player Joined')
                     .setColor(0x57F287)
@@ -3991,6 +3995,7 @@ client.once('clientReady', async () => {
 
             // Update state
             state.players = currentIds;
+            state.firstPoll = false;
             if (!state.playerNames) state.playerNames = new Map();
             for (const [robloxId, p] of currentPlayers) {
               state.playerNames.set(robloxId, p.username);
