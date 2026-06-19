@@ -2017,7 +2017,7 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000); // elke 5 minuten
 
-const ERLC_BASE = 'https://api.policeroleplay.community/v1';
+const ERLC_BASE = 'https://api.erlc.gg/v1';
 async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
   const key = guildId
     ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY)
