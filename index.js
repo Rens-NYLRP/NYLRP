@@ -3795,6 +3795,75 @@ client.once('clientReady', async () => {
   setTimeout(runChainPrefixSweep, 15_000); // 15s delay to let cache settle on startup
   setInterval(runChainPrefixSweep, 30 * 60_000); // daarna elke 30 minuten als vangnet
 
+  // ════ IN-GAME ROLE RECONCILIATION SWEEP ════
+  // De join/leave-handlers in de ERLC poll-loop reageren op verándering t.o.v. de
+  // vorige poll. Als een poll mislukt, de bot herstart, Bloxlink tijdelijk down
+  // was, of inGameRole pas net is ingesteld, kan iemand de rol missen terwijl ze
+  // wél in-game zijn, of de rol houden terwijl ze allang weg zijn. Deze sweep
+  // herstelt dat structureel: voor elke guild met inGameRole + Bloxlink actief,
+  // wordt de volledige actuele spelerslijst vergeleken met wie de rol heeft, en
+  // wordt het verschil rechtgetrokken. Ook hier geldt: alleen spelers die Bloxlink
+  // daadwerkelijk aan een Discord-account kan koppelen (dus geverifieerd via
+  // Bloxlink) krijgen/houden de rol — kan Bloxlink iemand niet koppelen of faalt
+  // de lookup, dan wordt die persoon als niet-geverifieerd behandeld en verliest
+  // de rol als ze hem hebben.
+  async function runInGameRoleSweep() {
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const ec = getErlcLogConfig(guild.id);
+        if (!ec.inGameRole) continue;
+        const bc = getBloxlinkConfig(guild.id);
+        if (!bc.apiKey) continue;
+
+        const role = guild.roles.cache.get(ec.inGameRole);
+        if (!role) continue;
+
+        // Huidige in-game spelers ophalen
+        const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
+        if (!playersRaw) continue; // ERLC niet bereikbaar — niets aanraken, volgende keer opnieuw proberen
+        const robloxIds = [];
+        for (const p of Object.values(playersRaw)) {
+          const raw = String(p.Player ?? '');
+          const colonIdx = raw.lastIndexOf(':');
+          if (colonIdx === -1) continue;
+          const robloxId = raw.slice(colonIdx + 1).trim();
+          if (robloxId && /^\d+$/.test(robloxId)) robloxIds.push(robloxId);
+        }
+
+        // Roblox ID → Discord ID resolven via Bloxlink voor elke in-game speler.
+        // Kan Bloxlink iemand niet koppelen (geen link of API-fout) dan staat die
+        // speler simpelweg niet in deze set, en wordt verderop als "niet
+        // geverifieerd" behandeld als ze de rol al hadden.
+        const verifiedDiscordIds = new Set();
+        for (const robloxId of robloxIds) {
+          const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId).catch(() => null);
+          if (discordIds) for (const id of discordIds) verifiedDiscordIds.add(id);
+        }
+
+        await guild.members.fetch().catch(() => {});
+
+        // Geverifieerd + in-game → moet de rol hebben
+        for (const discordId of verifiedDiscordIds) {
+          const member = guild.members.cache.get(discordId);
+          if (!member || member.user.bot) continue;
+          if (member.roles.cache.has(ec.inGameRole)) continue;
+          await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC sweep] Could not add in-game role to ${discordId}: ${e.message}`));
+          await syncChainPrefix(member, guild.id);
+        }
+
+        // Heeft de rol maar staat niet (meer) in de geverifieerd+in-game set → eraf
+        for (const member of role.members.values()) {
+          if (member.user.bot) continue;
+          if (verifiedDiscordIds.has(member.id)) continue;
+          await member.roles.remove(ec.inGameRole).catch(() => {});
+          await syncChainPrefix(member, guild.id);
+        }
+      } catch (e) { console.error(`In-game role sweep error [${guild.name}]:`, e.message); }
+    }
+  }
+  setTimeout(runInGameRoleSweep, 20_000); // 20s delay, na de chain prefix sweep
+  setInterval(runInGameRoleSweep, 5 * 60_000); // daarna elke 5 minuten als vangnet
+
   // ════ QOTD DAILY SCHEDULER ════
   // Check every minute if it's time to post QOTD
   setInterval(async () => {
