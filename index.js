@@ -8127,12 +8127,32 @@ client.on('interactionCreate', async interaction => {
           // Set nickname if format is configured
           let newNickname = null;
           if (appType?.nicknameFormat && applicant) {
-            newNickname = appType.nicknameFormat
+            // Bereken de base-naam uit het format (strip eerst alle bekende chain-prefixes
+            // zodat het format zelf geen prefix hoeft te bevatten — voorkomt dubbele prefix)
+            const cc2 = getChainConfig(guildId);
+            const knownPfx = cc2.chain.map(e => e.nicknamePrefix).filter(Boolean);
+            let rawFormatted = appType.nicknameFormat
               .replace(/{user}/g, applicant.user.username)
               .replace(/{username}/g, applicant.user.username)
-              .replace(/{rank}/g, appType.label)
-              .slice(0, 32);
-            await applicant.setNickname(newNickname, `Application accepted: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
+              .replace(/{rank}/g, appType.label);
+            // Strip eventuele prefixes die al in het format zitten (bv. "SM | {user}")
+            let strippedFormatted = rawFormatted;
+            let pfxChanged = true;
+            while (pfxChanged) {
+              pfxChanged = false;
+              for (const pfx of knownPfx) {
+                if (strippedFormatted.startsWith(`${pfx} | `)) {
+                  strippedFormatted = strippedFormatted.slice(`${pfx} | `.length);
+                  pfxChanged = true;
+                }
+              }
+            }
+            // Stel de schone base-naam in; syncChainPrefix voegt daarna de juiste prefix toe
+            await applicant.setNickname(strippedFormatted.slice(0, 32), `Application accepted: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
+            // Sync de chain-prefix op de nieuwe base-naam (voorkomt dubbele prefix bij guildMemberUpdate race)
+            const freshApplicant = await applicant.fetch().catch(() => applicant);
+            await syncChainPrefix(freshApplicant, guildId);
+            newNickname = (await applicant.fetch().catch(() => applicant)).nickname ?? strippedFormatted.slice(0, 32);
           }
 
           const givenRoles = appType?.acceptRoles?.length
