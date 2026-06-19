@@ -1740,7 +1740,9 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     const ON_DUTY_SUFFIX = ' | On Duty';
     let workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
 
-    // Strip ALL known prefixes from the left (handles stacked prefixes like "M | JM | name")
+    // Strip ALL known prefixes from the left — repeated until none remain.
+    // Handles stacked/corrupt nicknames like "CH | COB | CH | naam" by looping
+    // until the front of the string no longer matches any known prefix.
     let changed = true;
     while (changed) {
       changed = false;
@@ -1753,7 +1755,7 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     }
     const cleanName = workingName;
 
-    // Build new nickname
+    // Build the correct nickname: exactly "PREFIX | cleanName" or just "cleanName"
     let newNick;
     if (expectedPrefix) {
       newNick = `${expectedPrefix} | ${cleanName}`;
@@ -1762,6 +1764,9 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     }
     newNick = newNick.slice(0, 32);
 
+    // Always write if the current nickname doesn't exactly match the expected format.
+    // This also corrects already-corrupt nicknames (e.g. "CH | COB | naam") that
+    // happen to survive in Discord even after the roles.set() fix.
     if (newNick !== baseName) await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
 }
@@ -1836,15 +1841,20 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   const newRole = guild.roles.cache.get(targetEntry.roleId);
   if (!newRole) return { success: false, reason: 'Target role not found in server.' };
 
-  // Verwijder alle huidige chain rollen
-  for (const entry of chain) {
-    if (targetMember.roles.cache.has(entry.roleId)) {
-      await targetMember.roles.remove(entry.roleId).catch(() => {});
+  // Verwijder alle huidige chain-rollen en voeg de nieuwe toe in één API-call
+  // zodat er maar één guildMemberUpdate event afgaat (voorkomt dubbele prefix-sync).
+  const chainRoleIds = new Set(chain.map(e => e.roleId));
+  const nonChainRoles = targetMember.roles.cache.filter(r => !chainRoleIds.has(r.id));
+  const newRoleSet = [...nonChainRoles.keys(), newRole.id];
+  await targetMember.roles.set(newRoleSet, `Promoted to ${newRole.name}`).catch(async () => {
+    // Fallback: remove één voor één dan toevoegen (minder ideaal maar werkt altijd)
+    for (const entry of chain) {
+      if (targetMember.roles.cache.has(entry.roleId)) {
+        await targetMember.roles.remove(entry.roleId).catch(() => {});
+      }
     }
-  }
-
-  // Geef nieuwe rank rol
-  await targetMember.roles.add(newRole).catch(() => {});
+    await targetMember.roles.add(newRole).catch(() => {});
+  });
 
   // Sync nickname prefix op basis van hoogste chain-rang
   await syncChainPrefix(targetMember, guildId);
@@ -2125,17 +2135,62 @@ function getBloxlinkConfig(guildId) {
   return gc.bloxlink;
 }
 
+// ════════════════════════════════════════════
+// BLOXLINK RATE-LIMITED QUEUE
+// Bloxlink free tier: ~5 req/s. We sturen max 1 request per 250ms (= 4/s)
+// zodat we nooit tegen de 429-limiet aanlopen. Bij een 429 wachten we de
+// Retry-After header af (of 10s als fallback) en proberen daarna opnieuw.
+// ════════════════════════════════════════════
+const _bloxQueue = [];
+let _bloxRunning = false;
+
+async function _bloxDrainQueue() {
+  if (_bloxRunning) return;
+  _bloxRunning = true;
+  while (_bloxQueue.length > 0) {
+    const { guildId, robloxId, apiKey, resolve } = _bloxQueue.shift();
+    let result = null;
+    let retries = 3;
+    while (retries-- > 0) {
+      try {
+        const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/roblox-to-discord/${robloxId}`, {
+          headers: { Authorization: apiKey },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.status === 429) {
+          const retryAfter = parseInt(res.headers.get('Retry-After') ?? '10', 10);
+          console.warn(`[Bloxlink] Rate limited — wachten ${retryAfter}s (queue: ${_bloxQueue.length} pending)`);
+          await new Promise(r => setTimeout(r, retryAfter * 1000));
+          continue; // retry
+        }
+        if (!res.ok) {
+          console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`);
+          break;
+        }
+        const data = await res.json();
+        result = data?.discordIDs?.length ? data.discordIDs : null;
+        break;
+      } catch (e) {
+        console.warn(`[Bloxlink] fetch error: ${e.message}`);
+        break;
+      }
+    }
+    resolve(result);
+    // 250ms pauze tussen elke request (= max 4 req/s)
+    if (_bloxQueue.length > 0) await new Promise(r => setTimeout(r, 250));
+  }
+  _bloxRunning = false;
+}
+
 // Bloxlink Server API — reverse lookup: Roblox ID -> Discord ID(s) in this guild
-async function bloxlinkRobloxToDiscord(guildId, robloxId) {
+// Alle calls gaan via de rate-limited queue — nooit direct fetch aanroepen.
+function bloxlinkRobloxToDiscord(guildId, robloxId) {
   const bc = getBloxlinkConfig(guildId);
-  if (!bc.apiKey) return null;
-  const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/roblox-to-discord/${robloxId}`, {
-    headers: { Authorization: bc.apiKey },
-    signal: AbortSignal.timeout(8000),
+  if (!bc.apiKey) return Promise.resolve(null);
+  return new Promise(resolve => {
+    _bloxQueue.push({ guildId, robloxId, apiKey: bc.apiKey, resolve });
+    _bloxDrainQueue();
   });
-  if (!res.ok) { console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`); return null; }
-  const data = await res.json();
-  return data?.discordIDs?.length ? data.discordIDs : null;
 }
 
 // ERLC polling state — bijhouden wat we al gezien hebben
@@ -3762,17 +3817,17 @@ client.once('clientReady', async () => {
         if (!cc.chain.length) continue;
         // Fetch all members (may be large — use chunks if needed)
         await guild.members.fetch().catch(() => {});
+        const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
         for (const member of guild.members.cache.values()) {
           if (member.user.bot) continue;
-          // Check if this member has any chain role
-          const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
-          if (!hasChainRole) continue;
-          // Compare against the prefix THIS member specifically should have
-          // (not just "any known prefix" — that would wrongly accept a demoted
-          // member who kept their old, still-valid-for-someone-else prefix)
-          const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
           const baseName = member.nickname ?? member.user.username;
-          const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+          // Skip members whose nickname doesn't contain any known prefix at all — nothing to fix
+          const hasAnyKnownPrefix = knownPrefixes.some(pfx => baseName.startsWith(`${pfx} | `) || baseName === pfx);
+          const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
+          if (!hasChainRole && !hasAnyKnownPrefix) continue;
+
+          // Determine what the nickname SHOULD be
+          const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
           let stripped = baseName;
           let strippedChanged = true;
           while (strippedChanged) {
@@ -4069,57 +4124,36 @@ client.once('clientReady', async () => {
             const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
             const bc = getBloxlinkConfig(guild.id);
 
-            // Helper: apply in-game role via Bloxlink (geen nickname-suffix meer —
-            // de nickname-prefix wordt centraal beheerd door syncChainPrefix)
+            // Helper: apply in-game role via Bloxlink (rate-limited via centrale queue)
             const applyInGameRole = async (robloxId) => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
-                const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { Authorization: bc.apiKey },
-                  signal: AbortSignal.timeout(10000),
-                });
-                if (!res.ok) {
-                  console.warn(`[ERLC] Bloxlink roblox-to-discord ${robloxId} → HTTP ${res.status}`);
-                  return;
-                }
-                const data = await res.json();
-                const discordIds = Array.isArray(data?.discordIDs) ? data.discordIDs : [];
-                if (!discordIds.length) console.warn(`[ERLC] Bloxlink found no Discord IDs for Roblox ID ${robloxId}`);
+                const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
+                if (!discordIds?.length) return;
                 for (const discordId of discordIds) {
                   const member = await guild.members.fetch(discordId).catch(() => null);
                   if (!member) continue;
-                  // Rol alleen toevoegen als hij nog niet aanwezig is (voorkomt onnodige sync-calls)
                   if (member.roles.cache.has(ec.inGameRole)) continue;
                   await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC] Could not add in-game role to ${discordId}: ${e.message}`));
                   await syncChainPrefix(member, guild.id);
                 }
-              } catch (e) { console.warn(`[ERLC] Bloxlink error for ${robloxId}: ${e.message}`); }
+              } catch (e) { console.warn(`[ERLC] applyInGameRole error for ${robloxId}: ${e.message}`); }
             };
 
-            // Helper: remove in-game role via Bloxlink (geen nickname-suffix meer —
-            // de nickname-prefix wordt centraal beheerd door syncChainPrefix)
+            // Helper: remove in-game role via Bloxlink (rate-limited via centrale queue)
             const removeInGameRole = async (robloxId) => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
-                const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { Authorization: bc.apiKey },
-                  signal: AbortSignal.timeout(10000),
-                });
-                if (!res.ok) {
-                  console.warn(`[ERLC] Bloxlink roblox-to-discord (remove) ${robloxId} → HTTP ${res.status}`);
-                  return;
-                }
-                const data = await res.json();
-                const discordIds = Array.isArray(data?.discordIDs) ? data.discordIDs : [];
+                const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
+                if (!discordIds?.length) return;
                 for (const discordId of discordIds) {
                   const member = await guild.members.fetch(discordId).catch(() => null);
                   if (!member) continue;
-                  // Rol alleen verwijderen als hij aanwezig is
                   if (!member.roles.cache.has(ec.inGameRole)) continue;
                   await member.roles.remove(ec.inGameRole).catch(() => {});
                   await syncChainPrefix(member, guild.id);
                 }
-              } catch (e) { console.warn(`[ERLC] Bloxlink remove error for ${robloxId}: ${e.message}`); }
+              } catch (e) { console.warn(`[ERLC] removeInGameRole error for ${robloxId}: ${e.message}`); }
             };
 
             // ── Joined ──
