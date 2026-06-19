@@ -2061,7 +2061,7 @@ async function bloxlinkRobloxToDiscord(guildId, robloxId) {
   const bc = getBloxlinkConfig(guildId);
   if (!bc.apiKey) return null;
   const res = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/roblox-to-discord/${robloxId}`, {
-    headers: { 'api-key': bc.apiKey },
+    headers: { Authorization: bc.apiKey },
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) { console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`); return null; }
@@ -3902,7 +3902,7 @@ client.once('clientReady', async () => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
                 const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { 'api-key': bc.apiKey },
+                  headers: { Authorization: bc.apiKey },
                   signal: AbortSignal.timeout(10000),
                 });
                 if (!res.ok) {
@@ -3931,7 +3931,7 @@ client.once('clientReady', async () => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
                 const res = await fetch(`https://api.blox.link/v4/public/guilds/${guild.id}/roblox-to-discord/${robloxId}`, {
-                  headers: { 'api-key': bc.apiKey },
+                  headers: { Authorization: bc.apiKey },
                   signal: AbortSignal.timeout(10000),
                 });
                 if (!res.ok) {
