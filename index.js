@@ -1995,18 +1995,19 @@ function getFounderRequestConfig(guildId) {
 const pendingVerifications = new Map(); // discordUserId → { code, robloxUsername, robloxId, expires }
 
 // Session TTL cleanup — prevent unbounded growth (Part 9a)
-const APP_SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minuten
+const APP_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 uur totaal
 setInterval(() => {
   const now = Date.now();
   for (const [userId, session] of activeAppSessions.entries()) {
+    // Only expire after 2 hours from session start — no inactivity timeout
     if (now - (session.startedAt ?? 0) > APP_SESSION_TIMEOUT_MS) {
       activeAppSessions.delete(userId);
       client.users.fetch(userId).then(u =>
-        u.send('⏰ Your application session has expired due to inactivity.')
+        u.send('⏰ Your application session has expired (2 hour limit reached). Please start a new application.')
       ).catch(() => {});
     }
   }
-}, 10 * 60 * 1000); // elke 10 minuten
+}, 5 * 60 * 1000); // elke 5 minuten checken
 
 // pendingVerifications cleanup — prevent unbounded growth (Part 9b)
 setInterval(() => {
