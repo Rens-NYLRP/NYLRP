@@ -1687,26 +1687,50 @@ function getMemberChainPosition(member, chain) {
 // Sync the nickname prefix for a member based on their highest chain rank.
 // Rules:
 //  - All known chain prefixes are stripped first (prevents stacking)
-//  - "On Duty" suffix (added by ERLC in-game role) is preserved at the end
-//  - Final format: [PREFIX | ] cleanName [ | On Duty]
+//  - Any leftover "On Duty" suffix from the old system is stripped (cleanup)
+//  - Final format: [PREFIX | ] cleanName
+//
+// LOCK: meerdere triggers (bv. een directe call vanuit de ERLC-handler én het
+// guildMemberUpdate-event dat door diezelfde rolwijziging afgaat) kunnen deze
+// functie vrijwel gelijktijdig aanroepen voor dezelfde persoon. Zonder lock lezen
+// beide aanroepen de nog-niet-bijgewerkte oude nickname en plakken ze allebei een
+// prefix ervoor → "M | M | Naam". Deze lock zorgt dat aanroepen voor dezelfde
+// member na elkaar (nooit gelijktijdig) worden uitgevoerd.
+const _chainPrefixLocks = new Map(); // memberId → Promise
+
 async function syncChainPrefix(member, guildId) {
+  const key = member.id;
+  const prev = _chainPrefixLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(() => _syncChainPrefixUnsafe(member, guildId)).catch(() => {});
+  _chainPrefixLocks.set(key, run);
+  try {
+    await run;
+  } finally {
+    if (_chainPrefixLocks.get(key) === run) _chainPrefixLocks.delete(key);
+  }
+}
+
+async function _syncChainPrefixUnsafe(member, guildId) {
   try {
     const cc = getChainConfig(guildId);
     if (!cc.chain.length) return;
 
+    // Member-object kan inmiddels stale zijn als een vorige aanroep de naam net
+    // wijzigde — haal de actuele staat op zodat we niet op oude data werken.
+    const fresh = await member.fetch().catch(() => member);
+
     // Find the highest chain rank the member holds (chain is ascending, last match = highest)
     let highestEntry = null;
     for (const entry of cc.chain) {
-      if (member.roles.cache.has(entry.roleId)) highestEntry = entry;
+      if (fresh.roles.cache.has(entry.roleId)) highestEntry = entry;
     }
 
-    const baseName = member.nickname ?? member.user.username;
+    const baseName = fresh.nickname ?? fresh.user.username;
     const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
 
-    // Detect and preserve "On Duty" suffix
+    // Strip leftover "On Duty" suffix (oud systeem — niet meer in gebruik)
     const ON_DUTY_SUFFIX = ' | On Duty';
-    const hasOnDuty = baseName.endsWith(ON_DUTY_SUFFIX);
-    let workingName = hasOnDuty ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
+    let workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
 
     // Strip ALL known prefixes from the left (handles stacked prefixes like "M | JM | name")
     let changed = true;
@@ -1728,10 +1752,9 @@ async function syncChainPrefix(member, guildId) {
     } else {
       newNick = cleanName;
     }
-    if (hasOnDuty) newNick += ON_DUTY_SUFFIX;
     newNick = newNick.slice(0, 32);
 
-    if (newNick !== baseName) await member.setNickname(newNick, 'Chain prefix sync').catch(() => {});
+    if (newNick !== baseName) await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
 }
 
@@ -3658,6 +3681,28 @@ client.once('clientReady', async () => {
   // ════ SCHEDULED SESSION CHECK ════
   setInterval(() => checkScheduledSessions().catch(console.error), 30_000);
 
+  // ════ STARTUP CLEANUP: oude "On Duty" suffix verwijderen bij iedereen ════
+  // Dit systeem is uitgefaseerd — deze scan ruimt eenmalig nog bestaande resten op.
+  setTimeout(async () => {
+    console.log('🔄 Running startup "On Duty" suffix cleanup...');
+    const ON_DUTY_SUFFIX = ' | On Duty';
+    let cleaned = 0;
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        await guild.members.fetch().catch(() => {});
+        for (const member of guild.members.cache.values()) {
+          if (member.user.bot) continue;
+          const baseName = member.nickname ?? member.user.username;
+          if (!baseName.endsWith(ON_DUTY_SUFFIX)) continue;
+          const stripped = baseName.slice(0, -ON_DUTY_SUFFIX.length).slice(0, 32);
+          await member.setNickname(stripped, 'Cleanup: On Duty suffix systeem uitgefaseerd').catch(() => {});
+          cleaned++;
+        }
+      } catch (e) { console.error(`On Duty cleanup error [${guild.name}]:`, e.message); }
+    }
+    console.log(`✅ "On Duty" suffix cleanup complete — cleaned ${cleaned} member(s).`);
+  }, 10_000); // 10s delay, draait vóór de chain prefix scan
+
   // ════ STARTUP CHAIN PREFIX SCAN ════
   // After a short delay (let cache populate), scan all guilds and fix missing prefixes
   setTimeout(async () => {
@@ -3678,9 +3723,7 @@ client.once('clientReady', async () => {
           if (!hasChainRole) continue;
           // Check if their nickname already starts with the correct prefix
           const baseName = member.nickname ?? member.user.username;
-          const ON_DUTY_SUFFIX = ' | On Duty';
-          const workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
-          const alreadyHasCorrectPrefix = knownPrefixes.some(pfx => workingName.startsWith(`${pfx} | `));
+          const alreadyHasCorrectPrefix = knownPrefixes.some(pfx => baseName.startsWith(`${pfx} | `));
           if (!alreadyHasCorrectPrefix) {
             await syncChainPrefix(member, guild.id).catch(() => {});
             fixed++;
@@ -3895,9 +3938,9 @@ client.once('clientReady', async () => {
             const currentIds = new Set(currentPlayers.keys());
             const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
             const bc = getBloxlinkConfig(guild.id);
-            const ON_DUTY_SUFFIX = ' | On Duty';
 
-            // Helper: apply in-game role + On Duty suffix via Bloxlink
+            // Helper: apply in-game role via Bloxlink (geen nickname-suffix meer —
+            // de nickname-prefix wordt centraal beheerd door syncChainPrefix)
             const applyInGameRole = async (robloxId) => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
@@ -3915,18 +3958,16 @@ client.once('clientReady', async () => {
                 for (const discordId of discordIds) {
                   const member = await guild.members.fetch(discordId).catch(() => null);
                   if (!member) continue;
-                  // Add role
+                  // Rol alleen toevoegen als hij nog niet aanwezig is (voorkomt onnodige sync-calls)
+                  if (member.roles.cache.has(ec.inGameRole)) continue;
                   await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC] Could not add in-game role to ${discordId}: ${e.message}`));
-                  // Add On Duty suffix to nickname
-                  const currentNick = member.nickname ?? member.user.username;
-                  if (!currentNick.endsWith(ON_DUTY_SUFFIX)) {
-                    await member.setNickname((currentNick + ON_DUTY_SUFFIX).slice(0, 32), 'ERLC On Duty').catch(() => {});
-                  }
+                  await syncChainPrefix(member, guild.id);
                 }
               } catch (e) { console.warn(`[ERLC] Bloxlink error for ${robloxId}: ${e.message}`); }
             };
 
-            // Helper: remove in-game role + On Duty suffix via Bloxlink
+            // Helper: remove in-game role via Bloxlink (geen nickname-suffix meer —
+            // de nickname-prefix wordt centraal beheerd door syncChainPrefix)
             const removeInGameRole = async (robloxId) => {
               if (!ec.inGameRole || !bc.apiKey) return;
               try {
@@ -3943,13 +3984,10 @@ client.once('clientReady', async () => {
                 for (const discordId of discordIds) {
                   const member = await guild.members.fetch(discordId).catch(() => null);
                   if (!member) continue;
-                  // Remove role
+                  // Rol alleen verwijderen als hij aanwezig is
+                  if (!member.roles.cache.has(ec.inGameRole)) continue;
                   await member.roles.remove(ec.inGameRole).catch(() => {});
-                  // Remove On Duty suffix
-                  const currentNick = member.nickname ?? member.user.username;
-                  if (currentNick.endsWith(ON_DUTY_SUFFIX)) {
-                    await member.setNickname(currentNick.slice(0, -ON_DUTY_SUFFIX.length).slice(0, 32), 'ERLC Off Duty').catch(() => {});
-                  }
+                  await syncChainPrefix(member, guild.id);
                 }
               } catch (e) { console.warn(`[ERLC] Bloxlink remove error for ${robloxId}: ${e.message}`); }
             };
