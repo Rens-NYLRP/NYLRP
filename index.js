@@ -2023,7 +2023,7 @@ async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
     ? (getErlcLogConfig(guildId).serverKey || process.env.ERLC_API_KEY)
     : process.env.ERLC_API_KEY;
   if (!key) throw new Error('ERLC: No server key configured.');
-  const opts = { method, headers: { 'Server-Key': key, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000) };
+  const opts = { method, headers: { 'Server-Key': key, 'Content-Type': 'application/json', 'User-Agent': 'NYLRP-Utilities-Bot/1.0 (+https://discord.com)' }, signal: AbortSignal.timeout(10000) };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${ERLC_BASE}${p}`, opts);
   if (res.status === 422) {
