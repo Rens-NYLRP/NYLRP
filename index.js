@@ -1684,6 +1684,17 @@ function getMemberChainPosition(member, chain) {
   return -1;
 }
 
+// Geeft de prefix terug die een member zou MOETEN hebben op basis van hun
+// hoogste chain-rang (null als ze geen rang met prefix hebben). Gedeeld door
+// syncChainPrefix en de prefix-scans zodat "correct" overal hetzelfde betekent.
+function getExpectedChainPrefix(member, chain) {
+  let highestEntry = null;
+  for (const entry of chain) {
+    if (member.roles.cache.has(entry.roleId)) highestEntry = entry;
+  }
+  return highestEntry?.nicknamePrefix ?? null;
+}
+
 // Sync the nickname prefix for a member based on their highest chain rank.
 // Rules:
 //  - All known chain prefixes are stripped first (prevents stacking)
@@ -1720,10 +1731,7 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     const fresh = await member.fetch().catch(() => member);
 
     // Find the highest chain rank the member holds (chain is ascending, last match = highest)
-    let highestEntry = null;
-    for (const entry of cc.chain) {
-      if (fresh.roles.cache.has(entry.roleId)) highestEntry = entry;
-    }
+    const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
 
     const baseName = fresh.nickname ?? fresh.user.username;
     const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
@@ -1747,8 +1755,8 @@ async function _syncChainPrefixUnsafe(member, guildId) {
 
     // Build new nickname
     let newNick;
-    if (highestEntry?.nicknamePrefix) {
-      newNick = `${highestEntry.nicknamePrefix} | ${cleanName}`;
+    if (expectedPrefix) {
+      newNick = `${expectedPrefix} | ${cleanName}`;
     } else {
       newNick = cleanName;
     }
@@ -1756,6 +1764,44 @@ async function _syncChainPrefixUnsafe(member, guildId) {
 
     if (newNick !== baseName) await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
+}
+
+// Re-sync every member who holds a given role's nickname. Used after the chain
+// config itself changes (rank added or its prefix edited) — those actions only
+// touch stored config, not member nicknames, so without this the prefix on
+// existing holders would silently go stale until the next bot restart.
+async function resyncMembersWithRole(guild, roleId, guildId) {
+  try {
+    await guild.members.fetch().catch(() => {});
+    const role = guild.roles.cache.get(roleId);
+    const members = role ? role.members : guild.members.cache.filter(m => m.roles.cache.has(roleId));
+    for (const member of members.values()) {
+      if (member.user.bot) continue;
+      await syncChainPrefix(member, guildId);
+    }
+  } catch (e) { console.error('resyncMembersWithRole error:', e.message); }
+}
+
+// Strip a specific (no longer known) prefix from every member's nickname, then
+// run a normal sync. Needed when a rank is removed from the chain: its prefix
+// text is gone from cc.chain, so syncChainPrefix's "known prefixes" strip can
+// no longer recognize and remove it on its own — we have to pass it in explicitly.
+async function resyncAfterRankRemoval(guild, removedPrefix, guildId) {
+  try {
+    await guild.members.fetch().catch(() => {});
+    for (const member of guild.members.cache.values()) {
+      if (member.user.bot) continue;
+      if (removedPrefix) {
+        const baseName = member.nickname ?? member.user.username;
+        if (baseName.startsWith(`${removedPrefix} | `)) {
+          const stripped = baseName.slice(`${removedPrefix} | `.length).slice(0, 32);
+          await member.setNickname(stripped, 'Chain rank removed').catch(() => {});
+        }
+      }
+      // Re-run a normal sync afterwards in case they hold another chain rank
+      await syncChainPrefix(member, guildId);
+    }
+  } catch (e) { console.error('resyncAfterRankRemoval error:', e.message); }
 }
 
 // Geeft de volgende rank in de chain terug, null als al hoogste
@@ -3703,17 +3749,17 @@ client.once('clientReady', async () => {
     console.log(`✅ "On Duty" suffix cleanup complete — cleaned ${cleaned} member(s).`);
   }, 10_000); // 10s delay, draait vóór de chain prefix scan
 
-  // ════ STARTUP CHAIN PREFIX SCAN ════
-  // After a short delay (let cache populate), scan all guilds and fix missing prefixes
-  setTimeout(async () => {
-    console.log('🔄 Running startup chain prefix scan...');
+  // ════ CHAIN PREFIX SWEEP ════
+  // Runs once shortly after startup, then repeats periodically as a safety net —
+  // catches anything the event-driven sync could miss (manual nickname edits,
+  // role changes made while the bot was offline, edge cases, etc).
+  async function runChainPrefixSweep() {
+    console.log('🔄 Running chain prefix sweep...');
     let fixed = 0;
     for (const guild of client.guilds.cache.values()) {
       try {
         const cc = getChainConfig(guild.id);
         if (!cc.chain.length) continue;
-        const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
-        if (!knownPrefixes.length) continue;
         // Fetch all members (may be large — use chunks if needed)
         await guild.members.fetch().catch(() => {});
         for (const member of guild.members.cache.values()) {
@@ -3721,18 +3767,33 @@ client.once('clientReady', async () => {
           // Check if this member has any chain role
           const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
           if (!hasChainRole) continue;
-          // Check if their nickname already starts with the correct prefix
+          // Compare against the prefix THIS member specifically should have
+          // (not just "any known prefix" — that would wrongly accept a demoted
+          // member who kept their old, still-valid-for-someone-else prefix)
+          const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
           const baseName = member.nickname ?? member.user.username;
-          const alreadyHasCorrectPrefix = knownPrefixes.some(pfx => baseName.startsWith(`${pfx} | `));
-          if (!alreadyHasCorrectPrefix) {
+          const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+          let stripped = baseName;
+          let strippedChanged = true;
+          while (strippedChanged) {
+            strippedChanged = false;
+            for (const pfx of knownPrefixes) {
+              if (stripped.startsWith(`${pfx} | `)) { stripped = stripped.slice(`${pfx} | `.length); strippedChanged = true; }
+            }
+          }
+          const expectedName = (expectedPrefix ? `${expectedPrefix} | ${stripped}` : stripped).slice(0, 32);
+          const isCorrect = expectedName === baseName;
+          if (!isCorrect) {
             await syncChainPrefix(member, guild.id).catch(() => {});
             fixed++;
           }
         }
-      } catch (e) { console.error(`Chain prefix scan error [${guild.name}]:`, e.message); }
+      } catch (e) { console.error(`Chain prefix sweep error [${guild.name}]:`, e.message); }
     }
-    console.log(`✅ Chain prefix scan complete — fixed ${fixed} member(s).`);
-  }, 15_000); // 15s delay to let cache settle
+    console.log(`✅ Chain prefix sweep complete — fixed ${fixed} member(s).`);
+  }
+  setTimeout(runChainPrefixSweep, 15_000); // 15s delay to let cache settle on startup
+  setInterval(runChainPrefixSweep, 30 * 60_000); // daarna elke 30 minuten als vangnet
 
   // ════ QOTD DAILY SCHEDULER ════
   // Check every minute if it's time to post QOTD
@@ -8859,6 +8920,9 @@ client.on('interactionCreate', async interaction => {
         cc.chain.push({ roleId, position: maxPosition + 1 });
         cc.chain.sort((a, b) => a.position - b.position);
         await saveGuildConfig(guildId);
+        // Bestaande houders van deze rol direct syncen (anders blijft hun naam
+        // verouderd tot de eerstvolgende rolwijziging of bot-herstart)
+        resyncMembersWithRole(interaction.guild, roleId, guildId).catch(() => {});
         const role = interaction.guild.roles.cache.get(roleId);
         return interaction.reply({
           content: `✅ **${role?.name ?? roleId}** added to the chain at position **${maxPosition + 1}**!\n\nUse **Move Up/Down** to reorder.`,
@@ -9752,10 +9816,15 @@ client.on('interactionCreate', async interaction => {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const cc = getChainConfig(guildId);
         const role = interaction.guild.roles.cache.get(val);
+        const removedEntry = cc.chain.find(e => e.roleId === val);
+        const removedPrefix = removedEntry?.nicknamePrefix ?? null;
         cc.chain = cc.chain.filter(e => e.roleId !== val);
         // Hernum posities
         cc.chain.forEach((e, i) => { e.position = i + 1; });
         await saveGuildConfig(guildId);
+        // Verwijderde prefix actief van iedereen strippen (anders blijft 'm hangen,
+        // want de "known prefixes" check in syncChainPrefix kent deze tekst niet meer)
+        resyncAfterRankRemoval(interaction.guild, removedPrefix, guildId).catch(() => {});
         return interaction.reply({ content: `✅ **${role?.name ?? val}** removed from the chain.`, flags: MessageFlags.Ephemeral });
       }
 
@@ -10268,9 +10337,13 @@ client.on('interactionCreate', async interaction => {
         const cc = getChainConfig(guildId);
         const entry = cc.chain.find(e => e.roleId === roleId);
         if (!entry) return interaction.reply({ content: '❌ Rank not found.', flags: MessageFlags.Ephemeral });
+        const oldPrefix = entry.nicknamePrefix ?? null;
         const prefix = interaction.fields.getTextInputValue('coc_prefix_val').trim();
         entry.nicknamePrefix = prefix || null;
         await saveGuildConfig(guildId);
+        // Bestaande houders krijgen direct de nieuwe prefix — eerst de oude tekst
+        // strippen (die staat niet meer in "known prefixes" zodra hij overschreven is)
+        resyncAfterRankRemoval(interaction.guild, oldPrefix, guildId).catch(() => {});
         const role = interaction.guild.roles.cache.get(roleId);
         return interaction.reply({
           content: prefix
