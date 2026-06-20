@@ -1726,43 +1726,25 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     const cc = getChainConfig(guildId);
     if (!cc.chain.length) return;
 
-    // Member-object kan inmiddels stale zijn als een vorige aanroep de naam net
-    // wijzigde — haal de actuele staat op zodat we niet op oude data werken.
     const fresh = await member.fetch().catch(() => member);
 
-    // Find the highest chain rank the member holds (chain is ascending, last match = highest)
+    // Bepaal welk prefix deze member hoort te hebben (hoogste chain-rang)
     const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
 
-    const baseName = fresh.nickname ?? fresh.user.username;
-    const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
+    // Haal de Roblox-gebruikersnaam op uit de verificatiedata — dit is altijd de
+    // basis van de nickname. Als er geen verificatie is, gebruik de Discord username.
+    const vc = getVerificationConfig(guildId);
+    const robloxName = vc?.verifiedUsers?.[fresh.user.id]?.robloxUsername ?? fresh.user.username;
 
-    // Strip leftover "On Duty" suffix (oud systeem — niet meer in gebruik)
-    const ON_DUTY_SUFFIX = ' | On Duty';
-    let workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
+    // De gewenste nickname is altijd: "{Prefix} | {RobloxNaam}" of alleen "{RobloxNaam}"
+    const newNick = expectedPrefix
+      ? `${expectedPrefix} | ${robloxName}`.slice(0, 32)
+      : robloxName.slice(0, 32);
 
-    // Strip ALL known prefixes from the left (handles stacked prefixes like "M | JM | name")
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const pfx of knownPrefixes) {
-        if (workingName.startsWith(`${pfx} | `)) {
-          workingName = workingName.slice(`${pfx} | `.length);
-          changed = true;
-        }
-      }
+    const currentNick = fresh.nickname ?? fresh.user.username;
+    if (newNick !== currentNick) {
+      await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
     }
-    const cleanName = workingName;
-
-    // Build new nickname
-    let newNick;
-    if (expectedPrefix) {
-      newNick = `${expectedPrefix} | ${cleanName}`;
-    } else {
-      newNick = cleanName;
-    }
-    newNick = newNick.slice(0, 32);
-
-    if (newNick !== baseName) await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
 }
 
@@ -4190,7 +4172,6 @@ client.once('clientReady', async () => {
 
             // Update state
             state.players = currentIds;
-            state.firstPoll = false;
             if (!state.playerNames) state.playerNames = new Map();
             for (const [robloxId, p] of currentPlayers) {
               state.playerNames.set(robloxId, p.username);
@@ -4282,6 +4263,8 @@ client.once('clientReady', async () => {
             }
           }
         }
+        // firstPoll pas op false zetten NADAT alle initiële data geseed is
+        state.firstPoll = false;
 
       } catch (e) { /* silently skip guild on error */ }
     }
