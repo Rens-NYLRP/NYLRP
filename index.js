@@ -3790,30 +3790,22 @@ client.once('clientReady', async () => {
       try {
         const cc = getChainConfig(guild.id);
         if (!cc.chain.length) continue;
-        // Fetch all members (may be large — use chunks if needed)
+        const vc = getVerificationConfig(guild.id);
         await guild.members.fetch().catch(() => {});
         for (const member of guild.members.cache.values()) {
           if (member.user.bot) continue;
-          // Check if this member has any chain role
           const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
           if (!hasChainRole) continue;
-          // Compare against the prefix THIS member specifically should have
-          // (not just "any known prefix" — that would wrongly accept a demoted
-          // member who kept their old, still-valid-for-someone-else prefix)
+
+          // Bereken wat de nickname MOET zijn: {Prefix} | {RobloxNaam}
           const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
-          const baseName = member.nickname ?? member.user.username;
-          const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
-          let stripped = baseName;
-          let strippedChanged = true;
-          while (strippedChanged) {
-            strippedChanged = false;
-            for (const pfx of knownPrefixes) {
-              if (stripped.startsWith(`${pfx} | `)) { stripped = stripped.slice(`${pfx} | `.length); strippedChanged = true; }
-            }
-          }
-          const expectedName = (expectedPrefix ? `${expectedPrefix} | ${stripped}` : stripped).slice(0, 32);
-          const isCorrect = expectedName === baseName;
-          if (!isCorrect) {
+          const robloxName = vc?.verifiedUsers?.[member.user.id]?.robloxUsername ?? member.user.username;
+          const expectedNick = expectedPrefix
+            ? `${expectedPrefix} | ${robloxName}`.slice(0, 32)
+            : robloxName.slice(0, 32);
+
+          const currentNick = member.nickname ?? member.user.username;
+          if (currentNick !== expectedNick) {
             await syncChainPrefix(member, guild.id).catch(() => {});
             fixed++;
           }
@@ -3822,8 +3814,8 @@ client.once('clientReady', async () => {
     }
     console.log(`✅ Chain prefix sweep complete — fixed ${fixed} member(s).`);
   }
-  setTimeout(runChainPrefixSweep, 15_000); // 15s delay to let cache settle on startup
-  setInterval(runChainPrefixSweep, 30 * 60_000); // daarna elke 30 minuten als vangnet
+  setTimeout(runChainPrefixSweep, 15_000); // 15s delay on startup
+  setInterval(runChainPrefixSweep, 5 * 60_000); // elke 5 minuten
 
   // ════ IN-GAME ROLE RECONCILIATION SWEEP ════
   // De join/leave-handlers in de ERLC poll-loop reageren op verándering t.o.v. de
