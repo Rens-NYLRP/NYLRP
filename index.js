@@ -1740,9 +1740,7 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     const ON_DUTY_SUFFIX = ' | On Duty';
     let workingName = baseName.endsWith(ON_DUTY_SUFFIX) ? baseName.slice(0, -ON_DUTY_SUFFIX.length) : baseName;
 
-    // Strip ALL known prefixes from the left — repeated until none remain.
-    // Handles stacked/corrupt nicknames like "CH | COB | CH | naam" by looping
-    // until the front of the string no longer matches any known prefix.
+    // Strip ALL known prefixes from the left (handles stacked prefixes like "M | JM | name")
     let changed = true;
     while (changed) {
       changed = false;
@@ -1755,7 +1753,7 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     }
     const cleanName = workingName;
 
-    // Build the correct nickname: exactly "PREFIX | cleanName" or just "cleanName"
+    // Build new nickname
     let newNick;
     if (expectedPrefix) {
       newNick = `${expectedPrefix} | ${cleanName}`;
@@ -1764,9 +1762,6 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     }
     newNick = newNick.slice(0, 32);
 
-    // Always write if the current nickname doesn't exactly match the expected format.
-    // This also corrects already-corrupt nicknames (e.g. "CH | COB | naam") that
-    // happen to survive in Discord even after the roles.set() fix.
     if (newNick !== baseName) await fresh.setNickname(newNick, 'Chain prefix sync').catch(() => {});
   } catch {}
 }
@@ -1841,13 +1836,13 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   const newRole = guild.roles.cache.get(targetEntry.roleId);
   if (!newRole) return { success: false, reason: 'Target role not found in server.' };
 
-  // Verwijder alle huidige chain-rollen en voeg de nieuwe toe in één API-call
-  // zodat er maar één guildMemberUpdate event afgaat (voorkomt dubbele prefix-sync).
+  // Vervang alle chain-rollen in één API-call zodat er maar één
+  // guildMemberUpdate event afgaat — voorkomt dubbele prefix-sync race.
   const chainRoleIds = new Set(chain.map(e => e.roleId));
   const nonChainRoles = targetMember.roles.cache.filter(r => !chainRoleIds.has(r.id));
   const newRoleSet = [...nonChainRoles.keys(), newRole.id];
   await targetMember.roles.set(newRoleSet, `Promoted to ${newRole.name}`).catch(async () => {
-    // Fallback: remove één voor één dan toevoegen (minder ideaal maar werkt altijd)
+    // Fallback als roles.set() niet lukt
     for (const entry of chain) {
       if (targetMember.roles.cache.has(entry.roleId)) {
         await targetMember.roles.remove(entry.roleId).catch(() => {});
@@ -2025,7 +2020,9 @@ async function getRobloxDescription(userId) {
 
 // Verifieer een gebruiker — geef rol, stel nickname in, sla op
 async function applyVerification(interaction, vc, guildId, robloxUsername, robloxId, method = 'code') {
-  const nickname = `(${interaction.user.username}) | ${robloxUsername}`.slice(0, 32);
+  // Nickname = alleen de Roblox gebruikersnaam.
+  // syncChainPrefix voegt daarna de juiste chain-prefix toe (bv. "SM | RobloxNaam").
+  const nickname = robloxUsername.slice(0, 32);
   try { await interaction.member.setNickname(nickname, 'Roblox verificatie'); } catch {}
   if (vc.verifiedRole) {
     const role = interaction.guild.roles.cache.get(vc.verifiedRole);
@@ -2035,11 +2032,14 @@ async function applyVerification(interaction, vc, guildId, robloxUsername, roblo
   vc.verifiedUsers[interaction.user.id] = { robloxUsername, robloxId, verifiedAt: Date.now(), method };
   await saveGuildConfig(guildId);
   pendingVerifications.delete(interaction.user.id);
+  // Sync chain prefix zodat de nickname direct correct is na verificatie
+  await syncChainPrefix(interaction.member, guildId).catch(() => {});
+  const finalNick = interaction.member.nickname ?? nickname;
   const methodLabel = method === 'Bloxlink' ? '🔗 Geverifieerd via **Bloxlink**' : '✅ Geverifieerd via profielbeschrijving';
   await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Geverifieerd!').setColor(0x57F287).addFields(
     { name: '🎮 Roblox Gebruikersnaam', value: robloxUsername, inline: true },
     { name: '🆔 Roblox ID', value: `${robloxId}`, inline: true },
-    { name: '📛 Nickname', value: `\`${nickname}\``, inline: false },
+    { name: '📛 Nickname', value: `\`${finalNick}\``, inline: false },
   ).setDescription(`${methodLabel}\n\nJe kunt de code nu verwijderen uit je profielbeschrijving.`).setTimestamp()] });
 }
 
@@ -2071,7 +2071,8 @@ function getFounderRequestConfig(guildId) {
   return gc.founderRequest;
 }
 
-const pendingVerifications = new Map(); // discordUserId → { code, robloxUsername, robloxId, expires }
+const pendingVerifications = new Map();
+const pendingBans = new Map(); // confirmatie-wachtrij: key=interactionUserId, value={user, reason, type, hours?, guild} // discordUserId → { code, robloxUsername, robloxId, expires }
 
 // Session TTL cleanup — prevent unbounded growth (Part 9a)
 const APP_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 uur totaal
@@ -2137,9 +2138,8 @@ function getBloxlinkConfig(guildId) {
 
 // ════════════════════════════════════════════
 // BLOXLINK RATE-LIMITED QUEUE
-// Bloxlink free tier: ~5 req/s. We sturen max 1 request per 250ms (= 4/s)
-// zodat we nooit tegen de 429-limiet aanlopen. Bij een 429 wachten we de
-// Retry-After header af (of 10s als fallback) en proberen daarna opnieuw.
+// Max 1 request per 250ms (= 4/s) — Bloxlink free tier limiet is ~5/s.
+// Bij een 429 wachten we de Retry-After header af en proberen opnieuw.
 // ════════════════════════════════════════════
 const _bloxQueue = [];
 let _bloxRunning = false;
@@ -2161,29 +2161,22 @@ async function _bloxDrainQueue() {
           const retryAfter = parseInt(res.headers.get('Retry-After') ?? '10', 10);
           console.warn(`[Bloxlink] Rate limited — wachten ${retryAfter}s (queue: ${_bloxQueue.length} pending)`);
           await new Promise(r => setTimeout(r, retryAfter * 1000));
-          continue; // retry
+          continue;
         }
-        if (!res.ok) {
-          console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`);
-          break;
-        }
+        if (!res.ok) { console.warn(`[Bloxlink] roblox-to-discord failed: HTTP ${res.status}`); break; }
         const data = await res.json();
         result = data?.discordIDs?.length ? data.discordIDs : null;
         break;
-      } catch (e) {
-        console.warn(`[Bloxlink] fetch error: ${e.message}`);
-        break;
-      }
+      } catch (e) { console.warn(`[Bloxlink] fetch error: ${e.message}`); break; }
     }
     resolve(result);
-    // 250ms pauze tussen elke request (= max 4 req/s)
     if (_bloxQueue.length > 0) await new Promise(r => setTimeout(r, 250));
   }
   _bloxRunning = false;
 }
 
 // Bloxlink Server API — reverse lookup: Roblox ID -> Discord ID(s) in this guild
-// Alle calls gaan via de rate-limited queue — nooit direct fetch aanroepen.
+// Alle calls gaan via de rate-limited queue.
 function bloxlinkRobloxToDiscord(guildId, robloxId) {
   const bc = getBloxlinkConfig(guildId);
   if (!bc.apiKey) return Promise.resolve(null);
@@ -3817,17 +3810,17 @@ client.once('clientReady', async () => {
         if (!cc.chain.length) continue;
         // Fetch all members (may be large — use chunks if needed)
         await guild.members.fetch().catch(() => {});
-        const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
         for (const member of guild.members.cache.values()) {
           if (member.user.bot) continue;
-          const baseName = member.nickname ?? member.user.username;
-          // Skip members whose nickname doesn't contain any known prefix at all — nothing to fix
-          const hasAnyKnownPrefix = knownPrefixes.some(pfx => baseName.startsWith(`${pfx} | `) || baseName === pfx);
+          // Check if this member has any chain role
           const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
-          if (!hasChainRole && !hasAnyKnownPrefix) continue;
-
-          // Determine what the nickname SHOULD be
+          if (!hasChainRole) continue;
+          // Compare against the prefix THIS member specifically should have
+          // (not just "any known prefix" — that would wrongly accept a demoted
+          // member who kept their old, still-valid-for-someone-else prefix)
           const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
+          const baseName = member.nickname ?? member.user.username;
+          const knownPrefixes = cc.chain.map(e => e.nicknamePrefix).filter(Boolean);
           let stripped = baseName;
           let strippedChanged = true;
           while (strippedChanged) {
@@ -4261,18 +4254,31 @@ client.once('clientReady', async () => {
         }
 
         // ── Kick/Ban logs ──
+        // state.bans = in-memory Set voor deze sessie; seededBans = persistente Set
+        // zodat na een herstart bestaande bans NIET opnieuw gelogd worden.
         if (ec.kickBans) {
           const ch = guild.channels.cache.get(ec.kickBans);
           if (ch) {
             const bans = await erlcRequest('/server/bans', 'GET', null, guild.id).catch(() => null);
             if (bans) {
-              for (const b of Object.keys(bans)) {
-                if (!state.bans.has(b)) {
-                  state.bans.add(b);
-                  const ban = bans[b];
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('🔨 Ban Log').setColor(0xFF0000).addFields({ name: '👤 Player', value: ban.UserName || b, inline: true }, { name: '👮 By', value: ban.moderatorName || 'Unknown', inline: true }, { name: '📝 Reason', value: ban.Reason || '*No reason*', inline: false }).setTimestamp()] }).catch(() => {});
+              // Eerste poll na (her)start: seed state.bans met alle huidige bans zodat
+              // alleen NIEUWE bans (na de eerste poll) een log-bericht krijgen.
+              if (state.firstPoll) {
+                for (const b of Object.keys(bans)) state.bans.add(b);
+              } else {
+                for (const b of Object.keys(bans)) {
+                  if (!state.bans.has(b)) {
+                    state.bans.add(b);
+                    const ban = bans[b];
+                    await ch.send({ embeds: [new EmbedBuilder().setTitle('🔨 Ban Log').setColor(0xFF0000).addFields(
+                      { name: '👤 Player', value: ban.UserName || b, inline: true },
+                      { name: '👮 By', value: ban.moderatorName || 'Unknown', inline: true },
+                      { name: '📝 Reason', value: ban.Reason || '*No reason*', inline: false }
+                    ).setTimestamp()] }).catch(() => {});
+                  }
                 }
               }
+              if (state.bans.size > 2000) state.bans = new Set([...state.bans].slice(-1000));
             }
           }
         }
@@ -5086,11 +5092,14 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         if (!user) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        try {
-          await interaction.guild.members.ban(user, { deleteMessageSeconds: 604800, reason });
-          return interaction.editReply({ content: `🔨 **${userDisplay(user)}** banned. Reason: ${reason}` });
-        } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
+        // Bevestigingsknop — voorkomt per-ongeluk bannen
+        pendingBans.set(interaction.user.id, { user, reason, type: 'ban', guild: interaction.guild });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, ban').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+        );
+        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt bannen?
+> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'unban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -5113,25 +5122,25 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'softban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         if (!user) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        try {
-          await interaction.guild.members.ban(user, { deleteMessageSeconds: 604800, reason });
-          await interaction.guild.members.unban(user.id, 'softban');
-          return interaction.editReply({ content: `🔨 **${userDisplay(user)}** softbanned (kicked + messages deleted).` });
-        } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
+        pendingBans.set(interaction.user.id, { user, reason, type: 'softban', guild: interaction.guild });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, softban').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+        );
+        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt softbannen (kick + berichten verwijderen)?
+> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'tempban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         if (!user) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
         const hours = interaction.options.getInteger('hours');
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        try {
-          await interaction.guild.members.ban(user, { deleteMessageSeconds: 86400, reason });
-          setTimeout(async () => {
-            await interaction.guild.members.unban(user.id, 'tempban expired').catch(() => {});
-          }, hours * 3600000);
-          return interaction.editReply({ content: `🔨 **${userDisplay(user)}** temp-banned for **${hours}h**. Reason: ${reason}` });
-        } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); }
+        pendingBans.set(interaction.user.id, { user, reason, type: 'tempban', hours, guild: interaction.guild });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel(`✅ Ja, ${hours}u bannen`).setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+        );
+        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt temp-bannen voor **${hours} uur**?
+> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'nickname') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -5509,7 +5518,15 @@ client.on('interactionCreate', async interaction => {
         if (t === 'warn') { await addWarning(guildId, user.id, { reason, moderator: userDisplay(interaction.user), date: new Date().toUTCString() }); return interaction.reply({ content: `⚠️ **${userDisplay(user)}** warned.`, flags: MessageFlags.Ephemeral }); }
         if (t === 'mute') { await member.timeout(600000, reason); return interaction.reply({ content: `🔇 **${userDisplay(user)}** muted 10min.`, flags: MessageFlags.Ephemeral }); }
         if (t === 'kick') { await member.kick(reason); return interaction.reply({ content: `👢 **${userDisplay(user)}** kicked.`, flags: MessageFlags.Ephemeral }); }
-        if (t === 'ban')  { await interaction.guild.members.ban(user, { reason }); return interaction.reply({ content: `🔨 **${userDisplay(user)}** banned.`, flags: MessageFlags.Ephemeral }); }
+        if (t === 'ban') {
+          pendingBans.set(interaction.user.id, { user, reason, type: 'ban', guild: interaction.guild });
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, ban').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+          );
+          return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt bannen?
+> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
+        }
       }
       if (cmd === 'players') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); try { const data = await erlcRequest('/server/players'); const list = Object.values(data); if (!list.length) return interaction.editReply('No players.'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`👥 Players (${list.length})`).setDescription(list.map((p, i) => `${i + 1}. **${p.Player}** — ${p.Team || 'None'}`).join('\n').slice(0, 4000)).setColor(0x5865F2)] }); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
       if (cmd === 'serverstatus') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); try { const d = await erlcRequest('/server'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🖥️ ERLC Status').setColor(0x57F287).addFields({ name: 'Name', value: d.Name || 'Unknown', inline: true }, { name: 'Players', value: `${d.CurrentPlayers ?? 0}/${d.MaxPlayers ?? 0}`, inline: true }, { name: 'Key', value: d.JoinKey || 'N/A', inline: true }).setTimestamp()] }); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
@@ -6238,6 +6255,38 @@ client.on('interactionCreate', async interaction => {
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
+      // ════ BAN CONFIRMATIE ════
+      if (interaction.customId === 'ban_cancel') {
+        pendingBans.delete(interaction.user.id);
+        return interaction.update({ content: '❌ Ban geannuleerd.', components: [], flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'ban_confirm') {
+        const pending = pendingBans.get(interaction.user.id);
+        pendingBans.delete(interaction.user.id);
+        if (!pending) return interaction.update({ content: '❌ Geen actieve ban gevonden. Voer het commando opnieuw uit.', components: [] });
+        await interaction.deferUpdate();
+        try {
+          if (pending.type === 'ban') {
+            await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 604800, reason: pending.reason });
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** gebanned. Reden: ${pending.reason}`, components: [] });
+          }
+          if (pending.type === 'softban') {
+            await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 604800, reason: pending.reason });
+            await pending.guild.members.unban(pending.user.id, 'softban');
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** softbanned (kick + berichten verwijderd).`, components: [] });
+          }
+          if (pending.type === 'tempban') {
+            await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 86400, reason: pending.reason });
+            setTimeout(async () => {
+              await pending.guild.members.unban(pending.user.id, 'tempban expired').catch(() => {});
+            }, pending.hours * 3600000);
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** tijdelijk gebanned voor **${pending.hours}u**. Reden: ${pending.reason}`, components: [] });
+          }
+        } catch (e) {
+          return interaction.editReply({ content: `❌ ${e.message}`, components: [] });
+        }
+      }
+
       // ════ STAFF REVIEW PANEL — "Leave a Review" (public) ════
       if (interaction.customId === 'sr2_panel_review') {
         return interaction.reply({
@@ -8161,32 +8210,12 @@ client.on('interactionCreate', async interaction => {
           // Set nickname if format is configured
           let newNickname = null;
           if (appType?.nicknameFormat && applicant) {
-            // Bereken de base-naam uit het format (strip eerst alle bekende chain-prefixes
-            // zodat het format zelf geen prefix hoeft te bevatten — voorkomt dubbele prefix)
-            const cc2 = getChainConfig(guildId);
-            const knownPfx = cc2.chain.map(e => e.nicknamePrefix).filter(Boolean);
-            let rawFormatted = appType.nicknameFormat
+            newNickname = appType.nicknameFormat
               .replace(/{user}/g, applicant.user.username)
               .replace(/{username}/g, applicant.user.username)
-              .replace(/{rank}/g, appType.label);
-            // Strip eventuele prefixes die al in het format zitten (bv. "SM | {user}")
-            let strippedFormatted = rawFormatted;
-            let pfxChanged = true;
-            while (pfxChanged) {
-              pfxChanged = false;
-              for (const pfx of knownPfx) {
-                if (strippedFormatted.startsWith(`${pfx} | `)) {
-                  strippedFormatted = strippedFormatted.slice(`${pfx} | `.length);
-                  pfxChanged = true;
-                }
-              }
-            }
-            // Stel de schone base-naam in; syncChainPrefix voegt daarna de juiste prefix toe
-            await applicant.setNickname(strippedFormatted.slice(0, 32), `Application accepted: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
-            // Sync de chain-prefix op de nieuwe base-naam (voorkomt dubbele prefix bij guildMemberUpdate race)
-            const freshApplicant = await applicant.fetch().catch(() => applicant);
-            await syncChainPrefix(freshApplicant, guildId);
-            newNickname = (await applicant.fetch().catch(() => applicant)).nickname ?? strippedFormatted.slice(0, 32);
+              .replace(/{rank}/g, appType.label)
+              .slice(0, 32);
+            await applicant.setNickname(newNickname, `Application accepted: ${appType.label}`).catch(e => console.error('Nickname set error:', e));
           }
 
           const givenRoles = appType?.acceptRoles?.length
