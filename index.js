@@ -29,7 +29,7 @@ const client = new Client({
     ...Options.DefaultMakeCacheSettings,
     MessageManager:    50,   // max 50 berichten per kanaal (was onbeperkt)
     GuildMemberManager: 200, // max 200 members per guild in cache
-    PresenceManager:   0,    // presences niet cachen (online teller doet fetch zelf)
+    PresenceManager:   0,    // don't cache presences (online counter does its own fetch)
     ReactionManager:   0,
     ReactionUserManager: 0,
     GuildStickerManager: 0,
@@ -37,8 +37,8 @@ const client = new Client({
   }),
   sweepers: {
     ...Options.DefaultSweeperSettings,
-    messages: { interval: 300, lifetime: 600 }, // elke 5 min, berichten ouder dan 10 min weggooien
-    guildMembers: { interval: 900, filter: () => member => !member.user?.bot && member.id !== member.guild.ownerId }, // elke 15 min niet-bot members opschonen
+    messages: { interval: 300, lifetime: 600 }, // every 5 min, discard messages older than 10 min
+    guildMembers: { interval: 900, filter: () => member => !member.user?.bot && member.id !== member.guild.ownerId }, // every 15 min, clean up non-bot members
   },
 });
 
@@ -134,7 +134,7 @@ mongoose.connection.on('reconnected', () => {
   dbReady = true;
 });
 
-// Laad alle guild configs uit MongoDB in de in-memory cache
+// Load all guild configs from MongoDB into the in-memory cache
 async function loadConfigFromDB() {
   try {
     const docs = await ConfigModel.find({});
@@ -148,7 +148,7 @@ async function loadConfigFromDB() {
   }
 }
 
-// Sla één guild op naar MongoDB (wordt aangeroepen na elke wijziging)
+// Save a single guild to MongoDB (called after every change)
 async function saveGuildConfig(guildId) {
   if (!dbReady) return;
   try {
@@ -162,19 +162,19 @@ async function saveGuildConfig(guildId) {
   }
 }
 
-// Sla alles op (wordt gebruikt bij shutdown)
+// Save everything (used on shutdown)
 async function saveAllConfigs() {
   if (!dbReady) return;
   const promises = Object.keys(config).map(guildId => saveGuildConfig(guildId));
   await Promise.allSettled(promises);
 }
 
-// saveConfig is een alias die de hele config wegschrijft
-// (voor backwards-compat met alle bestaande await saveGuildConfig(guildId) calls)
-// We vervangen dit door per-guild saves maar houden de functie intact
+// saveConfig is an alias that writes out the entire config
+// (for backwards-compat with all existing await saveGuildConfig(guildId) calls)
+// We replace this with per-guild saves but keep the function intact
 async function saveConfig(cfg) {
-  // cfg is altijd het globale config object
-  // Wacht tot alle guilds zijn opgeslagen (100% waterdicht)
+  // cfg is always the global config object
+  // Wait until all guilds have been saved (100% watertight)
   const promises = Object.keys(cfg).map(guildId => saveGuildConfig(guildId).catch(() => {}));
   await Promise.allSettled(promises);
 }
@@ -194,7 +194,7 @@ async function gracefulShutdown(signal) {
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('uncaughtException', async (err) => {
-  // Negeer alleen veilige Discord API errors die geen crash rechtvaardigen
+  // Only ignore safe Discord API errors that don't warrant a crash
   const SAFE_IGNORE = [10062, 40060, 10008];
   if (SAFE_IGNORE.includes(err?.code)) {
     console.warn('⚠️ Discord API warning (ignored):', err.message);
@@ -206,7 +206,7 @@ process.on('uncaughtException', async (err) => {
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
-  // Negeer alleen veilige Discord API errors
+  // Only ignore safe Discord API errors
   const SAFE_IGNORE = [10062, 40060, 10008];
   if (SAFE_IGNORE.includes(reason?.code)) {
     console.warn('⚠️ Discord API warning (ignored):', reason.message);
@@ -540,7 +540,7 @@ function getApplicationConfig(guildId) {
       if (!gc.applications.reviewChannel)     gc.applications.reviewChannel = mainApps.reviewChannel ?? null;
     }
   }
-  // Zorg dat verplichte velden altijd aanwezig zijn (migratie van oude data)
+  // Ensure required fields are always present (migration of old data)
   if (!gc.applications.panels)   gc.applications.panels   = [];
   if (!gc.applications.appTypes) gc.applications.appTypes = [];
   // Patch elk bestaand type met ontbrekende velden zodat data nooit verloren gaat
@@ -610,9 +610,9 @@ function getRolePingProtectionConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.rolePingProtection) gc.rolePingProtection = {
     enabled: false,
-    protectedRoles: [],   // role IDs die niet gepingd mogen worden
-    allowedRoles: [],     // role IDs die WEL mogen pingen
-    allowedUsers: [],     // user IDs die WEL mogen pingen (whitelist)
+    protectedRoles: [],   // role IDs that may not be pinged
+    allowedRoles: [],     // role IDs that ARE allowed to ping
+    allowedUsers: [],     // user IDs that ARE allowed to ping (whitelist)
     action: 'delete',     // 'delete' | 'delete+warn' | 'delete+mute'
     muteMinutes: 5,
     logChannel: null,
@@ -947,7 +947,7 @@ function resolveConfig(guildId, key) {
   return getMainConfig(key);
 }
 
-// Haal dept-lokale override op, of main server waarde als fallback
+// Get the department-local override, or fall back to the main server value
 function getDeptValue(guildId, path) {
   const keys = path.split('.');
   let local = config[guildId];
@@ -1489,20 +1489,20 @@ function buildDepartmentSetupPayload(guildId) {
   const mainId = getMainServerId();
   const isMain = isMainServer(guildId);
 
-  const fmt   = (arr) => arr?.length ? arr.map(r => `<@&${r}>`).join(', ') : '*Niet ingesteld*';
-  const fmtCh = (id)  => id ? `<#${id}>` : '*Niet ingesteld*';
+  const fmt   = (arr) => arr?.length ? arr.map(r => `<@&${r}>`).join(', ') : '*Not configured*';
+  const fmtCh = (id)  => id ? `<#${id}>` : '*Not configured*';
   const fmtFb = (id, fallbackId) => {
     if (id) return `<#${id}>`;
     if (fallbackId) return `<#${fallbackId}> *(van main)*`;
-    return '*Niet ingesteld*';
+    return '*Not configured*';
   };
   const fmtRFb = (arr, fallbackArr) => {
     if (arr?.length) return arr.map(r => `<@&${r}>`).join(', ');
     if (fallbackArr?.length) return fallbackArr.map(r => `<@&${r}>`).join(', ') + ' *(van main)*';
-    return '*Niet ingesteld*';
+    return '*Not configured*';
   };
 
-  // Lokale waarden (alleen wat lokaal is ingesteld)
+  // Local values (only what's configured locally)
   const gc = config[guildId] ?? {};
   const mc = mainId && !isMain ? (config[mainId] ?? {}) : {};
 
@@ -1510,9 +1510,9 @@ function buildDepartmentSetupPayload(guildId) {
     .setTitle('⚙️ Department Server Setup')
     .setColor(0x5865F2)
     .setDescription(
-      `**Lokale instellingen** voor deze department server.\n` +
-      `Waarden met *(van main)* worden overgenomen van de main server.\n` +
-      `> Stel lokaal in om de main server instelling te overschrijven.`
+      `**Local settings** for this department server.\n` +
+      `Values marked *(from main)* are inherited from the main server.\n` +
+      `> Configure locally to override the main server setting.`
     )
     .addFields(
       { name: '━━━ 🎫 Tickets ━━━',       value: '\u200b', inline: false },
@@ -1529,7 +1529,7 @@ function buildDepartmentSetupPayload(guildId) {
       { name: '✅ Enabled',                value: gc.welcomer?.enabled ? 'Ja' : mc.welcomer?.enabled ? 'Ja *(main)*' : 'Nee', inline: true },
       { name: '━━━ ✅ Verification ━━━',  value: '\u200b', inline: false },
       { name: '📢 Verify Channel',          value: fmtFb(gc.verification?.channel, mc.verification?.channel),         inline: true },
-      { name: '🎭 Verified Role',           value: gc.verification?.verifiedRole ? `<@&${gc.verification.verifiedRole}>` : mc.verification?.verifiedRole ? `<@&${mc.verification.verifiedRole}> *(main)*` : '*Niet ingesteld*', inline: true },
+      { name: '🎭 Verified Role',           value: gc.verification?.verifiedRole ? `<@&${gc.verification.verifiedRole}>` : mc.verification?.verifiedRole ? `<@&${mc.verification.verifiedRole}> *(main)*` : '*Not configured*', inline: true },
       { name: '━━━ 📋 Applications ━━━',  value: '\u200b', inline: false },
       { name: '📢 Review Channel',          value: fmtFb(gc.applications?.reviewChannel, mc.applications?.reviewChannel), inline: true },
       { name: '📋 Log Channel',             value: fmtFb(gc.applications?.logChannel, mc.applications?.logChannel),   inline: true },
@@ -1539,7 +1539,7 @@ function buildDepartmentSetupPayload(guildId) {
       { name: '🔑 Trainer Roles',           value: fmtRFb(gc.training?.trainerRoles, mc.training?.trainerRoles),     inline: true },
       { name: '📋 Request Roles',           value: fmtRFb(gc.training?.requestRoles, mc.training?.requestRoles),      inline: true },
       { name: '━━━ 🏖️ LOA ━━━',           value: '\u200b', inline: false },
-      { name: '🎭 LOA Role',                value: gc.loa?.loaRole ? `<@&${gc.loa.loaRole}>` : mc.loa?.loaRole ? `<@&${mc.loa.loaRole}> *(main)*` : '*Niet ingesteld*', inline: true },
+      { name: '🎭 LOA Role',                value: gc.loa?.loaRole ? `<@&${gc.loa.loaRole}>` : mc.loa?.loaRole ? `<@&${mc.loa.loaRole}> *(main)*` : '*Not configured*', inline: true },
     );
 
   const embed2 = new EmbedBuilder()
@@ -1659,16 +1659,16 @@ function getChainConfig(guildId) {
   if (!gc.chainOfCommand) gc.chainOfCommand = {
     chain: [], // [{ roleId, position, nicknamePrefix }] gesorteerd op position ascending
     logChannel: null,
-    promoteRoles: [], // rollen die /promote mogen gebruiken voor 1-staps CoC promoties
+    promoteRoles: [], // roles allowed to use /promote for 1-step CoC promotions
   };
   if (!Array.isArray(gc.chainOfCommand.chain)) gc.chainOfCommand.chain = [];
   if (!Array.isArray(gc.chainOfCommand.promoteRoles)) gc.chainOfCommand.promoteRoles = [];
-  // Zorg dat chain altijd gesorteerd is op positie
+  // Ensure the chain is always sorted by position
   gc.chainOfCommand.chain.sort((a, b) => a.position - b.position);
   return gc.chainOfCommand;
 }
 
-// Mag deze member /promote gebruiken (instelbare promote-rollen of SHR)?
+// May this member use /promote (configurable promote roles or SHR)?
 function hasPromoteAccess(m, guildId) {
   if (hasSHR(m)) return true;
   const cc = getChainConfig(guildId);
@@ -1676,7 +1676,7 @@ function hasPromoteAccess(m, guildId) {
   return cc.promoteRoles.some(id => m.roles.cache.has(id));
 }
 
-// Geeft de huidige rank positie van een member in de chain terug, -1 als geen
+// Returns the member's current rank position in the chain, -1 if none
 function getMemberChainPosition(member, chain) {
   for (const entry of chain) {
     if (member.roles.cache.has(entry.roleId)) return entry.position;
@@ -1684,9 +1684,9 @@ function getMemberChainPosition(member, chain) {
   return -1;
 }
 
-// Geeft de prefix terug die een member zou MOETEN hebben op basis van hun
-// hoogste chain-rang (null als ze geen rang met prefix hebben). Gedeeld door
-// syncChainPrefix en de prefix-scans zodat "correct" overal hetzelfde betekent.
+// Returns the prefix a member SHOULD have based on their
+// highest chain rank (null if they have no rank with a prefix). Shared by
+// syncChainPrefix and the prefix scans so that "correct" means the same everywhere.
 function getExpectedChainPrefix(member, chain) {
   let highestEntry = null;
   for (const entry of chain) {
@@ -1701,12 +1701,12 @@ function getExpectedChainPrefix(member, chain) {
 //  - Any leftover "On Duty" suffix from the old system is stripped (cleanup)
 //  - Final format: [PREFIX | ] cleanName
 //
-// LOCK: meerdere triggers (bv. een directe call vanuit de ERLC-handler én het
-// guildMemberUpdate-event dat door diezelfde rolwijziging afgaat) kunnen deze
-// functie vrijwel gelijktijdig aanroepen voor dezelfde persoon. Zonder lock lezen
-// beide aanroepen de nog-niet-bijgewerkte oude nickname en plakken ze allebei een
-// prefix ervoor → "M | M | Naam". Deze lock zorgt dat aanroepen voor dezelfde
-// member na elkaar (nooit gelijktijdig) worden uitgevoerd.
+// LOCK: multiple triggers (e.g. a direct call from the ERLC handler and the
+// guildMemberUpdate event fired by that same role change) can run this
+// function call this almost simultaneously for the same person. Without a lock,
+// both read the not-yet-updated old nickname and each prepend a
+// prefix → "M | M | Name". This lock ensures calls for the same
+// member run sequentially (never concurrently).
 const _chainPrefixLocks = new Map(); // memberId → Promise
 
 async function syncChainPrefix(member, guildId) {
@@ -1728,15 +1728,15 @@ async function _syncChainPrefixUnsafe(member, guildId) {
 
     const fresh = await member.fetch().catch(() => member);
 
-    // Bepaal welk prefix deze member hoort te hebben (hoogste chain-rang)
+    // Determine which prefix this member should have (highest chain rank)
     const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
 
-    // Haal de Roblox-gebruikersnaam op uit de verificatiedata — dit is altijd de
-    // basis van de nickname. Als er geen verificatie is, gebruik de Discord username.
+    // Get the Roblox username from the verification data — this is always the
+    // basis of the nickname. If there is no verification, use the Discord username.
     const vc = getVerificationConfig(guildId);
     const robloxName = vc?.verifiedUsers?.[fresh.user.id]?.robloxUsername ?? fresh.user.username;
 
-    // De gewenste nickname is altijd: "{Prefix} | {RobloxNaam}" of alleen "{RobloxNaam}"
+    // The desired nickname is always: "{Prefix} | {RobloxName}" or just "{RobloxName}"
     const newNick = expectedPrefix
       ? `${expectedPrefix} | ${robloxName}`.slice(0, 32)
       : robloxName.slice(0, 32);
@@ -1786,19 +1786,19 @@ async function resyncAfterRankRemoval(guild, removedPrefix, guildId) {
   } catch (e) { console.error('resyncAfterRankRemoval error:', e.message); }
 }
 
-// Geeft de volgende rank in de chain terug, null als al hoogste
+// Returns the next rank in the chain, null if already the highest
 function getNextChainRank(currentPosition, chain) {
   const sorted = [...chain].sort((a, b) => a.position - b.position);
   const current = sorted.find(e => e.position === currentPosition);
   if (!current) {
-    // Geen huidige rank — geef de eerste rank in de chain
+    // No current rank — return the first rank in the chain
     return sorted[0] ?? null;
   }
   const currentIndex = sorted.indexOf(current);
   return sorted[currentIndex + 1] ?? null;
 }
 
-// Promoveer een member één stap omhoog in de chain
+// Promote a member one step up the chain
 async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo = null) {
   const cc = getChainConfig(guildId);
   const chain = cc.chain;
@@ -1808,7 +1808,7 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   const isAtTop = currentPosition === chain[chain.length - 1]?.position;
   if (isAtTop) return { success: false, reason: 'Already at the highest rank in the chain.' };
 
-  // SHR skip: ga naar een specifieke rank
+  // SHR skip: go to a specific rank
   const targetEntry = skipTo
     ? chain.find(e => e.roleId === skipTo)
     : getNextChainRank(currentPosition, chain);
@@ -1818,13 +1818,13 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
   const newRole = guild.roles.cache.get(targetEntry.roleId);
   if (!newRole) return { success: false, reason: 'Target role not found in server.' };
 
-  // Vervang alle chain-rollen in één API-call zodat er maar één
-  // guildMemberUpdate event afgaat — voorkomt dubbele prefix-sync race.
+  // Replace all chain roles in a single API call so only one
+  // guildMemberUpdate event fires — prevents a double prefix-sync race.
   const chainRoleIds = new Set(chain.map(e => e.roleId));
   const nonChainRoles = targetMember.roles.cache.filter(r => !chainRoleIds.has(r.id));
   const newRoleSet = [...nonChainRoles.keys(), newRole.id];
   await targetMember.roles.set(newRoleSet, `Promoted to ${newRole.name}`).catch(async () => {
-    // Fallback als roles.set() niet lukt
+    // Fallback if roles.set() fails
     for (const entry of chain) {
       if (targetMember.roles.cache.has(entry.roleId)) {
         await targetMember.roles.remove(entry.roleId).catch(() => {});
@@ -1833,7 +1833,7 @@ async function promoteInChain(guild, targetMember, promotedBy, guildId, skipTo =
     await targetMember.roles.add(newRole).catch(() => {});
   });
 
-  // Sync nickname prefix op basis van hoogste chain-rang
+  // Sync nickname prefix based on highest chain rank
   await syncChainPrefix(targetMember, guildId);
 
   return { success: true, newRole };
@@ -1901,7 +1901,7 @@ const activeGeneralVotes = new Map(); // voteId → { messageId, channelId, ques
 // ════════════════════════════════════════════
 function genId() { return Math.random().toString(36).slice(2, 8); }
 
-// Parseert 'HH:MM' (24-uurs, UTC) naar { hours, minutes } of null bij ongeldige invoer.
+// Parses 'HH:MM' (24-hour, UTC) into { hours, minutes } or null on invalid input.
 function parseHHMM(input) {
   const m = input.trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!m) return null;
@@ -1910,7 +1910,7 @@ function parseHHMM(input) {
   return { hours, minutes };
 }
 
-// Parseert 'DD-MM-YYYY' (of 'DD/MM/YYYY') naar een UTC timestamp (00:00) of null bij ongeldige invoer.
+// Parses 'DD-MM-YYYY' (or 'DD/MM/YYYY') into a UTC timestamp (00:00) or null on invalid input.
 function parseDDMMYYYY(input) {
   const m = input.trim().match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
   if (!m) return null;
@@ -1922,14 +1922,14 @@ function parseDDMMYYYY(input) {
   return date.getTime();
 }
 
-// Combineert 'DD-MM-YYYY' en 'HH:MM' in de gegeven UTC-offset (bv. 2 voor UTC+2, -5 voor UTC-5, 5.5 voor UTC+5:30)
-// tot een UTC-timestamp, of null bij ongeldige invoer.
+// Combines 'DD-MM-YYYY' and 'HH:MM' in the given UTC offset (e.g. 2 for UTC+2, -5 for UTC-5, 5.5 for UTC+5:30)
+// into a UTC timestamp, or null on invalid input.
 function parseDateTimeUTC(dateInput, timeInput, utcOffsetHours = 0) {
   const dayTs = parseDDMMYYYY(dateInput);
   const time = parseHHMM(timeInput);
   if (dayTs === null || time === null) return null;
   const localMs = dayTs + time.hours * 3_600_000 + time.minutes * 60_000;
-  // Lokale tijd minus de offset = UTC-tijd
+  // Local time minus the offset = UTC time
   return localMs - utcOffsetHours * 3_600_000;
 }
 
@@ -2000,10 +2000,10 @@ async function getRobloxDescription(userId) {
   return data.description ?? '';
 }
 
-// Verifieer een gebruiker — geef rol, stel nickname in, sla op
+// Verify a user — grant role, set nickname, save
 async function applyVerification(interaction, vc, guildId, robloxUsername, robloxId, method = 'code') {
-  // Nickname = alleen de Roblox gebruikersnaam.
-  // syncChainPrefix voegt daarna de juiste chain-prefix toe (bv. "SM | RobloxNaam").
+  // Nickname = just the Roblox username.
+  // syncChainPrefix then adds the correct chain prefix (e.g. "SM | RobloxName").
   const nickname = robloxUsername.slice(0, 32);
   try { await interaction.member.setNickname(nickname, 'Roblox verificatie'); } catch {}
   if (vc.verifiedRole) {
@@ -2014,15 +2014,15 @@ async function applyVerification(interaction, vc, guildId, robloxUsername, roblo
   vc.verifiedUsers[interaction.user.id] = { robloxUsername, robloxId, verifiedAt: Date.now(), method };
   await saveGuildConfig(guildId);
   pendingVerifications.delete(interaction.user.id);
-  // Sync chain prefix zodat de nickname direct correct is na verificatie
+  // Sync chain prefix so the nickname is immediately correct after verification
   await syncChainPrefix(interaction.member, guildId).catch(() => {});
   const finalNick = interaction.member.nickname ?? nickname;
-  const methodLabel = method === 'Bloxlink' ? '🔗 Geverifieerd via **Bloxlink**' : '✅ Geverifieerd via profielbeschrijving';
+  const methodLabel = method === 'Bloxlink' ? '🔗 Verified via **Bloxlink**' : '✅ Verified via profile description';
   await interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Geverifieerd!').setColor(0x57F287).addFields(
     { name: '🎮 Roblox Gebruikersnaam', value: robloxUsername, inline: true },
     { name: '🆔 Roblox ID', value: `${robloxId}`, inline: true },
     { name: '📛 Nickname', value: `\`${finalNick}\``, inline: false },
-  ).setDescription(`${methodLabel}\n\nJe kunt de code nu verwijderen uit je profielbeschrijving.`).setTimestamp()] });
+  ).setDescription(`${methodLabel}\n\nYou can now remove the code from your profile description.`).setTimestamp()] });
 }
 
 function getRolePermConfig(guildId) {
@@ -2054,7 +2054,7 @@ function getFounderRequestConfig(guildId) {
 }
 
 const pendingVerifications = new Map();
-const pendingBans = new Map(); // confirmatie-wachtrij: key=interactionUserId, value={user, reason, type, hours?, guild} // discordUserId → { code, robloxUsername, robloxId, expires }
+const pendingBans = new Map(); // confirmation queue: key=interactionUserId, value={user, reason, type, hours?, guild} // discordUserId → { code, robloxUsername, robloxId, expires }
 
 // Session TTL cleanup — prevent unbounded growth (Part 9a)
 const APP_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2 uur totaal
@@ -2121,7 +2121,7 @@ function getBloxlinkConfig(guildId) {
 // ════════════════════════════════════════════
 // BLOXLINK RATE-LIMITED QUEUE
 // Max 1 request per 250ms (= 4/s) — Bloxlink free tier limiet is ~5/s.
-// Bij een 429 wachten we de Retry-After header af en proberen opnieuw.
+// On a 429 we wait for the Retry-After header and try again.
 // ════════════════════════════════════════════
 const _bloxQueue = [];
 let _bloxRunning = false;
@@ -2158,7 +2158,7 @@ async function _bloxDrainQueue() {
 }
 
 // Bloxlink Server API — reverse lookup: Roblox ID -> Discord ID(s) in this guild
-// Alle calls gaan via de rate-limited queue.
+// All calls go through the rate-limited queue.
 function bloxlinkRobloxToDiscord(guildId, robloxId) {
   const bc = getBloxlinkConfig(guildId);
   if (!bc.apiKey) return Promise.resolve(null);
@@ -2992,7 +2992,7 @@ function buildTicketSetupPayload(guildId) {
     { name: '📋 Rating Log',      value: rc.logChannel    ? `<#${rc.logChannel}>`    : '*Not set*', inline: true },
     { name: '📢 Public Reviews',  value: rc.publicChannel ? `<#${rc.publicChannel}>` : '*Not set*', inline: true },
   );
-  // Sanity check — zorg dat amountLabel niet in embed fields crasht
+  // Sanity check — make sure amountLabel doesn't crash embed fields
   const safeLabel = String(pc?.amountLabel ?? 'Amount').slice(0, 20);
   const r3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('t_deploy').setLabel('Deploy Panel').setStyle(ButtonStyle.Success).setEmoji('🚀'),
@@ -3133,7 +3133,7 @@ async function createTicketChannel(interaction, type, tc, pc, guildId, alreadyUp
     const resolvedEmbedImage        = resolveTicketSetting(type, tc, pc, 'embedImage');
     const resolvedDmOnOpen          = resolveTicketSetting(type, tc, pc, 'dmOnOpen');
 
-    // V2 category lookup: check V2 type config eerst, dan legacy
+    // V2 category lookup: check V2 type config first, then legacy
     let category = null;
     const v2cfg = getTicketV2Config(guildId);
     const v2type = v2cfg.types?.find(t => t.ticketTypeName === type.label);
@@ -3526,9 +3526,9 @@ async function checkLOAExpiry() {
     const guild = client.guilds.cache.get(gId);
     if (!guild) continue;
     for (const [userId, loa] of Object.entries(lc.active)) {
-      if (userId.startsWith('pending_')) continue; // niet goedgekeurd, scheduler raakt deze niet aan
+      if (userId.startsWith('pending_')) continue; // not approved, scheduler doesn't touch these
 
-      // ── LOA start: rol/nickname toepassen zodra de startdatum is bereikt ──
+      // ── LOA start: apply role/nickname once the start date is reached ──
       if (!loa.applied && loa.startsAt && now >= loa.startsAt) {
         try {
           const member = await guild.members.fetch(userId).catch(() => null);
@@ -3550,7 +3550,7 @@ async function checkLOAExpiry() {
         loa.applied = true;
       }
 
-      // ── LOA einde: rol/nickname terugzetten en entry verwijderen ──
+      // ── LOA end: restore role/nickname and remove entry ──
       if (now < loa.endsAt) continue;
       try {
         const member = await guild.members.fetch(userId).catch(() => null);
@@ -3592,7 +3592,7 @@ async function checkScheduledSessions() {
 
         await postSessionStart(guild, sc, hostUser, sched.joinLink, vars, voterMentions);
 
-        // Disable de "I'm coming" knop op het originele bericht
+        // Disable the "I'm coming" button on the original message
         if (ch) {
           const origMsg = await ch.messages.fetch(sched.messageId).catch(() => null);
           if (origMsg) {
@@ -3739,7 +3739,7 @@ function buildBirthdaySetupPayload(guildId) {
 }
 
 client.once('clientReady', async () => {
-  console.log(`✅ Bot online as ${userDisplay(client.user)} | DB: ${dbReady ? '✅ Verbonden' : '❌ Niet verbonden'}`);
+  console.log(`✅ Bot online as ${userDisplay(client.user)} | DB: ${dbReady ? '✅ Connected' : '❌ Not connected'}`);
   const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
   try {
     const commandHash = crypto.createHash('md5').update(JSON.stringify(commands)).digest('hex');
@@ -3775,7 +3775,7 @@ client.once('clientReady', async () => {
   setInterval(() => checkScheduledSessions().catch(console.error), 30_000);
 
   // ════ STARTUP CLEANUP: oude "On Duty" suffix verwijderen bij iedereen ════
-  // Dit systeem is uitgefaseerd — deze scan ruimt eenmalig nog bestaande resten op.
+  // This system has been phased out — this scan does a one-time cleanup of leftovers.
   setTimeout(async () => {
     console.log('🔄 Running startup "On Duty" suffix cleanup...');
     const ON_DUTY_SUFFIX = ' | On Duty';
@@ -3814,7 +3814,7 @@ client.once('clientReady', async () => {
           const hasChainRole = cc.chain.some(e => member.roles.cache.has(e.roleId));
           if (!hasChainRole) continue;
 
-          // Bereken wat de nickname MOET zijn: {Prefix} | {RobloxNaam}
+          // Compute what the nickname SHOULD be: {Prefix} | {RobloxName}
           const expectedPrefix = getExpectedChainPrefix(member, cc.chain);
           const robloxName = vc?.verifiedUsers?.[member.user.id]?.robloxUsername ?? member.user.username;
           const expectedNick = expectedPrefix
@@ -3835,17 +3835,17 @@ client.once('clientReady', async () => {
   setInterval(runChainPrefixSweep, 5 * 60_000); // elke 5 minuten
 
   // ════ IN-GAME ROLE RECONCILIATION SWEEP ════
-  // De join/leave-handlers in de ERLC poll-loop reageren op verándering t.o.v. de
-  // vorige poll. Als een poll mislukt, de bot herstart, Bloxlink tijdelijk down
-  // was, of inGameRole pas net is ingesteld, kan iemand de rol missen terwijl ze
-  // wél in-game zijn, of de rol houden terwijl ze allang weg zijn. Deze sweep
-  // herstelt dat structureel: voor elke guild met inGameRole + Bloxlink actief,
-  // wordt de volledige actuele spelerslijst vergeleken met wie de rol heeft, en
-  // wordt het verschil rechtgetrokken. Ook hier geldt: alleen spelers die Bloxlink
-  // daadwerkelijk aan een Discord-account kan koppelen (dus geverifieerd via
-  // Bloxlink) krijgen/houden de rol — kan Bloxlink iemand niet koppelen of faalt
-  // de lookup, dan wordt die persoon als niet-geverifieerd behandeld en verliest
-  // de rol als ze hem hebben.
+  // The join/leave handlers in the ERLC poll loop react to changes relative to the
+  // previous poll. If a poll fails, the bot restarts, Bloxlink is temporarily down,
+  // or inGameRole was only just configured, someone could miss the role while they're
+  // actually in-game, or keep the role while they've long since left. This sweep
+  // fixes that structurally: for every guild with inGameRole + Bloxlink active,
+  // compares the full current player list against who holds the role, and
+  // corrects the difference. The same rule applies here: only players Bloxlink
+  // can actually link to a Discord account (i.e. verified via
+  // Bloxlink) gain/keep the role — if Bloxlink can't link someone or the
+  // lookup fails, that person is treated as unverified and loses
+  // the role if they have it.
   async function runInGameRoleSweep() {
     for (const guild of client.guilds.cache.values()) {
       try {
@@ -3859,7 +3859,7 @@ client.once('clientReady', async () => {
 
         // Huidige in-game spelers ophalen
         const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
-        if (!playersRaw) continue; // ERLC niet bereikbaar — niets aanraken, volgende keer opnieuw proberen
+        if (!playersRaw) continue; // ERLC unreachable — don't touch anything, try again next time
         const robloxIds = [];
         for (const p of Object.values(playersRaw)) {
           const raw = String(p.Player ?? '');
@@ -3869,10 +3869,10 @@ client.once('clientReady', async () => {
           if (robloxId && /^\d+$/.test(robloxId)) robloxIds.push(robloxId);
         }
 
-        // Roblox ID → Discord ID resolven via Bloxlink voor elke in-game speler.
-        // Kan Bloxlink iemand niet koppelen (geen link of API-fout) dan staat die
-        // speler simpelweg niet in deze set, en wordt verderop als "niet
-        // geverifieerd" behandeld als ze de rol al hadden.
+        // Resolve Roblox ID → Discord ID via Bloxlink for every in-game player.
+        // If Bloxlink can't link someone (no link or API error), that
+        // player simply isn't in this set, and is later treated as "not
+        // verified" if they already had the role.
         const verifiedDiscordIds = new Set();
         for (const robloxId of robloxIds) {
           const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId).catch(() => null);
@@ -3881,7 +3881,7 @@ client.once('clientReady', async () => {
 
         await guild.members.fetch().catch(() => {});
 
-        // Geverifieerd + in-game → moet de rol hebben
+        // Verified + in-game → should have the role
         for (const discordId of verifiedDiscordIds) {
           const member = guild.members.cache.get(discordId);
           if (!member || member.user.bot) continue;
@@ -3890,7 +3890,7 @@ client.once('clientReady', async () => {
           await syncChainPrefix(member, guild.id);
         }
 
-        // Heeft de rol maar staat niet (meer) in de geverifieerd+in-game set → eraf
+        // Has the role but is no longer in the verified+in-game set → remove it
         for (const member of role.members.values()) {
           if (member.user.bot) continue;
           if (verifiedDiscordIds.has(member.id)) continue;
@@ -3901,7 +3901,7 @@ client.once('clientReady', async () => {
     }
   }
   setTimeout(runInGameRoleSweep, 20_000); // 20s delay, na de chain prefix sweep
-  setInterval(runInGameRoleSweep, 5 * 60_000); // daarna elke 5 minuten als vangnet
+  setInterval(runInGameRoleSweep, 5 * 60_000); // then every 5 minutes as a safety net
 
   // ════ QOTD DAILY SCHEDULER ════
   // Check every minute if it's time to post QOTD
@@ -4244,15 +4244,15 @@ client.once('clientReady', async () => {
         }
 
         // ── Kick/Ban logs ──
-        // state.bans = in-memory Set voor deze sessie; seededBans = persistente Set
-        // zodat na een herstart bestaande bans NIET opnieuw gelogd worden.
+        // state.bans = in-memory Set for this session; seededBans = persistent Set
+        // so that after a restart, existing bans are NOT logged again.
         if (ec.kickBans) {
           const ch = guild.channels.cache.get(ec.kickBans);
           if (ch) {
             const bans = await erlcRequest('/server/bans', 'GET', null, guild.id).catch(() => null);
             if (bans) {
               // Eerste poll na (her)start: seed state.bans met alle huidige bans zodat
-              // alleen NIEUWE bans (na de eerste poll) een log-bericht krijgen.
+              // only NEW bans (after the first poll) get a log message.
               if (state.firstPoll) {
                 for (const b of Object.keys(bans)) state.bans.add(b);
               } else {
@@ -4326,18 +4326,18 @@ function scheduleCounterUpdate(guild) {
 client.on('guildMemberAdd', member => scheduleCounterUpdate(member.guild));
 client.on('guildMemberRemove', member => scheduleCounterUpdate(member.guild));
 
-// Auto-sync chain prefix als iemands rollen veranderen
+// Auto-sync chain prefix when someone's roles change
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   const oldRoles = oldMember.roles.cache;
   const newRoles = newMember.roles.cache;
-  // Alleen reageren als de rollen daadwerkelijk veranderd zijn
+  // Only react if the roles actually changed
   if (oldRoles.size === newRoles.size && oldRoles.every(r => newRoles.has(r.id))) return;
 
   const guildId = newMember.guild.id;
   const cc = getChainConfig(guildId);
   if (!cc.chain.length) return;
 
-  // Alleen syncen als een chain-rol veranderd is
+  // Only sync if a chain role has changed
   const chainRoleIds = new Set(cc.chain.map(e => e.roleId));
   const roleChanged = [...oldRoles.keys(), ...newRoles.keys()].some(id => chainRoleIds.has(id));
   if (!roleChanged) return;
@@ -4480,12 +4480,12 @@ client.on('messageCreate', async message => {
     const stickyCfg = getStickyConfig(guildId);
     const sticky = stickyCfg[message.channel.id];
     if (sticky) {
-      // Verwijder het vorige sticky-bericht
+      // Remove the previous sticky message
       if (sticky.lastMessageId) {
         const oldMsg = await message.channel.messages.fetch(sticky.lastMessageId).catch(() => null);
         if (oldMsg) await oldMsg.delete().catch(() => {});
       }
-      // Post het sticky-bericht opnieuw onderaan
+      // Repost the sticky message at the bottom
       const payload = {};
       if (sticky.content) payload.content = sticky.content;
       if (sticky.embedTitle || sticky.embedDescription) {
@@ -4538,22 +4538,22 @@ client.on('messageCreate', async message => {
             const action = rpp.action || 'delete';
 
             if (action === 'warn') {
-              // Ping supprimeren: bericht editen en mentions strippen
+              // Suppress ping: edit message and strip mentions
               const stripped = message.content
-                .replace(/<@&[0-9]+>/g, '[role ping verwijderd]')
+                .replace(/<@&[0-9]+>/g, '[role ping removed]')
                 .replace(/<@!?[0-9]+>/g, m => {
                   const uid = m.replace(/<@!?/, '').replace('>', '');
                   const tgt = message.guild.members.cache.get(uid);
-                  if (tgt && rpp.protectedRoles?.some(rid => tgt.roles.cache.has(rid))) return '[ping verwijderd]';
+                  if (tgt && rpp.protectedRoles?.some(rid => tgt.roles.cache.has(rid))) return '[ping removed]';
                   return m;
                 });
               await message.edit(stripped).catch(() => {});
             } else {
-              // delete / delete+warn / delete+mute: bericht verwijderen
+              // delete / delete+warn / delete+mute: remove message
               await message.delete().catch(() => {});
             }
 
-            // Altijd DM sturen
+            // Always send a DM
             await message.author.send({
               embeds: [new EmbedBuilder()
                 .setTitle('⚠️ Warning — Ping Not Allowed')
@@ -4570,7 +4570,7 @@ client.on('messageCreate', async message => {
               ]
             }).catch(() => {});
 
-            // Warn opslaan (altijd)
+            // Save warning (always)
             await addWarning(guildId, message.author.id, {
               reason: `Role ping protection: pinged ${protectedRole?.name ?? pingedProtectedRole}`,
               moderator: 'Automod',
@@ -4837,7 +4837,7 @@ client.on('messageReactionRemove', async (reaction, user) => {
 client.on('interactionCreate', async interaction => {
   const guildId = interaction.guildId;
 
-  // Rating buttons en modals komen uit DMs — die mogen geen guildId hebben
+  // Rating buttons and modals come from DMs — these must not have a guildId
   const isDMRating = !guildId && (
     (interaction.isButton() && interaction.customId.startsWith('rating__')) ||
     (interaction.isModalSubmit() && interaction.customId.startsWith('modal_rating__'))
@@ -4874,7 +4874,7 @@ client.on('interactionCreate', async interaction => {
       const cmd = interaction.commandName;
 
       // ════ GLOBAL STAFF-ONLY GATE ════
-      // Alle commands zijn staff-only, behalve /reviewstaff (die mag iedereen gebruiken).
+      // All commands are staff-only, except /reviewstaff (which anyone may use).
       if (cmd !== 'reviewstaff' && !hasAnyStaff(interaction.member)) {
         return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
       }
@@ -4954,7 +4954,7 @@ client.on('interactionCreate', async interaction => {
 
       if (cmd === 'trainrequest') {
         const tc = getTrainingConfig(guildId);
-        // Check of gebruiker de juiste rol heeft
+        // Check whether the user has the correct role
         if (tc.requestRoles.length && !tc.requestRoles.some(r => interaction.member.roles.cache.has(r)) && !hasSetup(interaction.member)) {
           return interaction.reply({ content: '❌ You do not have permission to request a trainer.', flags: MessageFlags.Ephemeral });
         }
@@ -5084,14 +5084,14 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'ban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         if (!user) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
-        // Bevestigingsknop — voorkomt per-ongeluk bannen
+        // Confirmation button — prevents accidental bans
         pendingBans.set(interaction.user.id, { user, reason, type: 'ban', guild: interaction.guild });
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, ban').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Yes, ban').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
         );
-        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt bannen?
-> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `⚠️ Are you sure you want to ban **${userDisplay(user)}**?
+> **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'unban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -5116,11 +5116,11 @@ client.on('interactionCreate', async interaction => {
         if (!user) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
         pendingBans.set(interaction.user.id, { user, reason, type: 'softban', guild: interaction.guild });
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, softban').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Yes, softban').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
         );
-        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt softbannen (kick + berichten verwijderen)?
-> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `⚠️ Are you sure you want to softban **${userDisplay(user)}** (kick + delete messages)?
+> **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'tempban') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -5128,11 +5128,11 @@ client.on('interactionCreate', async interaction => {
         const hours = interaction.options.getInteger('hours');
         pendingBans.set(interaction.user.id, { user, reason, type: 'tempban', hours, guild: interaction.guild });
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('ban_confirm').setLabel(`✅ Ja, ${hours}u bannen`).setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('ban_confirm').setLabel(`✅ Yes, ban for ${hours}h`).setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
         );
-        return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt temp-bannen voor **${hours} uur**?
-> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `⚠️ Are you sure you want to temp-ban **${userDisplay(user)}** for **${hours} hours**?
+> **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'nickname') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -5312,12 +5312,12 @@ client.on('interactionCreate', async interaction => {
 
         const isSHR = hasSHR(interaction.member);
 
-        // Toegang: SHR altijd, anders alleen instelbare promote-rollen
+        // Access: SHR always, otherwise only configurable promote roles
         if (!hasPromoteAccess(interaction.member, guildId)) {
           return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
         }
 
-        // Override (rol-keuze) is exclusief voor SHR
+        // Override (role choice) is exclusive to SHR
         if (overrideRole && !isSHR) {
           return interaction.reply({ content: '❌ Only SHR can specify a target rank to override the Chain of Command order.', flags: MessageFlags.Ephemeral });
         }
@@ -5411,7 +5411,7 @@ client.on('interactionCreate', async interaction => {
           ]}).catch(() => {});
         }
 
-        // DM naar de gebruiker
+        // DM to the user
         await targetMember.user.send({ embeds: [new EmbedBuilder()
           .setTitle('⬆️ You have been promoted!')
           .setColor(0x57F287)
@@ -5513,11 +5513,11 @@ client.on('interactionCreate', async interaction => {
         if (t === 'ban') {
           pendingBans.set(interaction.user.id, { user, reason, type: 'ban', guild: interaction.guild });
           const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Ja, ban').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Annuleren').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('ban_confirm').setLabel('✅ Yes, ban').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('ban_cancel').setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
           );
-          return interaction.reply({ content: `⚠️ Weet je zeker dat je **${userDisplay(user)}** wilt bannen?
-> **Reden:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: `⚠️ Are you sure you want to ban **${userDisplay(user)}**?
+> **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
         }
       }
       if (cmd === 'players') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); try { const data = await erlcRequest('/server/players'); const list = Object.values(data); if (!list.length) return interaction.editReply('No players.'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`👥 Players (${list.length})`).setDescription(list.map((p, i) => `${i + 1}. **${p.Player}** — ${p.Team || 'None'}`).join('\n').slice(0, 4000)).setColor(0x5865F2)] }); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
@@ -5545,7 +5545,7 @@ client.on('interactionCreate', async interaction => {
           );
           const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [voteRow] });
           activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null, voters: [] });
-          // Auto-delete vote bericht na 30 minuten als het niet geslaagd is
+          // Auto-delete vote message after 30 minutes if it didn't pass
           setTimeout(async () => {
             if (activeVotes.get(guildId)?.messageId === msg.id) {
               activeVotes.delete(guildId);
@@ -5558,7 +5558,7 @@ client.on('interactionCreate', async interaction => {
           activeVotes.delete(guildId);
           const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars)).setTimestamp().setFooter({ text: `By ${userDisplay(interaction.user)}` });
           if (sc.shutdownImage) embed.setImage(sc.shutdownImage);
-          await sCh.send({ embeds: [embed] }); // Geen ping bij shutdown
+          await sCh.send({ embeds: [embed] }); // No ping on shutdown
           return interaction.editReply({ content: '✅ Shutdown posted!' });
         }
         if (sub === 'schedule') {
@@ -5902,12 +5902,12 @@ client.on('interactionCreate', async interaction => {
         const record = await getTicketRecord(interaction.channel.id);
         const canManage = hasSetup(interaction.member) || isFoundership(interaction.member) || hasAnyStaff(interaction.member);
         if (!canManage) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
-        if (!targetMember) return interaction.reply({ content: '❌ Member niet gevonden.', flags: MessageFlags.Ephemeral });
-        if (record?.creatorId === targetUser.id) return interaction.reply({ content: '❌ Je kunt de ticket eigenaar niet verwijderen.', flags: MessageFlags.Ephemeral });
-        if (isFoundership(targetMember)) return interaction.reply({ content: '❌ Je kunt een Foundership lid niet verwijderen.', flags: MessageFlags.Ephemeral });
+        if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
+        if (record?.creatorId === targetUser.id) return interaction.reply({ content: '❌ You cannot remove the ticket owner.', flags: MessageFlags.Ephemeral });
+        if (isFoundership(targetMember)) return interaction.reply({ content: '❌ You cannot remove a Foundership member.', flags: MessageFlags.Ephemeral });
         try {
           await interaction.channel.permissionOverwrites.delete(targetMember);
-          await interaction.reply({ content: `✅ <@${targetUser.id}> is uit het ticket verwijderd.` });
+          await interaction.reply({ content: `✅ <@${targetUser.id}> has been removed from the ticket.` });
           await logTicketAction(interaction.guild, interaction.guildId, 'staff_removed', {
             channel: `<#${interaction.channel.id}>`,
             user: `<@${targetUser.id}>`,
@@ -5951,7 +5951,7 @@ client.on('interactionCreate', async interaction => {
         ic.userStrikes[targetUser.id] = 0;
         if (!ic.userHistory) ic.userHistory = {};
         ic.userHistory[targetUser.id] = [];
-        // Verwijder alle progressie-rollen
+        // Remove all progression roles
         if (targetMember) await applyInfractionLevelRole(targetMember, ic, 0);
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Infractions cleared for **${userDisplay(targetUser)}**.`, flags: MessageFlags.Ephemeral });
@@ -6010,7 +6010,7 @@ client.on('interactionCreate', async interaction => {
           const oneDay  = 86_400_000;
           const today   = new Date(); today.setUTCHours(0, 0, 0, 0);
           const todayTs = today.getTime();
-          // Begin van deze week (maandag) en volgende week
+          // Start of this week (Monday) and next week
           const dayOfWeek = (today.getUTCDay() + 6) % 7; // 0 = maandag
           const startOfThisWeek = todayTs - dayOfWeek * oneDay;
           const startOfNextWeek = startOfThisWeek + 7 * oneDay;
@@ -6184,7 +6184,7 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'setup') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         // Department servers get a limited setup menu; main server and unconfigured servers get the full menu
-        // Department servers krijgen nu ook het volledige setup menu
+        // Department servers now also get the full setup menu
         {
           const embed = new EmbedBuilder()
             .setTitle('⚙️ Setup Menu')
@@ -6247,32 +6247,32 @@ client.on('interactionCreate', async interaction => {
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
-      // ════ BAN CONFIRMATIE ════
+      // ════ BAN CONFIRMATION ════
       if (interaction.customId === 'ban_cancel') {
         pendingBans.delete(interaction.user.id);
-        return interaction.update({ content: '❌ Ban geannuleerd.', components: [], flags: MessageFlags.Ephemeral });
+        return interaction.update({ content: '❌ Ban cancelled.', components: [], flags: MessageFlags.Ephemeral });
       }
       if (interaction.customId === 'ban_confirm') {
         const pending = pendingBans.get(interaction.user.id);
         pendingBans.delete(interaction.user.id);
-        if (!pending) return interaction.update({ content: '❌ Geen actieve ban gevonden. Voer het commando opnieuw uit.', components: [] });
+        if (!pending) return interaction.update({ content: '❌ No active ban found. Please run the command again.', components: [] });
         await interaction.deferUpdate();
         try {
           if (pending.type === 'ban') {
             await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 604800, reason: pending.reason });
-            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** gebanned. Reden: ${pending.reason}`, components: [] });
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** banned. Reason: ${pending.reason}`, components: [] });
           }
           if (pending.type === 'softban') {
             await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 604800, reason: pending.reason });
             await pending.guild.members.unban(pending.user.id, 'softban');
-            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** softbanned (kick + berichten verwijderd).`, components: [] });
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** softbanned (kick + messages deleted).`, components: [] });
           }
           if (pending.type === 'tempban') {
             await pending.guild.members.ban(pending.user, { deleteMessageSeconds: 86400, reason: pending.reason });
             setTimeout(async () => {
               await pending.guild.members.unban(pending.user.id, 'tempban expired').catch(() => {});
             }, pending.hours * 3600000);
-            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** tijdelijk gebanned voor **${pending.hours}u**. Reden: ${pending.reason}`, components: [] });
+            return interaction.editReply({ content: `🔨 **${userDisplay(pending.user)}** temporarily banned for **${pending.hours}h**. Reason: ${pending.reason}`, components: [] });
           }
         } catch (e) {
           return interaction.editReply({ content: `❌ ${e.message}`, components: [] });
@@ -6655,7 +6655,7 @@ client.on('interactionCreate', async interaction => {
         const cfg = prefix === 'exec' ? getExecRequestConfig(guildId) : getFounderRequestConfig(guildId);
         const required = cfg.requiredApprovals ?? 2;
 
-        // Check of de gebruiker de juiste rol heeft
+        // Check whether the user has the correct role
         const canVote = cfg.approvalRoles?.length
           ? cfg.approvalRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
           : hasSetup(interaction.member);
@@ -6786,7 +6786,7 @@ client.on('interactionCreate', async interaction => {
             let newRoleName = null;
 
             if (cc.chain.length > 0 && targetMemberForPromo) {
-              // Chain geconfigureerd — automatisch één stap omhoog
+              // Chain configured — automatically one step up
               const result = await promoteInChain(interaction.guild, targetMemberForPromo, interaction.user, guildId);
               if (result.success) {
                 newRoleName = result.newRole.name;
@@ -6795,7 +6795,7 @@ client.on('interactionCreate', async interaction => {
                 await interaction.followUp({ content: `⚠️ Training passed but chain promotion failed: ${result.reason}`, flags: MessageFlags.Ephemeral });
               }
             } else if ((trainingType?.roleIds?.length || trainingType?.roleId) && targetMemberForPromo) {
-              // Geen chain — gebruik training type rol(len)
+              // No chain — use training type role(s)
               const roleIds = trainingType.roleIds?.length ? trainingType.roleIds : (trainingType.roleId ? [trainingType.roleId] : []);
               const roleNames = [];
               for (const rid of roleIds) {
@@ -6806,7 +6806,7 @@ client.on('interactionCreate', async interaction => {
               }
               await interaction.followUp({ content: `✅ Gave ${roleIds.map(r => `<@&${r}>`).join(', ')} to <@${requestUserId}> for passing **${trainingType.name}**.`, flags: MessageFlags.Ephemeral });
             } else {
-              // Geen chain, geen type rol — handmatige selectie
+              // No chain, no type role — manual selection
               await interaction.followUp({
                 content: `### 🎭 Optionally give role(s) to <@${requestUserId}> for passing${trainingType ? ` **${trainingType.name}**` : ''}:`,
                 components: [new ActionRowBuilder().addComponents(
@@ -6816,7 +6816,7 @@ client.on('interactionCreate', async interaction => {
               });
             }
 
-            // Eén enkel announce bericht
+            // A single announce message
             if (tcTr.announceChannel && targetUser) {
               const announceCh = interaction.guild.channels.cache.get(tcTr.announceChannel);
               if (announceCh) {
@@ -6841,7 +6841,7 @@ client.on('interactionCreate', async interaction => {
               }
             }
 
-            // DM naar de gebruiker
+            // DM to the user
             if (targetUser) {
               await targetUser.send({ embeds: [new EmbedBuilder()
                 .setTitle('🎓 Training Passed!')
@@ -6888,7 +6888,7 @@ client.on('interactionCreate', async interaction => {
           .setDescription(interaction.message.embeds[0].description.replace(/\*\*Votes: \d+\/\d+\*\*/, `**Votes: ${count}/${threshold}**`));
 
         if (count >= threshold) {
-          // Vote geslaagd — disable de knop en start sessie
+          // Vote passed — disable the button and start session
           activeVotes.delete(guildId);
           const disabledRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('session__vote').setLabel(`✅ Vote Passed! (${count}/${threshold})`).setStyle(ButtonStyle.Success).setDisabled(true),
@@ -6902,7 +6902,7 @@ client.on('interactionCreate', async interaction => {
           // Cross-server announcement to all departments
           await sendCrossServerAnnouncement(hostUser, voteData.joinLink, voterMentions).catch(console.error);
         } else {
-          // Nog niet genoeg votes — update de count
+          // Not enough votes yet — update the count
           await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
         }
         return;
@@ -7579,7 +7579,7 @@ client.on('interactionCreate', async interaction => {
         if (entry) return interaction.reply({ content: `### ${entry.label}`, components: [channelDropdown(entry.cid, 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 'erlc_set_inrole') {
           return interaction.reply({
-            content: '### 🎮 In-Game Role\n*Leden die in de ERLC server zitten krijgen deze rol automatisch. De rol wordt verwijderd zodra ze de server verlaten. Vereist een Bloxlink API key (`/bloxlinkconfig`) en dat Bloxlink in je server staat.*',
+            content: '### 🎮 In-Game Role\n*Members who are in the ERLC server automatically receive this role. The role is removed as soon as they leave the server. Vereist een Bloxlink API key (`/bloxlinkconfig`) en dat Bloxlink in je server staat.*',
             components: [new ActionRowBuilder().addComponents(
               new RoleSelectMenuBuilder()
                 .setCustomId('erlc_inrole_save')
@@ -7823,9 +7823,9 @@ client.on('interactionCreate', async interaction => {
         }
         if (action === 'whitelist_user') {
           return interaction.reply({
-            content: '### 👤 Selecteer gebruikers voor de whitelist',
+            content: '### 👤 Select users for the whitelist',
             components: [new ActionRowBuilder().addComponents(
-              new UserSelectMenuBuilder().setCustomId('rppd_whitelist_users').setPlaceholder('Selecteer gebruikers...').setMinValues(1).setMaxValues(10)
+              new UserSelectMenuBuilder().setCustomId('rppd_whitelist_users').setPlaceholder('Select users...').setMinValues(1).setMaxValues(10)
             )],
             flags: MessageFlags.Ephemeral,
           });
@@ -8203,7 +8203,7 @@ client.on('interactionCreate', async interaction => {
               }
             }
           } else {
-            // Geen chain — gebruik acceptRoles zoals voorheen
+            // No chain — use acceptRoles as before
             if (appType?.acceptRoles?.length && applicant) {
               for (const roleId of appType.acceptRoles) {
                 const role = interaction.guild.roles.cache.get(roleId);
@@ -8384,20 +8384,20 @@ client.on('interactionCreate', async interaction => {
 
       if (id === 'verify_confirm') {
         const pending = pendingVerifications.get(interaction.user.id);
-        if (!pending) return interaction.reply({ content: '❌ Geen verificatie in behandeling. Klik opnieuw op **Verifiëren** om opnieuw te beginnen.', flags: MessageFlags.Ephemeral });
+        if (!pending) return interaction.reply({ content: '❌ No verification in progress. Click **Verify** again to start over.', flags: MessageFlags.Ephemeral });
         if (Date.now() > pending.expires) {
           pendingVerifications.delete(interaction.user.id);
-          return interaction.reply({ content: '❌ Verificatie verlopen (15 minuten). Klik opnieuw op **Verifiëren** om opnieuw te beginnen.', flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: '❌ Verification expired (15 minutes). Click **Verify** again to start over.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
           const description = await getRobloxDescription(pending.robloxId);
           if (!description.includes(pending.code)) {
-            return interaction.editReply({ content: `❌ Code **${pending.code}** niet gevonden in je Roblox profielbeschrijving.\n\n1. Ga naar je [Roblox profiel](https://www.roblox.com/users/${pending.robloxId}/profile)\n2. Klik op **Profiel bewerken**\n3. Plak \`${pending.code}\` ergens in je beschrijving\n4. Sla op en klik nogmaals op **✅ Klaar, check mijn profiel**` });
+            return interaction.editReply({ content: `❌ Code **${pending.code}** not found in your Roblox profile description.\n\n1. Go to your [Roblox profile](https://www.roblox.com/users/${pending.robloxId}/profile)\n2. Click **Edit Profile**\n3. Paste \`${pending.code}\` anywhere in your description\n4. Save and click **✅ Done, check my profile** again` });
           }
           const vc = getVerificationConfig(guildId);
           await applyVerification(interaction, vc, guildId, pending.robloxUsername, pending.robloxId, 'code');
-        } catch (e) { return interaction.editReply({ content: `❌ Kon je profiel niet controleren. Probeer het later opnieuw.` }); }
+        } catch (e) { return interaction.editReply({ content: `❌ Could not check your profile. Please try again later.` }); }
       }
 
       if (id.startsWith('rating__')) {
@@ -8407,7 +8407,7 @@ client.on('interactionCreate', async interaction => {
         const ratingGId  = parts[3];
         const ticketName = parts.slice(4).join('__');
 
-        // Disable alle knoppen zodat je maar 1x kunt raten
+        // Disable all buttons so you can only rate once
         const disabledRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`rating__1__done`).setLabel('⭐').setStyle(ButtonStyle.Secondary).setDisabled(true),
           new ButtonBuilder().setCustomId(`rating__2__done`).setLabel('⭐⭐').setStyle(ButtonStyle.Secondary).setDisabled(true),
@@ -8416,7 +8416,7 @@ client.on('interactionCreate', async interaction => {
           new ButtonBuilder().setCustomId(`rating__5__done`).setLabel('⭐⭐⭐⭐⭐').setStyle(ButtonStyle.Success).setDisabled(true),
         );
 
-        // Vraag om een reden via modal
+        // Ask for a reason via modal
         const modal = new ModalBuilder()
           .setCustomId(`modal_rating__${stars}__${userId}__${ratingGId}__${ticketName}`)
           .setTitle(`Rate your experience — ${'⭐'.repeat(stars)}`);
@@ -8675,7 +8675,7 @@ client.on('interactionCreate', async interaction => {
           }
         }
 
-        // Duplicate ticket check — ook V2 records checken
+        // Duplicate ticket check — also check V2 records
         if (openTickets.has(interaction.user.id)) {
           const existingId = openTickets.get(interaction.user.id);
           const existing = interaction.guild.channels.cache.get(existingId);
@@ -8822,7 +8822,7 @@ client.on('interactionCreate', async interaction => {
           }
         }
 
-        // Sla intake antwoorden op in aparte map zodat createTicketChannel ze kan ophalen
+        // Store intake answers in a separate map so createTicketChannel can retrieve them
         if (savedIntakeAnswers) {
           ticketIntakeData.set(interaction.user.id, savedIntakeAnswers);
         }
@@ -8911,7 +8911,7 @@ client.on('interactionCreate', async interaction => {
             await trCh.send({ embeds: [new EmbedBuilder().setTitle(`📋 Transcript: ${ch.name}`).setDescription(`\`\`\`\n${text.slice(0, 3990) || 'No messages.'}\n\`\`\``).setColor(0x5865F2).setTimestamp()] });
           }
         }
-        // Zoek de ticket opener op voor rating DM
+        // Look up the ticket opener for the rating DM
         let ticketOpenerId = null;
         for (const [uid, cid] of openTickets.entries()) {
           if (cid === ch.id) { ticketOpenerId = uid; openTickets.delete(uid); break; }
@@ -8930,7 +8930,7 @@ client.on('interactionCreate', async interaction => {
                 .setDescription(`Your ticket **${ch.name}** in **${interaction.guild.name}** has been closed.\n\nHow would you rate your experience? Click a star below!`)
                 .setFooter({ text: 'Your feedback helps us improve!' })
                 .setTimestamp();
-              // Beperk ticket naam tot 30 tekens zodat customId onder 100 blijft
+              // Limit ticket name to 30 characters so customId stays under 100
               const safeTicketName = ch.name.slice(0, 30);
               const ratingRow = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId(`rating__1__${ticketOpenerId}__${guildId}__${safeTicketName}`).setLabel('⭐').setStyle(ButtonStyle.Secondary),
@@ -9011,8 +9011,8 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({
           content: ids[0]
-            ? `✅ In-game rol ingesteld op <@&${ids[0]}>! Leden die in de ERLC server zitten krijgen deze rol automatisch.`
-            : `✅ In-game rol verwijderd.`,
+            ? `✅ In-game role set to <@&${ids[0]}>! Members who are in the ERLC server automatically receive this role.`
+            : `✅ In-game role removed.`,
           flags: MessageFlags.Ephemeral,
         });
       }
@@ -9072,13 +9072,13 @@ client.on('interactionCreate', async interaction => {
         if (cc.chain.some(e => e.roleId === roleId)) {
           return interaction.reply({ content: '❌ This role is already in the chain.', flags: MessageFlags.Ephemeral });
         }
-        // Voeg toe aan het einde van de chain
+        // Add to the end of the chain
         const maxPosition = cc.chain.length ? Math.max(...cc.chain.map(e => e.position)) : 0;
         cc.chain.push({ roleId, position: maxPosition + 1 });
         cc.chain.sort((a, b) => a.position - b.position);
         await saveGuildConfig(guildId);
-        // Bestaande houders van deze rol direct syncen (anders blijft hun naam
-        // verouderd tot de eerstvolgende rolwijziging of bot-herstart)
+        // Sync existing holders of this role immediately (otherwise their name
+        // stays outdated until the next role change or bot restart)
         resyncMembersWithRole(interaction.guild, roleId, guildId).catch(() => {});
         const role = interaction.guild.roles.cache.get(roleId);
         return interaction.reply({
@@ -9101,7 +9101,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      // ════ TRAINING TYPE ROLE SELECT (na aanmaken type) ════
+      // ════ TRAINING TYPE ROLE SELECT (after type creation) ════
       if (interaction.customId.startsWith('tr_type_role__')) {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const typeId = interaction.customId.replace('tr_type_role__', '');
@@ -9120,7 +9120,7 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      // ════ TRAINING PASS ROLE SELECT (handmatige rol na pass) ════
+      // ════ TRAINING PASS ROLE SELECT (manual role after pass) ════
       if (interaction.customId.startsWith('tr_pass_role__')) {
         const targetUserId = interaction.customId.replace('tr_pass_role__', '');
         const targetMember = await interaction.guild.members.fetch(targetUserId).catch(() => null);
@@ -9399,7 +9399,7 @@ client.on('interactionCreate', async interaction => {
           if (!rppW.allowedUsers.includes(uid)) rppW.allowedUsers.push(uid);
         }
         await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ ${interaction.values.map(u => `<@${u}>`).join(', ')} toegevoegd!`, flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `✅ ${interaction.values.map(u => `<@${u}>`).join(', ')} added!`, flags: MessageFlags.Ephemeral });
       }
       if (interaction.customId === 'rppd_protected_roles') {
         const rpp = getRolePingProtectionConfig(guildId);
@@ -9990,8 +9990,8 @@ client.on('interactionCreate', async interaction => {
         // Hernum posities
         cc.chain.forEach((e, i) => { e.position = i + 1; });
         await saveGuildConfig(guildId);
-        // Verwijderde prefix actief van iedereen strippen (anders blijft 'm hangen,
-        // want de "known prefixes" check in syncChainPrefix kent deze tekst niet meer)
+        // Actively strip the removed prefix from everyone (otherwise it lingers,
+        // since the "known prefixes" check in syncChainPrefix no longer recognizes this text)
         resyncAfterRankRemoval(interaction.guild, removedPrefix, guildId).catch(() => {});
         return interaction.reply({ content: `✅ **${role?.name ?? val}** removed from the chain.`, flags: MessageFlags.Ephemeral });
       }
@@ -10436,7 +10436,7 @@ client.on('interactionCreate', async interaction => {
         const endsAtDay = parseDDMMYYYY(endRaw);
         if (startsAt === null || endsAtDay === null) return interaction.reply({ content: '❌ Invalid date format. Please use `DD-MM-YYYY`, e.g. `20-06-2026`.', flags: MessageFlags.Ephemeral });
 
-        // Eind van de einddag (23:59:59) zodat de hele dag wordt meegerekend
+        // End of the end day (23:59:59) so the entire day is included
         const endsAt = endsAtDay + 86_400_000 - 1;
 
         const today = new Date(); today.setUTCHours(0, 0, 0, 0);
@@ -10541,8 +10541,8 @@ client.on('interactionCreate', async interaction => {
         const prefix = interaction.fields.getTextInputValue('coc_prefix_val').trim();
         entry.nicknamePrefix = prefix || null;
         await saveGuildConfig(guildId);
-        // Bestaande houders krijgen direct de nieuwe prefix — eerst de oude tekst
-        // strippen (die staat niet meer in "known prefixes" zodra hij overschreven is)
+        // Existing holders immediately get the new prefix — first strip the old
+        // text (it's no longer in "known prefixes" once it's been overwritten)
         resyncAfterRankRemoval(interaction.guild, oldPrefix, guildId).catch(() => {});
         const role = interaction.guild.roles.cache.get(roleId);
         return interaction.reply({
@@ -11095,17 +11095,17 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         try {
           await erlcRequest('/server', 'GET', null, guildId);
-          return interaction.reply({ content: `✅ ERLC Server Key opgeslagen en **geverifieerd**! De verbinding werkt.`, flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: `✅ ERLC Server Key saved and **verified**! The connection works.`, flags: MessageFlags.Ephemeral });
         } catch (e) {
-          // 403 = key wordt geweigerd door ERLC (ongeldig, verlopen of niet gekoppeld aan deze server) — dit IS een fout
+          // 403 = key rejected by ERLC (invalid, expired, or not linked to this server) — this IS an error
           if (e.message?.includes('403')) {
-            return interaction.reply({ content: `⚠️ Key opgeslagen, maar ERLC geeft **403 Forbidden** terug. De key is ongeldig, verlopen, of hoort bij een andere server. Genereer in-game een nieuwe key met \`:serverkey\` en probeer opnieuw.`, flags: MessageFlags.Ephemeral });
+            return interaction.reply({ content: `⚠️ Key saved, but ERLC returned **403 Forbidden**. The key is invalid, expired, or belongs to a different server. Generate a new key in-game with \`:serverkey\` and try again.`, flags: MessageFlags.Ephemeral });
           }
           // 401 = echt foute key
           if (e.message?.includes('401')) {
-            return interaction.reply({ content: `⚠️ Key opgeslagen maar ERLC geeft **unauthorized** terug. Controleer de key.`, flags: MessageFlags.Ephemeral });
+            return interaction.reply({ content: `⚠️ Key saved but ERLC returned **unauthorized**. Double-check the key.`, flags: MessageFlags.Ephemeral });
           }
-          return interaction.reply({ content: `✅ ERLC Server Key opgeslagen! (Kon niet verbinden: ${e.message} — dit kan komen doordat de server offline is.)`, flags: MessageFlags.Ephemeral });
+          return interaction.reply({ content: `✅ ERLC Server Key saved! (Could not connect: ${e.message} — this may be because the server is offline.)`, flags: MessageFlags.Ephemeral });
         }
       }
 
@@ -11138,10 +11138,10 @@ client.on('interactionCreate', async interaction => {
 
         try {
           const robloxUser = await getRobloxUser(robloxUsername);
-          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox gebruiker **${robloxUsername}** niet gevonden. Controleer de spelling en probeer opnieuw.` });
+          if (!robloxUser) return interaction.editReply({ content: `❌ Roblox user **${robloxUsername}** not found. Check the spelling and try again.` });
 
-          // ── Stap 1: Bloxlink check ──
-          // Kijk of de Discord-gebruiker via Bloxlink al gekoppeld is aan dit Roblox account
+          // ── Step 1: Bloxlink check ──
+          // Check whether the Discord user is already linked to this Roblox account via Bloxlink
           if (bc.apiKey) {
             try {
               const bloxRes = await fetch(`https://api.blox.link/v4/public/guilds/${guildId}/discord-to-roblox/${interaction.user.id}`, {
@@ -11152,18 +11152,18 @@ client.on('interactionCreate', async interaction => {
                 const bloxData = await bloxRes.json();
                 const linkedRobloxId = bloxData?.robloxID ? String(bloxData.robloxID) : null;
                 if (linkedRobloxId && linkedRobloxId === String(robloxUser.id)) {
-                  // Match — direct verifiëren via Bloxlink
+                  // Match — verify immediately via Bloxlink
                   await applyVerification(interaction, vc, guildId, robloxUser.name, robloxUser.id, 'Bloxlink');
                   return;
                 } else if (linkedRobloxId && linkedRobloxId !== String(robloxUser.id)) {
-                  // Bloxlink zegt een ander account — laat het weten maar ga door met code-methode
-                  // (gebruiker kan zijn Bloxlink-account hebben gewijzigd)
+                  // Bloxlink reports a different account — note it but continue with the code method
+                  // (user may have changed their Bloxlink account)
                 }
               }
-            } catch { /* Bloxlink niet beschikbaar, ga door met code-methode */ }
+            } catch { /* Bloxlink unavailable, continue with the code method */ }
           }
 
-          // ── Stap 2: Fallback — code in Roblox profielbeschrijving ──
+          // ── Step 2: Fallback — code in Roblox profile description ──
           const code = `VERIFY-${genVerificationCode()}`;
           pendingVerifications.set(interaction.user.id, {
             code,
@@ -11172,33 +11172,33 @@ client.on('interactionCreate', async interaction => {
             expires: Date.now() + 15 * 60 * 1000,
           });
           const confirmRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setLabel('✏️ Bewerk mijn Roblox Profiel').setStyle(ButtonStyle.Link).setURL(`https://www.roblox.com/users/${robloxUser.id}/profile`),
-            new ButtonBuilder().setCustomId('verify_confirm').setLabel('✅ Klaar, check mijn profiel').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setLabel('✏️ Edit my Roblox Profile').setStyle(ButtonStyle.Link).setURL(`https://www.roblox.com/users/${robloxUser.id}/profile`),
+            new ButtonBuilder().setCustomId('verify_confirm').setLabel('✅ Done, check my profile').setStyle(ButtonStyle.Success),
           );
           const bloxlinkNote = bc.apiKey
-            ? `\n> ⚠️ Je Bloxlink account komt niet overeen met **${robloxUser.name}**. Verifieer via de onderstaande code, of update je Bloxlink verificatie via \`/verify\` in een Bloxlink-server.`
+            ? `\n> ⚠️ Your Bloxlink account doesn't match **${robloxUser.name}**. Verify using the code below, or update your Bloxlink verification via \`/verify\` in a Bloxlink-enabled server.`
             : '';
           return interaction.editReply({
             embeds: [new EmbedBuilder()
-              .setTitle('🔐 Stap 2 — Voeg de code toe aan je Roblox profiel')
+              .setTitle('🔐 Step 2 — Add the code to your Roblox profile')
               .setColor(0xFEE75C)
               .setDescription([
-                `**Gevonden:** ${robloxUser.name} (ID: ${robloxUser.id})`,
+                `**Found:** ${robloxUser.name} (ID: ${robloxUser.id})`,
                 bloxlinkNote,
                 ``,
-                `**1.** Ga naar je [Roblox profiel](https://www.roblox.com/users/${robloxUser.id}/profile)`,
-                `**2.** Klik op **Profiel bewerken**`,
-                `**3.** Plak deze code ergens in je **beschrijving:**`,
+                `**1.** Go to your [Roblox profile](https://www.roblox.com/users/${robloxUser.id}/profile)`,
+                `**2.** Click **Edit Profile**`,
+                `**3.** Paste this code anywhere in your **description:**`,
                 `\`\`\`${code}\`\`\``,
-                `**4.** Sla je profiel op`,
-                `**5.** Klik op de knop hieronder`,
+                `**4.** Save your profile`,
+                `**5.** Click the button below`,
                 ``,
-                `⏳ Deze code verloopt over **15 minuten**.`,
+                `⏳ This code expires in **15 minutes**.`,
               ].join('\n'))
             ],
             components: [confirmRow],
           });
-        } catch (e) { return interaction.editReply({ content: `❌ Kon Roblox niet bereiken. Probeer het later opnieuw.` }); }
+        } catch (e) { return interaction.editReply({ content: `❌ Could not reach Roblox. Please try again later.` }); }
       }
 
       if (mid.startsWith('modal_reqapprovals__')) {
@@ -11290,7 +11290,7 @@ client.on('interactionCreate', async interaction => {
         const reason     = interaction.fields.getTextInputValue('rating_reason').trim() || null;
         const starStr    = '⭐'.repeat(stars);
 
-        // Bevestig aan de gebruiker
+        // Confirm to the user
         await interaction.reply({
           embeds: [new EmbedBuilder()
             .setTitle('✅ Thanks for your feedback!')
@@ -11319,13 +11319,13 @@ client.on('interactionCreate', async interaction => {
               .setThumbnail(member?.user.displayAvatarURL({ dynamic: true }) ?? null)
               .setTimestamp();
 
-            // Staff log kanaal — volledige info
+            // Staff log channel — full info
             if (rc.enabled && rc.logChannel) {
               const logCh = ratingGuild.channels.cache.get(rc.logChannel);
               if (logCh) await logCh.send({ embeds: [staffEmbed] }).catch(() => {});
             }
 
-            // Publiek kanaal — zonder gebruikersnaam voor privacy
+            // Public channel — without username for privacy
             if (rc.enabled && rc.publicChannel) {
               const pubCh = ratingGuild.channels.cache.get(rc.publicChannel);
               if (pubCh) {
@@ -11368,7 +11368,7 @@ client.on('interactionCreate', async interaction => {
         ticketIntakeData.set(interaction.user.id, intakeAnswers);
         ticketRulesPending.set(interaction.user.id, { typeId: intakeTypeId, guildId, intakeAnswers });
 
-        // Nu pre-check doen of direct ticket aanmaken
+        // Now run pre-check or create the ticket directly
         const resolvedPreCheckEnabled = resolveTicketSetting(type, tc, pc, 'preCheck.enabled');
         const resolvedRulesText       = resolveTicketSetting(type, tc, pc, 'preCheck.rulesText');
 
@@ -11385,7 +11385,7 @@ client.on('interactionCreate', async interaction => {
           return interaction.reply({ embeds: [rulesEmbed], components: [rulesRow], flags: MessageFlags.Ephemeral });
         }
 
-        // Geen pre-check — direct ticket aanmaken
+        // No pre-check — create ticket directly
         ticketRulesPending.delete(interaction.user.id);
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         try {
@@ -11861,7 +11861,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Web server listening on port ${PORT}`);
 });
 
-//Start: eerst DB verbinden, dan bot inloggen //
+//Start: connect to DB first, then log the bot in //
 (async () => {
   if (!process.env.TOKEN) {
     console.error('❌ FATAL: TOKEN environment variable is not set.');
