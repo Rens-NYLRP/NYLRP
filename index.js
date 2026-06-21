@@ -2953,7 +2953,7 @@ function buildTicketTypeDropdown(ticketTypes) {
   });
   const select = new StringSelectMenuBuilder()
     .setCustomId('tkt__select_type')
-    .setPlaceholder('📋 Selecteer een ticket type...')
+    .setPlaceholder('📋 Select a ticket type...')
     .addOptions(options);
   return [new ActionRowBuilder().addComponents(select)];
 }
@@ -4272,7 +4272,7 @@ client.once('clientReady', async () => {
             }
           }
         }
-        // firstPoll pas op false zetten NADAT alle initiële data geseed is
+        // only set firstPoll to false AFTER all initial data has been seeded
         state.firstPoll = false;
 
       } catch (e) { /* silently skip guild on error */ }
@@ -7583,7 +7583,7 @@ client.on('interactionCreate', async interaction => {
             components: [new ActionRowBuilder().addComponents(
               new RoleSelectMenuBuilder()
                 .setCustomId('erlc_inrole_save')
-                .setPlaceholder('Selecteer de in-game rol...')
+                .setPlaceholder('Select the in-game role...')
                 .setMinValues(0)
                 .setMaxValues(1)
             )],
