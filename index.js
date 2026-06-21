@@ -911,7 +911,7 @@ function getDepartmentsConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.departments) gc.departments = {
     isMainServer: false,
-    departments: [],  // [{ id, name, guildId, announcementChannelId }]
+    departments: [],  // [{ id, name, guildId, announcementChannelId, discordLink, applicationLink, description, banner }]
   };
   if (!Array.isArray(gc.departments.departments)) gc.departments.departments = [];
   return gc.departments;
@@ -2666,21 +2666,32 @@ function buildDepartmentsSetupPayload(guildId) {
     .setDescription(
       `**This server is:** ${dc.isMainServer ? '✅ Main Server' : '❌ Not the main server'}\n\n` +
       (depts.length
-        ? depts.map((d, i) =>
-            `**${i + 1}. ${d.name}**\nServer ID: \`${d.guildId}\`\nAnnouncement Channel ID: \`${d.announcementChannelId || '*Not set*'}\``
-          ).join('\n\n')
+        ? depts.map((d, i) => [
+            `**${i + 1}. ${d.name}**`,
+            d.description ? `> ${d.description.slice(0, 80)}` : '',
+            `🔗 Discord: ${d.discordLink || '*Not set*'}`,
+            `📝 Apply: ${d.applicationLink || '*Not set*'}`,
+            d.banner ? `🖼️ Banner: [Set](${d.banner})` : '🖼️ Banner: *Not set*',
+          ].filter(Boolean).join('\n')).join('\n\n')
         : '*No departments configured yet.*')
     );
-  const btns = [
+  const rows = [];
+  const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dept__toggle_main').setLabel(dc.isMainServer ? 'Unset Main Server' : 'Set as Main Server').setStyle(dc.isMainServer ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🏠'),
     new ButtonBuilder().setCustomId('dept__add').setLabel('Add Department').setStyle(ButtonStyle.Success).setEmoji('➕'),
-  ];
+  );
   if (depts.length) {
-    btns.push(
-      new ButtonBuilder().setCustomId('dept__remove').setLabel('Remove').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-    );
+    r1.addComponents(new ButtonBuilder().setCustomId('dept__remove').setLabel('Remove').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
+    r1.addComponents(new ButtonBuilder().setCustomId('dept__send_panel').setLabel('Send Panel').setStyle(ButtonStyle.Success).setEmoji('📨'));
+    // Dropdown to select a department to edit
+    const sel = new StringSelectMenuBuilder()
+      .setCustomId('dept__edit_select')
+      .setPlaceholder('✏️ Edit a department...')
+      .addOptions(depts.slice(0, 25).map(d => ({ label: d.name, value: String(d.id) })));
+    rows.push(new ActionRowBuilder().addComponents(sel));
   }
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(btns)], flags: MessageFlags.Ephemeral };
+  rows.unshift(r1);
+  return { embeds: [embed], components: rows, flags: MessageFlags.Ephemeral };
 }
 
 function buildAntipingSetupPayload(guildId) {
@@ -2932,13 +2943,19 @@ function buildTicketPanelEmbed(tc) {
   if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
   return embed;
 }
-function buildTicketTypeButtons(ticketTypes) {
-  const rows = [];
-  for (let i = 0; i < Math.min(ticketTypes.length, 25); i += 5) {
-    const chunk = ticketTypes.slice(i, i + 5);
-    rows.push(new ActionRowBuilder().addComponents(chunk.map(t => safeSetEmoji(new ButtonBuilder().setCustomId(`tkt__open__${t.id}`).setLabel(t.label.slice(0, 80)).setStyle(colorToButtonStyle(t.color)), t.emoji))));
-  }
-  return rows;
+function buildTicketTypeDropdown(ticketTypes) {
+  // Ticket selectie via dropdown — max 25 opties
+  const options = ticketTypes.slice(0, 25).map(t => {
+    const opt = { label: t.label.slice(0, 100), value: String(t.id) };
+    if (t.description) opt.description = t.description.slice(0, 100);
+    if (t.emoji) opt.emoji = t.emoji;
+    return opt;
+  });
+  const select = new StringSelectMenuBuilder()
+    .setCustomId('tkt__select_type')
+    .setPlaceholder('📋 Selecteer een ticket type...')
+    .addOptions(options);
+  return [new ActionRowBuilder().addComponents(select)];
 }
 function buildTicketSetupPayload(guildId) {
   const tc = getTicketConfig(guildId);
@@ -7426,6 +7443,19 @@ client.on('interactionCreate', async interaction => {
           const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department to remove...').addOptions(depts.map(d => ({ label: d.name, value: String(d.id), description: `Server: ${d.guildId}` })));
           return interaction.reply({ content: '### 🗑️ Select department to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
+
+        if (action === 'send_panel') {
+          const depts = dc.departments ?? [];
+          if (!depts.length) return interaction.reply({ content: '❌ No departments configured.', flags: MessageFlags.Ephemeral });
+          const modal = new ModalBuilder().setCustomId('modal_dept_send_panel').setTitle('Send Department Panel');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_channel').setLabel('Channel ID to send panel to').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy Channel ID')),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_title').setLabel('Panel Title').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('🏢 Our Departments').setMaxLength(100)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_description').setLabel('Panel Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setPlaceholder('Select a department below to view more information.').setMaxLength(300)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_banner').setLabel('Panel Banner URL (optional)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('https://example.com/banner.png')),
+          );
+          return interaction.showModal(modal);
+        }
       }
 
       // ════ BOT CONFIG BUTTONS ════
@@ -8496,7 +8526,7 @@ client.on('interactionCreate', async interaction => {
           const ch = interaction.guild.channels.cache.get(tc.ticketChannel);
           if (!ch) return interaction.reply({ content: '❌ Channel not found.', flags: MessageFlags.Ephemeral });
           await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeButtons(tc.ticketTypes) });
+          await ch.send({ embeds: [buildTicketPanelEmbed(tc)], components: buildTicketTypeDropdown(tc.ticketTypes) });
           await saveGuildConfig(guildId);
           return interaction.editReply({ content: `✅ Ticket panel deployed!` });
         }
@@ -9647,6 +9677,17 @@ client.on('interactionCreate', async interaction => {
 
     // ══ STRING SELECT MENUS ══
     if (interaction.isStringSelectMenu()) {
+      // ════ TICKET TYPE DROPDOWN ════
+      if (interaction.customId === 'tkt__select_type') {
+        const typeId = interaction.values[0];
+        const tc = getTicketConfig(guildId);
+        const ticketType = tc.ticketTypes.find(t => String(t.id) === typeId);
+        if (!ticketType) return interaction.reply({ content: '❌ Ticket type not found.', flags: MessageFlags.Ephemeral });
+        // Fake a button interaction context for reuse of existing open logic
+        interaction.customId = `tkt__open__${typeId}`;
+        // Fall through to the existing tkt__open handler below
+      }
+
       const id = interaction.customId; const val = interaction.values[0];
 
       // ════ CHAIN OF COMMAND — ACTION SELECTION ════
@@ -9997,7 +10038,39 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({ content: '✅ Department removed.', flags: MessageFlags.Ephemeral });
       }
-      // dept_sel_edit removed — departments now configured by ID only
+
+      // ── Edit a department's info/links/banner ──
+      if (id === 'dept__edit_select') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.departments.find(d => String(d.id) === val);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId(`modal_dept_edit__${val}`).setTitle(`Edit: ${dept.name.slice(0, 40)}`);
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_desc').setLabel('Short description').setStyle(TextInputStyle.Paragraph).setRequired(false).setValue(dept.description || '').setMaxLength(200).setPlaceholder('e.g. Our law enforcement department...')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_discord').setLabel('Discord Invite Link').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.discordLink || '').setPlaceholder('https://discord.gg/...')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_apply').setLabel('Application Link').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.applicationLink || '').setPlaceholder('https://forms.gle/... or discord link')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_banner').setLabel('Banner Image URL').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.banner || '').setPlaceholder('https://example.com/banner.png')),
+        );
+        return interaction.showModal(modal);
+      }
+
+      // ── Public department info panel (shown privately to user) ──
+      if (id === 'dept__info_select') {
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.departments.find(d => String(d.id) === val);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        const embed = new EmbedBuilder()
+          .setTitle(`🏢 ${dept.name}`)
+          .setColor(0xEB459E);
+        if (dept.description) embed.setDescription(dept.description);
+        const fields = [];
+        if (dept.discordLink)     fields.push({ name: '🔗 Discord Server', value: dept.discordLink, inline: true });
+        if (dept.applicationLink) fields.push({ name: '📝 Apply', value: dept.applicationLink, inline: true });
+        if (fields.length) embed.addFields(fields);
+        if (dept.banner) embed.setImage(dept.banner);
+        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      }
 
       if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Removed from autoroles.`, flags: MessageFlags.Ephemeral }); }
       if (id === 'smd_delete')      { const sm = getSavedMessagesConfig(guildId); delete sm.messages[val]; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Deleted.', flags: MessageFlags.Ephemeral }); }
@@ -10568,9 +10641,48 @@ client.on('interactionCreate', async interaction => {
         if (!/^\d{17,20}$/.test(deptGuildId)) return interaction.reply({ content: '❌ Invalid Server ID.', flags: MessageFlags.Ephemeral });
         if (!isValidUrl(webhookUrl) || !webhookUrl.includes('discord.com/api/webhooks')) return interaction.reply({ content: '❌ Invalid webhook URL. Must be a Discord webhook URL.', flags: MessageFlags.Ephemeral });
         if (dc.departments.some(d => d.guildId === deptGuildId)) return interaction.reply({ content: `❌ Server \`${deptGuildId}\` is already linked.`, flags: MessageFlags.Ephemeral });
-        dc.departments.push({ id: genId(), name, guildId: deptGuildId, announcementChannelId: null, webhookUrl });
+        dc.departments.push({ id: genId(), name, guildId: deptGuildId, announcementChannelId: null, webhookUrl, discordLink: null, applicationLink: null, description: null, banner: null });
         await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Department **${name}** added via webhook!\n\n**How to create a webhook:** Go to the department server → channel settings → Integrations → Webhooks → New Webhook → Copy URL.`, flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `✅ Department **${name}** added! Use the edit dropdown to add a description, links and banner.`, flags: MessageFlags.Ephemeral });
+      }
+
+      // ── Department Edit (info/links/banner) ──
+      if (mid.startsWith('modal_dept_edit__')) {
+        const deptId = mid.replace('modal_dept_edit__', '');
+        const dc = getDepartmentsConfig(guildId);
+        const dept = dc.departments.find(d => String(d.id) === deptId);
+        if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+        const desc    = interaction.fields.getTextInputValue('dept_edit_desc').trim();
+        const discord = interaction.fields.getTextInputValue('dept_edit_discord').trim();
+        const apply   = interaction.fields.getTextInputValue('dept_edit_apply').trim();
+        const banner  = interaction.fields.getTextInputValue('dept_edit_banner').trim();
+        if (desc)    dept.description      = desc;
+        if (discord) dept.discordLink      = discord;
+        if (apply)   dept.applicationLink  = apply;
+        if (banner)  dept.banner           = banner;
+        await saveGuildConfig(guildId);
+        return interaction.update(buildDepartmentsSetupPayload(guildId));
+      }
+
+      // ── Department Panel Send ──
+      if (mid === 'modal_dept_send_panel') {
+        const dc = getDepartmentsConfig(guildId);
+        const depts = dc.departments ?? [];
+        const channelId   = interaction.fields.getTextInputValue('dept_panel_channel').trim();
+        const title       = interaction.fields.getTextInputValue('dept_panel_title').trim() || '🏢 Departments';
+        const description = interaction.fields.getTextInputValue('dept_panel_description').trim() || 'Select a department below to view more information.';
+        const banner      = interaction.fields.getTextInputValue('dept_panel_banner').trim();
+        const ch = interaction.guild.channels.cache.get(channelId);
+        if (!ch) return interaction.reply({ content: '❌ Channel not found. Make sure you copied the Channel ID correctly.', flags: MessageFlags.Ephemeral });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(0xEB459E);
+        if (banner) embed.setImage(banner);
+        const select = new StringSelectMenuBuilder()
+          .setCustomId('dept__info_select')
+          .setPlaceholder('🏢 Select a department...')
+          .addOptions(depts.slice(0, 25).map(d => ({ label: d.name, value: String(d.id), description: d.description?.slice(0, 100) ?? undefined })));
+        await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
+        return interaction.editReply({ content: `✅ Department panel sent to <#${channelId}>!` });
       }
 
       if (mid === 'modal_cnt_labels') {
