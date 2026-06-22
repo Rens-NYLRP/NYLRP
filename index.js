@@ -911,7 +911,11 @@ function getDepartmentsConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.departments) gc.departments = {
     isMainServer: false,
-    departments: [],  // [{ id, name, guildId, announcementChannelId, discordLink, applicationLink, description, banner }]
+    departments: [],  // [{ id, name, discordLink, applicationLink, description, banner }]
+    panelChannel: null,   // saved channel ID so Send Panel never asks again
+    panelTitle: '🏢 Departments',
+    panelDescription: 'Select a department below to view its information, Discord link, and application.',
+    panelBanner: null,
   };
   if (!Array.isArray(gc.departments.departments)) gc.departments.departments = [];
   return gc.departments;
@@ -2119,8 +2123,221 @@ function getBloxlinkConfig(guildId) {
 }
 
 // ════════════════════════════════════════════
+// MELONLY API
+// API key is read from process.env.MELONLY_API_KEY (set in Render).
+// Base URL: https://api.melonly.xyz/api/v1
+// ════════════════════════════════════════════
+
+const MELONLY_BASE = 'https://api.melonly.xyz/api/v1';
+
+// Fetch all pages of a Melonly paginated endpoint.
+// Returns a flat array of all items across all pages.
+async function melonlyFetchAll(path, apiKey) {
+  const results = [];
+  let page = 1;
+  while (true) {
+    const res = await fetch(`${MELONLY_BASE}${path}?page=${page}&limit=100`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error(`Melonly API ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    results.push(...(body.data ?? []));
+    if (page >= (body.totalPages ?? 1)) break;
+    page++;
+  }
+  return results;
+}
+
+// Per-guild Melonly quota configuration.
+// melony: { apiKey (overridden by env), quotaHours, logChannel, wave (auto from Melonly) }
+function getMelonlyConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.melony) gc.melony = {
+    enabled:    false,
+    quotaHours: 2,       // default quota — configurable per guild
+    logChannel: null,    // channel to post the quota review message
+    currentWave: null,   // wave number we last ran a check for
+  };
+  return gc.melony;
+}
+
+// Build a cache of { discordId → melonyMemberId } for quick lookups.
+// We walk all Melonly members page by page. The members endpoint returns
+// the Melonly internal id but NOT a discordId directly — however the
+// GET /server/members/discord/:discordId endpoint lets us confirm a user.
+// For the quota check we go the other direction: for each Discord member
+// we look them up by Discord ID once per wave and cache the result.
+const _melonyMemberCache = new Map(); // guildId → Map(discordId → melonyMemberId)
+
+async function getMelonyMemberId(guildId, discordId, apiKey) {
+  if (!_melonyMemberCache.has(guildId)) _melonyMemberCache.set(guildId, new Map());
+  const cache = _melonyMemberCache.get(guildId);
+  if (cache.has(discordId)) return cache.get(discordId);
+  try {
+    const res = await fetch(`${MELONLY_BASE}/server/members/discord/${discordId}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) { cache.set(discordId, null); return null; }
+    const data = await res.json();
+    cache.set(discordId, data.id ?? null);
+    return data.id ?? null;
+  } catch { cache.set(discordId, null); return null; }
+}
+
+// Core quota check — called at wave end (or manually via /checkquota).
+// Flow:
+//   1. Fetch all shifts for current wave from Melonly
+//   2. Group by memberId, sum hours (endedAt - createdAt - break time)
+//   3. For every Discord member in the guild:
+//      a. Look up their Melonly memberId
+//      b. Check if they are on LOA → skip with a note
+//      c. Compare hours against quota
+//   4. Post a summary to the log channel, ping SHR roles
+//   5. Staff clicks ✅ Confirm to issue infractions, or ❌ Cancel to abort
+async function runMelonyQuotaCheck(guild) {
+  const guildId = guild.id;
+  const mc = getMelonlyConfig(guildId);
+  const apiKey = process.env.MELONLY_API_KEY;
+  if (!apiKey || !mc.enabled || !mc.logChannel) return;
+  const logCh = guild.channels.cache.get(mc.logChannel);
+  if (!logCh) return;
+
+  // Fetch all shifts for the current wave
+  let shifts;
+  try {
+    shifts = await melonlyFetchAll('/server/shifts', apiKey);
+  } catch (e) {
+    await logCh.send({ content: `❌ Melonly quota check failed: could not fetch shifts.\n\`${e.message}\`` }).catch(() => {});
+    return;
+  }
+
+  // Only look at the latest wave (highest wave number)
+  const latestWave = shifts.reduce((max, s) => Math.max(max, s.wave ?? 0), 0);
+  const waveShifts = shifts.filter(s => s.wave === latestWave && s.endedAt);
+
+  // Sum hours per Melonly memberId (subtract break time)
+  const hoursPerMember = new Map(); // melonyMemberId → total hours
+  for (const shift of waveShifts) {
+    if (!shift.memberId || !shift.endedAt || !shift.createdAt) continue;
+    const totalMs = (shift.endedAt - shift.createdAt) * 1000;
+    const breakMs = (shift.breakTimestamps ?? []).reduce((sum, b) => {
+      if (b.start && b.end) return sum + ((b.end - b.start) * 1000);
+      return sum;
+    }, 0);
+    const netHours = Math.max(0, (totalMs - breakMs) / 3_600_000);
+    hoursPerMember.set(shift.memberId, (hoursPerMember.get(shift.memberId) ?? 0) + netHours);
+  }
+
+  // Get active LOAs for this guild
+  const lc = getLOAConfig(guildId);
+  const now = Date.now();
+  const onLOA = new Set(
+    Object.entries(lc.active ?? {})
+      .filter(([, l]) => l.applied && l.endsAt > now)
+      .map(([uid]) => uid)
+  );
+
+  // Check every guild member (non-bot) against the quota
+  const pc = getPermissionsConfig(guildId);
+  const allMembers = await guild.members.fetch().catch(() => null);
+  if (!allMembers) return;
+
+  const failed  = []; // { discordId, hours }
+  const skipped = []; // { discordId, reason }
+
+  for (const [discordId, member] of allMembers) {
+    if (member.user.bot) continue;
+    // Only check members who have at least one SHR/staff role (skip normal members)
+    const isStaff = [...(pc.shrRoles ?? []), ...(pc.adminRoles ?? []), ...(pc.modRoles ?? []), ...(pc.staffRoles ?? [])].some(r => member.roles.cache.has(r));
+    if (!isStaff) continue;
+
+    if (onLOA.has(discordId)) {
+      skipped.push({ discordId, reason: 'On LOA' });
+      continue;
+    }
+
+    const melonyId = await getMelonyMemberId(guildId, discordId, apiKey);
+    if (!melonyId) {
+      skipped.push({ discordId, reason: 'Not in Melonly' });
+      continue;
+    }
+
+    const hours = hoursPerMember.get(melonyId) ?? 0;
+    if (hours < mc.quotaHours) {
+      failed.push({ discordId, hours: Math.round(hours * 10) / 10 });
+    }
+  }
+
+  if (!failed.length && !skipped.length) {
+    await logCh.send({ content: `✅ **Wave ${latestWave} Quota Check** — Everyone met the quota of **${mc.quotaHours}h**! 🎉` }).catch(() => {});
+    return;
+  }
+
+  // Build the confirm message
+  const shrPing = (pc.shrRoles ?? []).map(r => `<@&${r}>`).join(' ');
+  const failLines  = failed.map(f  => `> <@${f.discordId}> — **${f.hours}h** / ${mc.quotaHours}h`).join('\n') || '*None*';
+  const skipLines  = skipped.map(s => `> <@${s.discordId}> — ${s.reason}`).join('\n') || '*None*';
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📋 Wave ${latestWave} — Quota Check`)
+    .setColor(0xED4245)
+    .setDescription(`Quota: **${mc.quotaHours} hours** per wave\n\nReview the list below. Click **✅ Confirm** to issue infractions to everyone who failed, or **❌ Cancel** to do nothing.`)
+    .addFields(
+      { name: `❌ Failed Quota (${failed.length})`, value: failLines.slice(0, 1024), inline: false },
+      { name: `⏭️ Skipped (${skipped.length})`, value: skipLines.slice(0, 1024), inline: false },
+    )
+    .setFooter({ text: `Wave ${latestWave} • ${new Date().toUTCString()}` })
+    .setTimestamp();
+
+  // Store pending check in memory so the confirm button can access it
+  const checkId = `mqc_${guildId}_${latestWave}`;
+  pendingMelonyChecks.set(checkId, { failed, wave: latestWave, guildId });
+  setTimeout(() => pendingMelonyChecks.delete(checkId), 24 * 60 * 60 * 1000); // expire after 24h
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`melony_confirm__${checkId}`).setLabel('✅ Confirm — Issue Infractions').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`melony_cancel__${checkId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
+  );
+
+  await logCh.send({ content: shrPing || undefined, embeds: [embed], components: [row] }).catch(() => {});
+}
+
+// In-memory store for pending quota confirm actions
+const pendingMelonyChecks = new Map(); // checkId → { failed, wave, guildId }
+
+// getMelonlyConfig getter for setup command (reused below)
+function buildMelonySetupPayload(guildId) {
+  const mc = getMelonlyConfig(guildId);
+  const hasKey = !!process.env.MELONLY_API_KEY;
+  return {
+    embeds: [new EmbedBuilder()
+      .setTitle('🍈 Melonly Integration')
+      .setColor(0x57F287)
+      .setDescription(
+        `**API Key:** ${hasKey ? '✅ Set via Render env `MELONLY_API_KEY`' : '❌ Not set — add `MELONLY_API_KEY` to Render env vars'}\n` +
+        `**Status:** ${mc.enabled ? '✅ Enabled' : '❌ Disabled'}\n` +
+        `**Quota:** ${mc.quotaHours}h per wave\n` +
+        `**Log Channel:** ${mc.logChannel ? `<#${mc.logChannel}>` : '*Not set*'}\n\n` +
+        `When a wave ends, the bot fetches shift data from Melonly, compares against the quota, skips anyone on LOA, then posts a review message here for SHR to confirm before issuing infractions.`
+      )
+    ],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('melony__toggle').setLabel(mc.enabled ? '⏸️ Disable' : '▶️ Enable').setStyle(mc.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('melony__set_quota').setLabel('⏱️ Set Quota Hours').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('melony__set_channel').setLabel('📢 Set Log Channel').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('melony__run_now').setLabel('🔄 Run Check Now').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+    flags: MessageFlags.Ephemeral,
+  };
+}
+
+// ════════════════════════════════════════════
 // BLOXLINK RATE-LIMITED QUEUE
-// Max 1 request per 250ms (= 4/s) — Bloxlink free tier limiet is ~5/s.
+// Max 1 request per 250ms (= 4/s) — Bloxlink free tier limit is ~5/s.
 // On a 429 we wait for the Retry-After header and try again.
 // ════════════════════════════════════════════
 const _bloxQueue = [];
@@ -2664,25 +2881,37 @@ function buildDepartmentsSetupPayload(guildId) {
     .setTitle('🏢 Departments Setup')
     .setColor(0xEB459E)
     .setDescription(
-      `**This server is:** ${dc.isMainServer ? '✅ Main Server' : '❌ Not the main server'}\n\n` +
       (depts.length
         ? depts.map((d, i) => [
             `**${i + 1}. ${d.name}**`,
-            d.description ? `> ${d.description.slice(0, 80)}` : '',
+            d.description ? `> ${d.description.slice(0, 80)}${d.description.length > 80 ? '…' : ''}` : '',
             `🔗 Discord: ${d.discordLink || '*Not set*'}`,
             `📝 Apply: ${d.applicationLink || '*Not set*'}`,
             d.banner ? `🖼️ Banner: [Set](${d.banner})` : '🖼️ Banner: *Not set*',
           ].filter(Boolean).join('\n')).join('\n\n')
         : '*No departments configured yet.*')
+    )
+    .addFields(
+      { name: '📢 Panel Channel', value: dc.panelChannel ? `<#${dc.panelChannel}>` : '*Not set — configure before sending*', inline: true },
+      { name: '🏷️ Panel Title',   value: dc.panelTitle || '🏢 Departments', inline: true },
+      { name: '🖼️ Panel Banner',  value: dc.panelBanner ? `[Set](${dc.panelBanner})` : '*Not set*', inline: true },
+      { name: '📝 Panel Description', value: dc.panelDescription || '*Not set*', inline: false },
     );
   const rows = [];
   const r1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dept__toggle_main').setLabel(dc.isMainServer ? 'Unset Main Server' : 'Set as Main Server').setStyle(dc.isMainServer ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🏠'),
     new ButtonBuilder().setCustomId('dept__add').setLabel('Add Department').setStyle(ButtonStyle.Success).setEmoji('➕'),
+    new ButtonBuilder().setCustomId('dept__config_panel').setLabel('Configure Panel').setStyle(ButtonStyle.Primary).setEmoji('⚙️'),
   );
   if (depts.length) {
     r1.addComponents(new ButtonBuilder().setCustomId('dept__remove').setLabel('Remove').setStyle(ButtonStyle.Danger).setEmoji('🗑️'));
-    r1.addComponents(new ButtonBuilder().setCustomId('dept__send_panel').setLabel('Send Panel').setStyle(ButtonStyle.Success).setEmoji('📨'));
+    r1.addComponents(
+      new ButtonBuilder()
+        .setCustomId('dept__send_panel')
+        .setLabel('Send / Update Panel')
+        .setStyle(dc.panelChannel ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setEmoji('📨')
+        .setDisabled(!dc.panelChannel)
+    );
     // Dropdown to select a department to edit
     const sel = new StringSelectMenuBuilder()
       .setCustomId('dept__edit_select')
@@ -3460,6 +3689,7 @@ const commands = [
   { name: 'setup', description: '[SHR] Open the setup menu' },
   { name: 'erlcconfig', description: '[SHR] Set the ERLC server API key' },
   { name: 'bloxlinkconfig', description: '[SHR] Set the Bloxlink server API key (for in-game role feature)' },
+  { name: 'melonysetup', description: '[SHR] Configure Melonly shift quota integration' },
   { name: 'reviewstaff', description: 'Leave a review for a staff member or view the leaderboard', options: [
     { name: 'staff', type: 6, description: 'Which staff member do you want to review?', required: false },
     { name: 'leaderboard', type: 5, description: 'Show the staff review leaderboard', required: false },
@@ -5264,6 +5494,11 @@ client.on('interactionCreate', async interaction => {
         return interaction.showModal(modal);
       }
 
+      if (cmd === 'melonysetup') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        return interaction.reply(buildMelonySetupPayload(guildId));
+      }
+
       if (cmd === 'warnings') { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral }); const warns = getWarnings(guildId, user.id); if (!warns.length) return interaction.reply({ content: `✅ No warnings.`, flags: MessageFlags.Ephemeral }); return interaction.reply({ flags: MessageFlags.Ephemeral, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${userDisplay(user)}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] }); }
       if (cmd === 'reviewstaff') {
         const src = getStaffReviewConfig(guildId);
@@ -6247,6 +6482,128 @@ client.on('interactionCreate', async interaction => {
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
+      // ════ MELONLY QUOTA CONFIRM ════
+      if (interaction.customId.startsWith('melony_cancel__')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const checkId = interaction.customId.replace('melony_cancel__', '');
+        pendingMelonyChecks.delete(checkId);
+        return interaction.update({ content: '❌ Quota check cancelled. No infractions were issued.', embeds: [], components: [] });
+      }
+
+      if (interaction.customId.startsWith('melony_confirm__')) {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const checkId = interaction.customId.replace('melony_confirm__', '');
+        const pending = pendingMelonyChecks.get(checkId);
+        pendingMelonyChecks.delete(checkId);
+        if (!pending) return interaction.update({ content: '❌ This check has expired or was already processed.', embeds: [], components: [] });
+        await interaction.deferUpdate();
+
+        const ic = getInfractionConfig(guildId);
+        if (!ic.userStrikes)  ic.userStrikes  = {};
+        if (!ic.userHistory)  ic.userHistory  = {};
+
+        const maxLevel = INFRACTION_PROGRESSION.length;
+        let issued = 0;
+
+        for (const { discordId, hours } of pending.failed) {
+          const currentLevel = ic.userStrikes[discordId] ?? 0;
+          const newLevel     = Math.min(currentLevel + 1, maxLevel);
+          ic.userStrikes[discordId] = newLevel;
+          if (!ic.userHistory[discordId]) ic.userHistory[discordId] = [];
+          ic.userHistory[discordId].push({
+            type:      'Warning',
+            reason:    `Shift quota not met for Wave ${pending.wave} (${hours}h logged, required ${getMelonlyConfig(guildId).quotaHours}h)`,
+            evidence:  null,
+            moderator: `Auto (Melonly • Wave ${pending.wave})`,
+            date:      new Date().toUTCString(),
+            level:     newLevel,
+          });
+
+          // Apply progression role if configured
+          const targetMember = await interaction.guild.members.fetch(discordId).catch(() => null);
+          if (targetMember) await applyInfractionLevelRole(targetMember, ic, newLevel).catch(() => {});
+
+          // DM the user
+          const progEntry = getProgressionEntry(newLevel);
+          await client.users.fetch(discordId).then(u => u.send({
+            embeds: [new EmbedBuilder()
+              .setTitle('⚠️ Warning — Shift Quota Not Met')
+              .setColor(0xFEE75C)
+              .setDescription(`You have received a **Warning** in **${interaction.guild.name}** for not meeting your shift quota.`)
+              .addFields(
+                { name: '📝 Reason', value: `Shift quota not met for Wave ${pending.wave} (${hours}h logged, required ${getMelonlyConfig(guildId).quotaHours}h)`, inline: false },
+                { name: '📊 Progression', value: `${progEntry.label} (${newLevel}/${maxLevel})`, inline: true },
+              )
+              .setFooter({ text: 'If you believe this is incorrect, contact a staff member.' })
+              .setTimestamp()
+            ],
+          })).catch(() => {});
+
+          // Post in log channel
+          if (ic.logChannel) {
+            const logCh = interaction.guild.channels.cache.get(ic.logChannel);
+            if (logCh) {
+              const progEntry = getProgressionEntry(newLevel);
+              await logCh.send({ embeds: [new EmbedBuilder()
+                .setTitle(`⚠️ Auto Warning — Quota Not Met`)
+                .setColor(0xFEE75C)
+                .addFields(
+                  { name: '👤 User',     value: `<@${discordId}>`, inline: true },
+                  { name: '⏱️ Hours',    value: `${hours}h / ${getMelonlyConfig(guildId).quotaHours}h`, inline: true },
+                  { name: '📊 Level',    value: `${progEntry.label} (${newLevel}/${maxLevel})`, inline: true },
+                  { name: '🌊 Wave',     value: `${pending.wave}`, inline: true },
+                  { name: '👮 Issued by', value: `Auto (confirmed by ${userDisplay(interaction.user)})`, inline: false },
+                )
+                .setTimestamp()
+              ] }).catch(() => {});
+            }
+          }
+          issued++;
+        }
+
+        await saveGuildConfig(guildId);
+        return interaction.editReply({
+          content: `✅ **${issued}** infraction${issued !== 1 ? 's' : ''} issued for Wave ${pending.wave}. Confirmed by ${userDisplay(interaction.user)}.`,
+          embeds: [],
+          components: [],
+        });
+      }
+
+      // ════ MELONLY SETUP BUTTONS ════
+      if (interaction.customId === 'melony__toggle') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const mc = getMelonlyConfig(guildId);
+        mc.enabled = !mc.enabled;
+        await saveGuildConfig(guildId);
+        return interaction.update(buildMelonySetupPayload(guildId));
+      }
+      if (interaction.customId === 'melony__set_quota') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId('modal_melony_quota').setTitle('Set Shift Quota');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('melony_quota_hours').setLabel('Required hours per wave (e.g. 2)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('2').setValue(String(getMelonlyConfig(guildId).quotaHours)),
+          ),
+        );
+        return interaction.showModal(modal);
+      }
+      if (interaction.customId === 'melony__set_channel') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId('modal_melony_channel').setTitle('Set Quota Log Channel');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('melony_channel_id').setLabel('Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy Channel ID'),
+          ),
+        );
+        return interaction.showModal(modal);
+      }
+      if (interaction.customId === 'melony__run_now') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: '🔄 Running quota check now...', flags: MessageFlags.Ephemeral });
+        await runMelonyQuotaCheck(interaction.guild);
+        return interaction.editReply({ content: '✅ Quota check complete. Check the log channel.' });
+      }
+
       // ════ BAN CONFIRMATION ════
       if (interaction.customId === 'ban_cancel') {
         pendingBans.delete(interaction.user.id);
@@ -7428,11 +7785,9 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (action === 'add') {
-          const modal = new ModalBuilder().setCustomId('modal_dept_add').setTitle('Add Department Server');
+          const modal = new ModalBuilder().setCustomId('modal_dept_add').setTitle('Add Department');
           modal.addComponents(
             new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_name').setLabel('Department name').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_guild_id').setLabel('Department Server ID').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(17).setMaxLength(20).setPlaceholder('Right-click server → Copy Server ID')),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_webhook_url').setLabel('Webhook URL (from that server channel)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('https://discord.com/api/webhooks/...')),
           );
           return interaction.showModal(modal);
         }
@@ -7440,21 +7795,43 @@ client.on('interactionCreate', async interaction => {
         if (action === 'remove') {
           const depts = dc.departments ?? [];
           if (!depts.length) return interaction.reply({ content: '❌ No departments.', flags: MessageFlags.Ephemeral });
-          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department to remove...').addOptions(depts.map(d => ({ label: d.name, value: String(d.id), description: `Server: ${d.guildId}` })));
+          const sel = new StringSelectMenuBuilder().setCustomId('dept_sel_remove').setPlaceholder('Select department to remove...').addOptions(depts.map(d => ({ label: d.name, value: String(d.id) })));
           return interaction.reply({ content: '### 🗑️ Select department to remove', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
         }
 
+        // ── Configure panel settings (channel, title, description, banner) ──
+        if (action === 'config_panel') {
+          const modal = new ModalBuilder().setCustomId('modal_dept_config_panel').setTitle('Configure Department Panel');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_channel').setLabel('Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setValue(dc.panelChannel || '').setPlaceholder('Right-click channel → Copy Channel ID')),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_title').setLabel('Panel Title').setStyle(TextInputStyle.Short).setRequired(false).setValue(dc.panelTitle || '').setPlaceholder('🏢 Our Departments').setMaxLength(100)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_description').setLabel('Panel Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setValue(dc.panelDescription || '').setMaxLength(500)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_banner').setLabel('Banner Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false).setValue(dc.panelBanner || '').setPlaceholder('https://example.com/banner.png')),
+          );
+          return interaction.showModal(modal);
+        }
+
+        // ── Send / update the panel using saved settings ──
         if (action === 'send_panel') {
           const depts = dc.departments ?? [];
           if (!depts.length) return interaction.reply({ content: '❌ No departments configured.', flags: MessageFlags.Ephemeral });
-          const modal = new ModalBuilder().setCustomId('modal_dept_send_panel').setTitle('Send Department Panel');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_channel').setLabel('Channel ID to send panel to').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy Channel ID')),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_title').setLabel('Panel Title').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('🏢 Our Departments').setMaxLength(100)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_description').setLabel('Panel Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setPlaceholder('Select a department below to view more information.').setMaxLength(300)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_panel_banner').setLabel('Panel Banner URL (optional)').setStyle(TextInputStyle.Short).setRequired(false).setPlaceholder('https://example.com/banner.png')),
-          );
-          return interaction.showModal(modal);
+          if (!dc.panelChannel) return interaction.reply({ content: '❌ No panel channel set. Click **⚙️ Configure Panel** first.', flags: MessageFlags.Ephemeral });
+          const ch = interaction.guild.channels.cache.get(dc.panelChannel);
+          if (!ch) return interaction.reply({ content: `❌ Channel <#${dc.panelChannel}> not found. Reconfigure with **⚙️ Configure Panel**.`, flags: MessageFlags.Ephemeral });
+          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+          const deptListPreview = depts.slice(0, 15).map(d => `> 🏢 **${d.name}**${d.description ? ` — ${d.description.slice(0, 60)}${d.description.length > 60 ? '…' : ''}` : ''}`).join('\n');
+          const embed = new EmbedBuilder()
+            .setTitle(dc.panelTitle || '🏢 Departments')
+            .setDescription(`${dc.panelDescription || 'Select a department below to view more information.'}\n\n${deptListPreview}`)
+            .setColor(0xEB459E)
+            .setFooter({ text: `${depts.length} department${depts.length !== 1 ? 's' : ''} • Select one below for details` });
+          if (dc.panelBanner) embed.setImage(dc.panelBanner);
+          const select = new StringSelectMenuBuilder()
+            .setCustomId('dept__info_select')
+            .setPlaceholder('🏢 Select a department...')
+            .addOptions(depts.slice(0, 25).map(d => ({ label: d.name, value: String(d.id), description: d.description?.slice(0, 100) ?? 'Click to view more information' })));
+          await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
+          return interaction.editReply({ content: `✅ Department panel sent to <#${dc.panelChannel}>!` });
         }
       }
 
@@ -10047,7 +10424,7 @@ client.on('interactionCreate', async interaction => {
         if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
         const modal = new ModalBuilder().setCustomId(`modal_dept_edit__${val}`).setTitle(`Edit: ${dept.name.slice(0, 40)}`);
         modal.addComponents(
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_desc').setLabel('Short description').setStyle(TextInputStyle.Paragraph).setRequired(false).setValue(dept.description || '').setMaxLength(200).setPlaceholder('e.g. Our law enforcement department...')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setValue(dept.description || '').setMaxLength(1000).setPlaceholder('e.g. Our law enforcement department — responsible for maintaining order across the city...')),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_discord').setLabel('Discord Invite Link').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.discordLink || '').setPlaceholder('https://discord.gg/...')),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_apply').setLabel('Application Link').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.applicationLink || '').setPlaceholder('https://forms.gle/... or discord link')),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('dept_edit_banner').setLabel('Banner Image URL').setStyle(TextInputStyle.Short).setRequired(false).setValue(dept.banner || '').setPlaceholder('https://example.com/banner.png')),
@@ -10060,16 +10437,36 @@ client.on('interactionCreate', async interaction => {
         const dc = getDepartmentsConfig(guildId);
         const dept = dc.departments.find(d => String(d.id) === val);
         if (!dept) return interaction.reply({ content: '❌ Department not found.', flags: MessageFlags.Ephemeral });
+
         const embed = new EmbedBuilder()
           .setTitle(`🏢 ${dept.name}`)
           .setColor(0xEB459E);
+
+        // Full description — up to 4096 chars
         if (dept.description) embed.setDescription(dept.description);
+
+        // Links as clickable buttons in a row below the embed
+        const linkRow = new ActionRowBuilder();
+        const hasLinks = dept.discordLink || dept.applicationLink;
+
         const fields = [];
-        if (dept.discordLink)     fields.push({ name: '🔗 Discord Server', value: dept.discordLink, inline: true });
-        if (dept.applicationLink) fields.push({ name: '📝 Apply', value: dept.applicationLink, inline: true });
+        if (dept.discordLink)     fields.push({ name: '🔗 Discord Server',    value: `[Join Server](${dept.discordLink})`,          inline: true });
+        if (dept.applicationLink) fields.push({ name: '📝 Applications',      value: `[Apply Here](${dept.applicationLink})`,       inline: true });
         if (fields.length) embed.addFields(fields);
+
+        // Full-width banner image
         if (dept.banner) embed.setImage(dept.banner);
-        return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+
+        embed.setFooter({ text: 'This information is only visible to you.' });
+
+        const components = [];
+        if (hasLinks) {
+          if (dept.discordLink)     linkRow.addComponents(new ButtonBuilder().setLabel('🔗 Join Discord').setStyle(ButtonStyle.Link).setURL(dept.discordLink));
+          if (dept.applicationLink) linkRow.addComponents(new ButtonBuilder().setLabel('📝 Apply Now').setStyle(ButtonStyle.Link).setURL(dept.applicationLink));
+          components.push(linkRow);
+        }
+
+        return interaction.reply({ embeds: [embed], components, flags: MessageFlags.Ephemeral });
       }
 
       if (id === 'ard_remove')      { const ar = getAutoroleConfig(guildId); ar.roles = ar.roles.filter(r => r !== val); await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Removed from autoroles.`, flags: MessageFlags.Ephemeral }); }
@@ -10632,16 +11029,31 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Your review for **${targetUser?.tag ?? 'this staff member'}** has been submitted!`, flags: MessageFlags.Ephemeral });
       }
 
+      // ════ MELONLY SETUP MODALS ════
+      if (mid === 'modal_melony_quota') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const hours = parseFloat(interaction.fields.getTextInputValue('melony_quota_hours'));
+        if (isNaN(hours) || hours <= 0) return interaction.reply({ content: '❌ Enter a valid number of hours (e.g. 2).', flags: MessageFlags.Ephemeral });
+        getMelonlyConfig(guildId).quotaHours = hours;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Quota set to **${hours}h** per wave.`, flags: MessageFlags.Ephemeral });
+      }
+      if (mid === 'modal_melony_channel') {
+        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
+        const channelId = interaction.fields.getTextInputValue('melony_channel_id').trim();
+        const ch = interaction.guild.channels.cache.get(channelId);
+        if (!ch) return interaction.reply({ content: '❌ Channel not found. Make sure you copied the right Channel ID.', flags: MessageFlags.Ephemeral });
+        getMelonlyConfig(guildId).logChannel = channelId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Log channel set to <#${channelId}>.`, flags: MessageFlags.Ephemeral });
+      }
+
       if (mid === 'modal_dept_add') {
         const dc = getDepartmentsConfig(guildId);
-        if (!dc.isMainServer) return interaction.reply({ content: '❌ Only the main server can add departments. Enable "Set as Main Server" first.', flags: MessageFlags.Ephemeral });
-        const name        = interaction.fields.getTextInputValue('dept_name').trim();
-        const deptGuildId = interaction.fields.getTextInputValue('dept_guild_id').trim();
-        const webhookUrl  = interaction.fields.getTextInputValue('dept_webhook_url').trim();
-        if (!/^\d{17,20}$/.test(deptGuildId)) return interaction.reply({ content: '❌ Invalid Server ID.', flags: MessageFlags.Ephemeral });
-        if (!isValidUrl(webhookUrl) || !webhookUrl.includes('discord.com/api/webhooks')) return interaction.reply({ content: '❌ Invalid webhook URL. Must be a Discord webhook URL.', flags: MessageFlags.Ephemeral });
-        if (dc.departments.some(d => d.guildId === deptGuildId)) return interaction.reply({ content: `❌ Server \`${deptGuildId}\` is already linked.`, flags: MessageFlags.Ephemeral });
-        dc.departments.push({ id: genId(), name, guildId: deptGuildId, announcementChannelId: null, webhookUrl, discordLink: null, applicationLink: null, description: null, banner: null });
+        const name = interaction.fields.getTextInputValue('dept_name').trim();
+        if (!name) return interaction.reply({ content: '❌ Department name cannot be empty.', flags: MessageFlags.Ephemeral });
+        if (dc.departments.some(d => d.name.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `❌ A department named **${name}** already exists.`, flags: MessageFlags.Ephemeral });
+        dc.departments.push({ id: genId(), name, discordLink: null, applicationLink: null, description: null, banner: null });
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Department **${name}** added! Use the edit dropdown to add a description, links and banner.`, flags: MessageFlags.Ephemeral });
       }
@@ -10664,25 +11076,21 @@ client.on('interactionCreate', async interaction => {
         return interaction.update(buildDepartmentsSetupPayload(guildId));
       }
 
-      // ── Department Panel Send ──
-      if (mid === 'modal_dept_send_panel') {
+      // ── Department Panel Configure (save settings) ──
+      if (mid === 'modal_dept_config_panel') {
         const dc = getDepartmentsConfig(guildId);
-        const depts = dc.departments ?? [];
         const channelId   = interaction.fields.getTextInputValue('dept_panel_channel').trim();
-        const title       = interaction.fields.getTextInputValue('dept_panel_title').trim() || '🏢 Departments';
-        const description = interaction.fields.getTextInputValue('dept_panel_description').trim() || 'Select a department below to view more information.';
+        const title       = interaction.fields.getTextInputValue('dept_panel_title').trim();
+        const description = interaction.fields.getTextInputValue('dept_panel_description').trim();
         const banner      = interaction.fields.getTextInputValue('dept_panel_banner').trim();
         const ch = interaction.guild.channels.cache.get(channelId);
-        if (!ch) return interaction.reply({ content: '❌ Channel not found. Make sure you copied the Channel ID correctly.', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const embed = new EmbedBuilder().setTitle(title).setDescription(description).setColor(0xEB459E);
-        if (banner) embed.setImage(banner);
-        const select = new StringSelectMenuBuilder()
-          .setCustomId('dept__info_select')
-          .setPlaceholder('🏢 Select a department...')
-          .addOptions(depts.slice(0, 25).map(d => ({ label: d.name, value: String(d.id), description: d.description?.slice(0, 100) ?? undefined })));
-        await ch.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(select)] });
-        return interaction.editReply({ content: `✅ Department panel sent to <#${channelId}>!` });
+        if (!ch) return interaction.reply({ content: '❌ Channel not found. Check the Channel ID and try again.', flags: MessageFlags.Ephemeral });
+        dc.panelChannel     = channelId;
+        if (title)       dc.panelTitle       = title;
+        if (description) dc.panelDescription = description;
+        if (banner)      dc.panelBanner      = banner;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Panel settings saved! Channel: <#${channelId}>. Click **📨 Send / Update Panel** to post it.`, flags: MessageFlags.Ephemeral });
       }
 
       if (mid === 'modal_cnt_labels') {
