@@ -1732,13 +1732,31 @@ async function _syncChainPrefixUnsafe(member, guildId) {
 
     const fresh = await member.fetch().catch(() => member);
 
-    // Determine which prefix this member should have (highest chain rank)
-    const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
-
     // Get the Roblox username from the verification data — this is always the
     // basis of the nickname. If there is no verification, use the Discord username.
     const vc = getVerificationConfig(guildId);
     const robloxName = vc?.verifiedUsers?.[fresh.user.id]?.robloxUsername ?? fresh.user.username;
+
+    // ── LOA PRIORITY ──
+    // If the member currently has the LOA role, we show: LOA | RANK | RobloxName
+    // (or just LOA | RobloxName if they have no rank prefix)
+    const lc = getLOAConfig(guildId);
+    const isOnLOA = lc.loaRole && fresh.roles.cache.has(lc.loaRole);
+    if (isOnLOA) {
+      const loaPrefix = lc.prefix ?? '[LOA]';
+      const rankPrefix = getExpectedChainPrefix(fresh, cc.chain);
+      const newNick = rankPrefix
+        ? `${loaPrefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
+        : `${loaPrefix} | ${robloxName}`.slice(0, 32);
+      const currentNick = fresh.nickname ?? fresh.user.username;
+      if (newNick !== currentNick) {
+        await fresh.setNickname(newNick, 'LOA prefix sync').catch(() => {});
+      }
+      return; // Don't apply rank prefix without LOA while on LOA
+    }
+
+    // Determine which prefix this member should have (highest chain rank)
+    const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
 
     // The desired nickname is always: "{Prefix} | {RobloxName}" or just "{RobloxName}"
     const newNick = expectedPrefix
@@ -3765,8 +3783,13 @@ async function checkLOAExpiry() {
           if (member) {
             if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
             const prefix = lc.prefix ?? '[LOA]';
-            const currentNick = member.nickname ?? member.user.username;
-            const newNick = `${prefix} ${currentNick}`.slice(0, 32);
+            const vc = getVerificationConfig(gId);
+            const robloxName = vc?.verifiedUsers?.[userId]?.robloxUsername ?? member.user.username;
+            const cc = getChainConfig(gId);
+            const rankPrefix = getExpectedChainPrefix(member, cc.chain);
+            const newNick = rankPrefix
+              ? `${prefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
+              : `${prefix} | ${robloxName}`.slice(0, 32);
             await member.setNickname(newNick).catch(() => {});
           }
           if (lc.logChannel) {
@@ -3786,7 +3809,8 @@ async function checkLOAExpiry() {
         const member = await guild.members.fetch(userId).catch(() => null);
         if (member) {
           if (lc.loaRole) await member.roles.remove(lc.loaRole).catch(() => {});
-          await member.setNickname(loa.originalNickname ?? null).catch(() => {});
+          // Re-sync rank prefix now that LOA is over (so rank prefix comes back correctly)
+          await syncChainPrefix(member, gId).catch(() => {});
         }
         if (lc.logChannel) {
           const ch = guild.channels.cache.get(lc.logChannel);
@@ -6288,7 +6312,8 @@ client.on('interactionCreate', async interaction => {
           const targetMember = interaction.options.getMember('user');
           if (targetMember) {
             if (lc.loaRole) await targetMember.roles.remove(lc.loaRole).catch(() => {});
-            await targetMember.setNickname(loaData.originalNickname ?? null).catch(() => {});
+            // Re-sync rank prefix now that LOA is over
+            await syncChainPrefix(targetMember, guildId).catch(() => {});
           }
           delete lc.active[target.id];
           await saveGuildConfig(guildId);
@@ -6740,8 +6765,13 @@ client.on('interactionCreate', async interaction => {
               if (member) {
                 if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
                 const prefix = lc.prefix ?? '[LOA]';
-                const currentNick = member.nickname ?? member.user.username;
-                const newNick = `${prefix} ${currentNick}`.slice(0, 32);
+                const vc = getVerificationConfig(guildId);
+                const robloxName = vc?.verifiedUsers?.[targetId]?.robloxUsername ?? member.user.username;
+                const cc = getChainConfig(guildId);
+                const rankPrefix = getExpectedChainPrefix(member, cc.chain);
+                const newNick = rankPrefix
+                  ? `${prefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
+                  : `${prefix} | ${robloxName}`.slice(0, 32);
                 await member.setNickname(newNick).catch(() => {});
               }
               loaPending.applied = true;
