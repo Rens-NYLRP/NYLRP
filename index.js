@@ -2635,75 +2635,72 @@ async function submitApplication(userId, session, appType, guild) {
  * configured application transcript channel, if one is set.
  */
 async function sendApplicationTranscript(guild, ac, appId, decision) {
-  if (!ac.transcriptChannel) return;
-  const transcriptCh = guild.channels.cache.get(ac.transcriptChannel);
-  if (!transcriptCh) return;
-
   const submission = ac.submissions?.[appId];
   if (!submission) return;
 
   const appType = ac.appTypes.find(t => t.id === submission.typeId);
   const applicant = await client.users.fetch(submission.userId).catch(() => null);
-  const applicantDisplay = applicant ? `${userDisplay(applicant)} (<@${submission.userId}>)` : `<@${submission.userId}>`;
 
+  const decisionLabel = decision.result === 'accepted' ? 'Accepted' : 'Denied';
   const decisionColor = decision.result === 'accepted' ? 0x57F287 : 0xED4245;
-  const decisionLabel = decision.result === 'accepted' ? '✅ Accepted' : '❌ Denied';
 
-  const headerFields = [
-    { name: '👤 Applicant', value: applicantDisplay.slice(0, 1024), inline: true },
-    { name: '📋 Type',      value: appType?.label ?? submission.typeId, inline: true },
-    { name: '📊 Decision',  value: decisionLabel, inline: true },
-    { name: '👮 Moderator', value: decision.moderator, inline: true },
-    { name: '📅 Submitted', value: new Date(submission.submittedAt).toUTCString(), inline: false },
-  ];
-  if (decision.reason) headerFields.push({ name: '📝 Reason', value: decision.reason.slice(0, 1024), inline: false });
+  // Build transcript as a .txt file
+  const transcriptLines = [
+    `APPLICATION TRANSCRIPT`,
+    `======================`,
+    `ID:        ${appId}`,
+    `Type:      ${appType?.label ?? submission.typeId}`,
+    `Applicant: ${applicant ? userDisplay(applicant) : submission.userId} (${submission.userId})`,
+    `Submitted: ${new Date(submission.submittedAt).toUTCString()}`,
+    `Decision:  ${decisionLabel}`,
+    `Moderator: ${decision.moderator}`,
+    decision.reason ? `Reason:    ${decision.reason}` : '',
+    ``,
+    ...submission.questions.map((q, i) => [
+      `Q${i + 1}: ${q}`,
+      `A${i + 1}: ${submission.answers[i] ?? '(no answer)'}`,
+      ``,
+    ].join('\n')),
+  ].filter(line => line !== null && line !== undefined).join('\n');
 
-  const answerFields = submission.questions.map((q, i) => ({
-    name: `❓ ${q.slice(0, 250)}`,
-    value: (submission.answers[i] ?? '*No answer*').slice(0, 1024),
-    inline: false,
-  }));
+  const transcriptBuffer = Buffer.from(transcriptLines, 'utf-8');
+  const transcriptFile = new AttachmentBuilder(transcriptBuffer, { name: `transcript-${appId}.txt` });
 
-  const fieldSize = f => (f.name?.length ?? 0) + (f.value?.length ?? 0);
-  const EMBED_MAX = 5800;
-  const MAX_FIELDS = 24;
+  // Build a compact embed header for the transcript channel
+  const headerEmbed = new EmbedBuilder()
+    .setTitle(`📝 Application Transcript — ${appType?.label ?? submission.typeId}`)
+    .setColor(decisionColor)
+    .addFields(
+      { name: '👤 Applicant', value: applicant ? `${userDisplay(applicant)} (<@${submission.userId}>)` : `<@${submission.userId}>`, inline: true },
+      { name: '📊 Decision',  value: decision.result === 'accepted' ? '✅ Accepted' : '❌ Denied', inline: true },
+      { name: '👮 Moderator', value: decision.moderator, inline: true },
+      { name: '📅 Submitted', value: new Date(submission.submittedAt).toUTCString(), inline: false },
+    )
+    .setThumbnail(applicant?.displayAvatarURL({ dynamic: true }) ?? null)
+    .setFooter({ text: `Application ID: ${appId}` })
+    .setTimestamp();
+  if (decision.reason) headerEmbed.addFields({ name: '📝 Reason', value: decision.reason.slice(0, 1024), inline: false });
 
-  const embeds = [];
-  let currentFields = [...headerFields];
-  let isFirst = true;
-  let page = 1;
-  let currentSize = headerFields.reduce((s, f) => s + fieldSize(f), 0) + 256;
-
-  const flushEmbed = () => {
-    const title = isFirst
-      ? `📝 Application Transcript — ${appType?.label ?? submission.typeId}`
-      : `📝 Application Transcript (continued) — Page ${page}`;
-    embeds.push(new EmbedBuilder()
-      .setTitle(title.slice(0, 256))
-      .setColor(decisionColor)
-      .addFields(...currentFields)
-      .setFooter({ text: `Application ID: ${appId}` })
-      .setThumbnail(isFirst ? (applicant?.displayAvatarURL({ dynamic: true }) ?? null) : null)
-      .setTimestamp());
-    isFirst = false;
-    page++;
-    currentFields = [];
-    currentSize = 256;
-  };
-
-  for (const field of answerFields) {
-    const fSize = fieldSize(field);
-    if (currentFields.length >= MAX_FIELDS || (currentSize + fSize > EMBED_MAX && currentFields.length > 0)) {
-      flushEmbed();
+  // Post to transcript channel
+  if (ac.transcriptChannel) {
+    const transcriptCh = guild.channels.cache.get(ac.transcriptChannel);
+    if (transcriptCh) {
+      await transcriptCh.send({ embeds: [headerEmbed], files: [new AttachmentBuilder(transcriptBuffer, { name: `transcript-${appId}.txt` })] }).catch(() => {});
     }
-    currentFields.push(field);
-    currentSize += fSize;
   }
-  flushEmbed();
 
-  const EMBEDS_PER_MSG = 10;
-  for (let i = 0; i < embeds.length; i += EMBEDS_PER_MSG) {
-    await transcriptCh.send({ embeds: embeds.slice(i, i + EMBEDS_PER_MSG) }).catch(() => {});
+  // DM the transcript to the applicant
+  if (applicant) {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle(`📄 Your Application Transcript — ${appType?.label ?? submission.typeId}`)
+      .setColor(decisionColor)
+      .setDescription(`Your application in **${guild.name}** has been reviewed.\n\n**Decision:** ${decision.result === 'accepted' ? '✅ Accepted' : '❌ Denied'}${decision.reason ? `\n**Reason:** ${decision.reason}` : ''}\n\nYour full transcript is attached below.`)
+      .setFooter({ text: `Application ID: ${appId}` })
+      .setTimestamp();
+    await safeDM(applicant, {
+      embeds: [dmEmbed],
+      files: [new AttachmentBuilder(transcriptBuffer, { name: `transcript-${appId}.txt` })],
+    });
   }
 }
 
