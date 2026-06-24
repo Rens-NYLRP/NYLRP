@@ -12285,18 +12285,1032 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Render healthcheck server
-const express = require('express');
-const app = express();
+// ════════════════════════════════════════════
+// DASHBOARD — Express + Discord OAuth2
+// ════════════════════════════════════════════
+const express    = require('express');
+const session    = require('express-session');
+const fetch_http = (...args) => import('node-fetch').then(m => m.default(...args));
 
+const app  = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-  res.status(200).send('Bot is running');
+// ── env vars needed ──────────────────────────────────────────────────────────
+// DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DASHBOARD_SECRET, DASHBOARD_URL
+// e.g. DASHBOARD_URL=https://yourapp.onrender.com
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID     ?? '';
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET ?? '';
+const DASHBOARD_URL         = (process.env.DASHBOARD_URL        ?? `http://localhost:${PORT}`).replace(/\/$/, '');
+const REDIRECT_URI          = `${DASHBOARD_URL}/auth/callback`;
+const DASHBOARD_SECRET      = process.env.DASHBOARD_SECRET      ?? 'changeme_secret_32chars';
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: DASHBOARD_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false, maxAge: 1000 * 60 * 60 * 24 * 7 }, // 7 days
+}));
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  if (req.session?.user) return next();
+  res.redirect('/login');
+}
+
+async function discordFetch(endpoint, token) {
+  const r = await fetch_http(`https://discord.com/api/v10${endpoint}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error(`Discord API ${r.status}`);
+  return r.json();
+}
+
+// Check if a Discord user (by id) is admin in the given guild
+function isAdminInGuild(guildId, userId) {
+  try {
+    const g = client.guilds.cache.get(guildId);
+    if (!g) return false;
+    const m = g.members.cache.get(userId);
+    if (!m) return false;
+    return m.permissions.has('Administrator') || hasSHR(m);
+  } catch { return false; }
+}
+
+// ── CSS + shared layout ───────────────────────────────────────────────────────
+const CSS = `
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',system-ui,sans-serif;background:#0e0f13;color:#e2e8f0;min-height:100vh}
+  :root{--accent:#5865F2;--danger:#ED4245;--success:#57F287;--warn:#FEE75C;--card:#1a1d23;--border:#2d2f36}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+  .topbar{background:#111318;border-bottom:1px solid var(--border);padding:0 2rem;display:flex;align-items:center;justify-content:space-between;height:60px;position:sticky;top:0;z-index:100}
+  .topbar .logo{font-size:1.2rem;font-weight:700;color:#fff;display:flex;align-items:center;gap:.5rem}
+  .topbar .logo span{color:var(--accent)}
+  .topbar .user{display:flex;align-items:center;gap:.75rem;font-size:.9rem}
+  .topbar .user img{border-radius:50%;width:32px;height:32px}
+  .sidebar{position:fixed;left:0;top:60px;bottom:0;width:220px;background:#111318;border-right:1px solid var(--border);padding:1rem 0;overflow-y:auto}
+  .sidebar a{display:flex;align-items:center;gap:.75rem;padding:.6rem 1.25rem;font-size:.9rem;color:#a0aec0;transition:all .15s}
+  .sidebar a:hover,.sidebar a.active{background:rgba(88,101,242,.12);color:#fff;text-decoration:none}
+  .sidebar a.active{border-right:3px solid var(--accent)}
+  .sidebar .section-label{padding:.5rem 1.25rem;font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:#4a5568;margin-top:.5rem}
+  .main{margin-left:220px;padding:2rem;padding-top:80px;min-height:100vh}
+  .page-title{font-size:1.5rem;font-weight:700;margin-bottom:1.5rem;color:#fff}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.25rem}
+  .card h3{font-size:1rem;font-weight:600;margin-bottom:1rem;color:#fff}
+  .grid{display:grid;gap:1rem}
+  .grid-2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .grid-3{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+  .stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;display:flex;flex-direction:column;gap:.5rem}
+  .stat-card .label{font-size:.8rem;color:#718096;text-transform:uppercase;letter-spacing:.05em}
+  .stat-card .value{font-size:2rem;font-weight:700;color:#fff}
+  .stat-card .sub{font-size:.8rem;color:#718096}
+  .badge{display:inline-flex;align-items:center;gap:.25rem;padding:.2rem .6rem;border-radius:999px;font-size:.75rem;font-weight:600}
+  .badge-green{background:rgba(87,242,135,.12);color:var(--success)}
+  .badge-red{background:rgba(237,66,69,.12);color:var(--danger)}
+  .badge-yellow{background:rgba(254,231,92,.12);color:var(--warn)}
+  .badge-blue{background:rgba(88,101,242,.12);color:var(--accent)}
+  .btn{display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1rem;border-radius:8px;font-size:.875rem;font-weight:600;cursor:pointer;border:none;transition:all .15s}
+  .btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#4752c4}
+  .btn-danger{background:var(--danger);color:#fff}.btn-danger:hover{background:#c0383a}
+  .btn-secondary{background:var(--border);color:#e2e8f0}.btn-secondary:hover{background:#3a3d47}
+  .btn-success{background:rgba(87,242,135,.2);color:var(--success)}.btn-success:hover{background:rgba(87,242,135,.3)}
+  table{width:100%;border-collapse:collapse;font-size:.875rem}
+  th{text-align:left;padding:.75rem 1rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#718096;border-bottom:1px solid var(--border)}
+  td{padding:.75rem 1rem;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:rgba(255,255,255,.02)}
+  .form-group{margin-bottom:1rem}
+  label{display:block;font-size:.85rem;color:#a0aec0;margin-bottom:.4rem}
+  input,select,textarea{width:100%;background:#0e0f13;border:1px solid var(--border);border-radius:8px;padding:.6rem .9rem;color:#e2e8f0;font-size:.875rem;outline:none;transition:border .15s}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:80px}
+  .alert{padding:.75rem 1rem;border-radius:8px;font-size:.875rem;margin-bottom:1rem}
+  .alert-success{background:rgba(87,242,135,.1);border:1px solid rgba(87,242,135,.3);color:var(--success)}
+  .alert-error{background:rgba(237,66,69,.1);border:1px solid rgba(237,66,69,.3);color:var(--danger)}
+  .empty{color:#4a5568;text-align:center;padding:2rem;font-size:.9rem}
+  .avatar{border-radius:50%}
+  .flex{display:flex;align-items:center;gap:.5rem}
+  @media(max-width:768px){.sidebar{display:none}.main{margin-left:0}}
+`;
+
+function layout(req, title, body, activeGuildId = null) {
+  const user = req.session.user;
+  const guilds = req.session.adminGuilds ?? [];
+  const currentGuild = guilds.find(g => g.id === activeGuildId);
+
+  const sidebarLinks = activeGuildId ? `
+    <div class="section-label">Overview</div>
+    <a href="/dashboard/${activeGuildId}" class="${!req.path.split('/')[3] ? 'active' : ''}">🏠 Overview</a>
+    <div class="section-label">Moderation</div>
+    <a href="/dashboard/${activeGuildId}/punishments" class="${req.path.includes('punishments') ? 'active' : ''}">⚠️ Punishments</a>
+    <a href="/dashboard/${activeGuildId}/infractions" class="${req.path.includes('infractions') ? 'active' : ''}">🔨 Infractions</a>
+    <a href="/dashboard/${activeGuildId}/warnings" class="${req.path.includes('warnings') ? 'active' : ''}">⚡ Warnings</a>
+    <div class="section-label">Staff</div>
+    <a href="/dashboard/${activeGuildId}/loa" class="${req.path.includes('loa') ? 'active' : ''}">🏖️ LOA</a>
+    <a href="/dashboard/${activeGuildId}/shifts" class="${req.path.includes('shifts') ? 'active' : ''}">⏱️ Shifts/Quota</a>
+    <a href="/dashboard/${activeGuildId}/sessions" class="${req.path.includes('sessions') ? 'active' : ''}">🎮 Sessions</a>
+    <div class="section-label">Config</div>
+    <a href="/dashboard/${activeGuildId}/tickets" class="${req.path.includes('tickets') ? 'active' : ''}">🎫 Tickets</a>
+    <a href="/dashboard/${activeGuildId}/chain" class="${req.path.includes('chain') ? 'active' : ''}">🔗 Chain/Prefix</a>
+    <a href="/dashboard/${activeGuildId}/erlc" class="${req.path.includes('erlc') ? 'active' : ''}">🖥️ ERLC</a>
+    <a href="/dashboard/${activeGuildId}/logging" class="${req.path.includes('logging') ? 'active' : ''}">📋 Logging</a>
+  ` : guilds.slice(0, 15).map(g => {
+    const icon = g.icon ? `<img src="https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png" width="22" height="22" style="border-radius:6px">` : '🖥️';
+    return `<a href="/dashboard/${g.id}">${icon} ${g.name.slice(0, 18)}</a>`;
+  }).join('');
+
+  const backLink = activeGuildId
+    ? `<a href="/guilds" style="font-size:.8rem;color:#718096;margin-right:1rem">← Servers</a>${currentGuild?.name ?? activeGuildId}`
+    : 'Select a server';
+
+  return `<!DOCTYPE html><html lang="en"><head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${title} · Dashboard</title>
+  <style>${CSS}</style></head><body>
+  <div class="topbar">
+    <div class="logo">🤖 <span>Bot</span> Dashboard <span style="color:#4a5568;font-size:.8rem;margin-left:.5rem">${backLink}</span></div>
+    <div class="user">
+      ${user?.avatar ? `<img src="https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png" alt="">` : ''}
+      <span>${user?.global_name ?? user?.username ?? ''}</span>
+      <a href="/logout" style="color:#718096;font-size:.8rem">Logout</a>
+    </div>
+  </div>
+  <div class="sidebar">${sidebarLinks}</div>
+  <div class="main">${body}</div>
+  </body></html>`;
+}
+
+// ── Auth routes ───────────────────────────────────────────────────────────────
+app.get('/login', (req, res) => {
+  if (req.session?.user) return res.redirect('/guilds');
+  const params = new URLSearchParams({
+    client_id: DISCORD_CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    response_type: 'code',
+    scope: 'identify guilds',
+  });
+  res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
 });
 
+app.get('/auth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.redirect('/login');
+  try {
+    const tokenRes = await fetch_http('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT_URI,
+      }),
+    });
+    const tokens = await tokenRes.json();
+    if (!tokens.access_token) throw new Error('No token');
+
+    const [user, guilds] = await Promise.all([
+      discordFetch('/users/@me', tokens.access_token),
+      discordFetch('/users/@me/guilds', tokens.access_token),
+    ]);
+
+    // Filter to guilds where the bot is present AND user is admin/SHR
+    const adminGuilds = guilds.filter(g => {
+      const botGuild = client.guilds.cache.get(g.id);
+      if (!botGuild) return false;
+      return isAdminInGuild(g.id, user.id);
+    });
+
+    req.session.user = user;
+    req.session.adminGuilds = adminGuilds;
+    res.redirect('/guilds');
+  } catch (e) {
+    console.error('OAuth error:', e);
+    res.redirect('/login?error=1');
+  }
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/login');
+});
+
+// ── Guild picker ──────────────────────────────────────────────────────────────
+app.get('/guilds', requireAuth, (req, res) => {
+  const guilds = req.session.adminGuilds ?? [];
+  const cards = guilds.length === 0
+    ? `<div class="empty">No servers found where you have admin access and the bot is present.</div>`
+    : guilds.map(g => {
+        const icon = g.icon
+          ? `<img src="https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png" width="56" height="56" style="border-radius:12px">`
+          : `<div style="width:56px;height:56px;border-radius:12px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:1.5rem">🖥️</div>`;
+        const botGuild = client.guilds.cache.get(g.id);
+        return `<a href="/dashboard/${g.id}" style="text-decoration:none">
+          <div class="card" style="cursor:pointer;transition:border .15s;border-color:transparent" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='transparent'">
+            <div class="flex" style="gap:1rem">
+              ${icon}
+              <div>
+                <div style="font-weight:600;color:#fff">${g.name}</div>
+                <div style="font-size:.8rem;color:#718096">${botGuild?.memberCount ?? '?'} members</div>
+              </div>
+            </div>
+          </div>
+        </a>`;
+      }).join('');
+  res.send(layout(req, 'Select Server', `
+    <div class="page-title">Select a Server</div>
+    <div class="grid grid-3">${cards}</div>
+  `));
+});
+
+app.get('/', requireAuth, (req, res) => res.redirect('/guilds'));
+
+// ── Middleware: ensure user is admin in the selected guild ────────────────────
+function requireGuildAdmin(req, res, next) {
+  const { guildId } = req.params;
+  if (!isAdminInGuild(guildId, req.session.user.id)) {
+    return res.status(403).send(layout(req, 'Forbidden', `<div class="alert alert-error">❌ You don't have access to this server.</div>`));
+  }
+  next();
+}
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const g = client.guilds.cache.get(guildId);
+  if (!g) return res.redirect('/guilds');
+
+  const lc  = getLOAConfig(guildId);
+  const ic  = getInfractionConfig(guildId);
+  const tc  = getTicketConfig(guildId);
+
+  const activeLoaCount   = Object.keys(lc.active ?? {}).length;
+  const openTickets      = 0; // fetched async — kept simple
+  const totalInfractions = Object.values(ic.userHistory ?? {}).reduce((s, h) => s + h.length, 0);
+
+  const icon = g.iconURL() ?? '';
+  const headerHtml = `
+    <div class="flex" style="gap:1rem;margin-bottom:1.5rem">
+      ${icon ? `<img src="${icon}" width="56" height="56" style="border-radius:12px" alt="">` : ''}
+      <div>
+        <div class="page-title" style="margin-bottom:.2rem">${g.name}</div>
+        <div style="color:#718096;font-size:.875rem">${g.memberCount} members · ${g.channels.cache.size} channels</div>
+      </div>
+    </div>`;
+
+  const stats = `
+    <div class="grid grid-3" style="margin-bottom:1.5rem">
+      <div class="stat-card"><div class="label">Members</div><div class="value">${g.memberCount}</div></div>
+      <div class="stat-card"><div class="label">Active LOA</div><div class="value">${activeLoaCount}</div></div>
+      <div class="stat-card"><div class="label">Total Infractions</div><div class="value">${totalInfractions}</div></div>
+    </div>`;
+
+  const quickLinks = `
+    <div class="card"><h3>Quick Actions</h3>
+      <div class="flex" style="flex-wrap:wrap;gap:.5rem">
+        <a href="/dashboard/${guildId}/loa" class="btn btn-primary">🏖️ LOA</a>
+        <a href="/dashboard/${guildId}/punishments" class="btn btn-secondary">⚠️ Punishments</a>
+        <a href="/dashboard/${guildId}/infractions" class="btn btn-secondary">🔨 Infractions</a>
+        <a href="/dashboard/${guildId}/shifts" class="btn btn-secondary">⏱️ Shifts</a>
+        <a href="/dashboard/${guildId}/erlc" class="btn btn-secondary">🖥️ ERLC</a>
+        <a href="/dashboard/${guildId}/tickets" class="btn btn-secondary">🎫 Tickets</a>
+      </div>
+    </div>`;
+
+  res.send(layout(req, g.name, headerHtml + stats + quickLinks, guildId));
+});
+
+// ── LOA ───────────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/loa', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const g  = client.guilds.cache.get(guildId);
+  const lc = getLOAConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  const rows = await Promise.all(Object.entries(lc.active ?? {}).map(async ([userId, loa]) => {
+    const m = await g.members.fetch(userId).catch(() => null);
+    const name = m?.displayName ?? userId;
+    const ends = new Date(loa.endsAt);
+    const now  = Date.now();
+    const status = loa.endsAt < now ? `<span class="badge badge-red">Expired</span>` : `<span class="badge badge-green">Active</span>`;
+    return `<tr>
+      <td><div class="flex"><img src="${m?.user.displayAvatarURL({size:32})??''}" class="avatar" width="28" height="28"> ${name}</div></td>
+      <td>${loa.reason ?? '—'}</td>
+      <td>${ends.toLocaleDateString()}</td>
+      <td>${status}</td>
+      <td>
+        <form method="POST" action="/dashboard/${guildId}/loa/end" style="display:inline">
+          <input type="hidden" name="userId" value="${userId}">
+          <button class="btn btn-danger" style="padding:.3rem .7rem;font-size:.8rem">End LOA</button>
+        </form>
+      </td>
+    </tr>`;
+  }));
+
+  const table = rows.length
+    ? `<table><thead><tr><th>Member</th><th>Reason</th><th>Ends</th><th>Status</th><th>Action</th></tr></thead><tbody>${rows.join('')}</tbody></table>`
+    : `<div class="empty">No active LOAs.</div>`;
+
+  const pendingRows = Object.entries(lc.pending ?? {}).map(([id, p]) => {
+    const statusBadge = p.status === 'pending'
+      ? `<span class="badge badge-yellow">Pending</span>`
+      : `<span class="badge badge-blue">${p.status}</span>`;
+    return `<tr>
+      <td><@${p.userId ?? id}></td>
+      <td>${p.reason ?? '—'}</td>
+      <td>${new Date(p.endsAt ?? 0).toLocaleDateString()}</td>
+      <td>${statusBadge}</td>
+      <td>
+        <form method="POST" action="/dashboard/${guildId}/loa/approve" style="display:inline">
+          <input type="hidden" name="reqId" value="${id}">
+          <button class="btn btn-success" style="padding:.3rem .7rem;font-size:.8rem">Approve</button>
+        </form>
+        <form method="POST" action="/dashboard/${guildId}/loa/deny" style="display:inline;margin-left:.25rem">
+          <input type="hidden" name="reqId" value="${id}">
+          <button class="btn btn-danger" style="padding:.3rem .7rem;font-size:.8rem">Deny</button>
+        </form>
+      </td>
+    </tr>`;
+  });
+
+  const pendingTable = pendingRows.length
+    ? `<div class="card"><h3>📋 Pending Requests</h3><table><thead><tr><th>User</th><th>Reason</th><th>Ends</th><th>Status</th><th>Actions</th></tr></thead><tbody>${pendingRows.join('')}</tbody></table></div>`
+    : '';
+
+  const configCard = `
+    <div class="card"><h3>⚙️ LOA Settings</h3>
+    <form method="POST" action="/dashboard/${guildId}/loa/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>LOA Role ID</label><input name="loaRole" value="${lc.loaRole ?? ''}"></div>
+        <div class="form-group"><label>Log Channel ID</label><input name="logChannel" value="${lc.logChannel ?? ''}"></div>
+        <div class="form-group"><label>LOA Prefix</label><input name="prefix" value="${lc.prefix ?? '[LOA]'}"></div>
+        <div class="form-group"><label>Required Approvals</label><input type="number" name="requiredApprovals" value="${lc.requiredApprovals ?? 1}" min="1" max="10"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save</button>
+    </form></div>`;
+
+  res.send(layout(req, 'LOA', `
+    <div class="page-title">🏖️ LOA Management</div>
+    ${flash}
+    <div class="card"><h3>Active LOAs</h3>${table}</div>
+    ${pendingTable}
+    ${configCard}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/loa/end', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { userId } = req.body;
+  const lc = getLOAConfig(guildId);
+  const g  = client.guilds.cache.get(guildId);
+  if (lc.active?.[userId]) {
+    delete lc.active[userId];
+    await saveGuildConfig(guildId);
+    const m = await g.members.fetch(userId).catch(() => null);
+    if (m) {
+      if (lc.loaRole) await m.roles.remove(lc.loaRole).catch(() => {});
+      await syncChainPrefix(m, guildId).catch(() => {});
+    }
+  }
+  res.redirect(`/dashboard/${guildId}/loa?ok=1`);
+});
+
+app.post('/dashboard/:guildId/loa/approve', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { reqId } = req.body;
+  const lc = getLOAConfig(guildId);
+  const pending = lc.pending?.[reqId];
+  if (pending) {
+    pending.status = 'approved';
+    pending.applied = false;
+    if (!lc.active) lc.active = {};
+    lc.active[pending.userId] = { reason: pending.reason, endsAt: pending.endsAt, startsAt: pending.startsAt };
+    delete lc.pending[reqId];
+    await saveGuildConfig(guildId);
+    const g = client.guilds.cache.get(guildId);
+    const m = await g?.members.fetch(pending.userId).catch(() => null);
+    if (m) {
+      if (lc.loaRole) await m.roles.add(lc.loaRole).catch(() => {});
+      const vc = getVerificationConfig(guildId);
+      const robloxName = vc?.verifiedUsers?.[pending.userId]?.robloxUsername ?? m.user.username;
+      const cc = getChainConfig(guildId);
+      const rankPrefix = getExpectedChainPrefix(m, cc.chain);
+      const pfx = lc.prefix ?? '[LOA]';
+      const nick = rankPrefix ? `${pfx} | ${rankPrefix} | ${robloxName}`.slice(0, 32) : `${pfx} | ${robloxName}`.slice(0, 32);
+      await m.setNickname(nick).catch(() => {});
+    }
+  }
+  res.redirect(`/dashboard/${guildId}/loa?ok=1`);
+});
+
+app.post('/dashboard/:guildId/loa/deny', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { reqId } = req.body;
+  const lc = getLOAConfig(guildId);
+  if (lc.pending?.[reqId]) { lc.pending[reqId].status = 'denied'; await saveGuildConfig(guildId); }
+  res.redirect(`/dashboard/${guildId}/loa?ok=1`);
+});
+
+app.post('/dashboard/:guildId/loa/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const lc = getLOAConfig(guildId);
+  if (req.body.loaRole)           lc.loaRole           = req.body.loaRole || null;
+  if (req.body.logChannel)        lc.logChannel        = req.body.logChannel || null;
+  if (req.body.prefix)            lc.prefix            = req.body.prefix || '[LOA]';
+  if (req.body.requiredApprovals) lc.requiredApprovals = parseInt(req.body.requiredApprovals) || 1;
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/loa?ok=1`);
+});
+
+// ── Punishments (with DM to game) ────────────────────────────────────────────
+app.get('/dashboard/:guildId/punishments', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const ic = getInfractionConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Punishment issued!</div>` : '';
+
+  // Collect all punishment history across all users
+  const allHistory = [];
+  for (const [userId, history] of Object.entries(ic.userHistory ?? {})) {
+    for (const entry of (history ?? [])) {
+      allHistory.push({ userId, ...entry });
+    }
+  }
+  allHistory.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const historyRows = allHistory.slice(0, 50).map(e => {
+    const typeMap = { warning: `<span class="badge badge-yellow">Warning</span>`, strike: `<span class="badge badge-red">Strike</span>`, termination: `<span class="badge badge-red">Termination</span>` };
+    return `<tr>
+      <td><code>${e.userId}</code></td>
+      <td>${typeMap[e.type] ?? e.type}</td>
+      <td>${e.reason ?? '—'}</td>
+      <td>${e.moderator ?? '—'}</td>
+      <td>${e.date ? new Date(e.date).toLocaleDateString() : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const issueForm = `
+    <div class="card"><h3>⚠️ Issue Punishment</h3>
+    <form method="POST" action="/dashboard/${guildId}/punishments/issue">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Discord User ID</label><input name="userId" placeholder="123456789012345678" required></div>
+        <div class="form-group"><label>Type</label>
+          <select name="type">
+            <option value="warning">Warning</option>
+            <option value="strike">Strike</option>
+            <option value="termination">Termination</option>
+          </select>
+        </div>
+        <div class="form-group" style="grid-column:1/-1"><label>Reason</label><textarea name="reason" placeholder="Reason for punishment..." required></textarea></div>
+        <div class="form-group" style="grid-column:1/-1"><label>Linked Game (for DM, optional)</label><input name="game" placeholder="e.g. Emergency Response: Liberty County"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">🚨 Issue Punishment</button>
+    </form></div>`;
+
+  const settingsForm = `
+    <div class="card"><h3>⚙️ DM / Log Settings</h3>
+    <form method="POST" action="/dashboard/${guildId}/punishments/settings">
+      <div class="form-group"><label>Log Channel ID</label><input name="logChannel" value="${ic.logChannel ?? ''}"></div>
+      <div class="form-group"><label>DM Message (supports {levelLabel}, {type}, {reason}, {server}, {game})</label>
+        <textarea name="dmMessage">${ic.dmMessage ?? ''}</textarea></div>
+      <button type="submit" class="btn btn-primary">💾 Save Settings</button>
+    </form></div>`;
+
+  const table = historyRows
+    ? `<div class="card"><h3>📋 Recent Punishments (last 50)</h3><table><thead><tr><th>User ID</th><th>Type</th><th>Reason</th><th>By</th><th>Date</th></tr></thead><tbody>${historyRows}</tbody></table></div>`
+    : `<div class="card"><div class="empty">No punishments recorded yet.</div></div>`;
+
+  res.send(layout(req, 'Punishments', `
+    <div class="page-title">⚠️ Punishments</div>
+    ${flash}${issueForm}${table}${settingsForm}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/punishments/issue', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { userId, type, reason, game } = req.body;
+  const g  = client.guilds.cache.get(guildId);
+  const ic = getInfractionConfig(guildId);
+
+  // Record in history
+  if (!ic.userHistory)           ic.userHistory           = {};
+  if (!ic.userHistory[userId])   ic.userHistory[userId]   = [];
+  if (!ic.warningCounts)         ic.warningCounts         = {};
+  if (!ic.strikeCounts)          ic.strikeCounts          = {};
+
+  let level = 0;
+  if (type === 'warning') {
+    ic.warningCounts[userId] = Math.min((ic.warningCounts[userId] ?? 0) + 1, 3);
+    level = ic.warningCounts[userId];
+  } else if (type === 'strike') {
+    ic.strikeCounts[userId] = Math.min((ic.strikeCounts[userId] ?? 0) + 1, 3);
+    level = 3 + ic.strikeCounts[userId];
+    if (ic.strikeCounts[userId] >= 3) level = 7;
+  } else if (type === 'termination') {
+    level = 7;
+  }
+
+  const prog = getProgressionEntry(level);
+  const entry = { type, reason, moderator: req.session.user.username, date: new Date().toUTCString(), level };
+  ic.userHistory[userId].push(entry);
+  await saveGuildConfig(guildId);
+
+  // Apply role if configured
+  const member = await g?.members.fetch(userId).catch(() => null);
+  if (member) await applyInfractionLevelRole(member, ic, level).catch(() => {});
+
+  // DM user — includes game if set
+  const dmTemplate = ic.dmMessage ?? '⚠️ You have received **{levelLabel}** in **{server}**.\n\n**Type:** {type}\n**Reason:** {reason}' + (game ? '\n**Game:** {game}' : '') + '\n\nIf you have questions, please contact a staff member.';
+  const dmText = dmTemplate
+    .replace(/{levelLabel}/g, prog.label)
+    .replace(/{type}/g, type)
+    .replace(/{reason}/g, reason)
+    .replace(/{server}/g, g?.name ?? 'Unknown')
+    .replace(/{game}/g, game ?? '')
+    .replace(/{moderator}/g, req.session.user.username);
+
+  try {
+    const discordUser = await client.users.fetch(userId);
+    await discordUser.send({ embeds: [new EmbedBuilder().setTitle(`⚠️ ${prog.label}`).setDescription(dmText).setColor(0xED4245).setTimestamp()] });
+  } catch {}
+
+  // Log to channel
+  if (ic.logChannel) {
+    const ch = g?.channels.cache.get(ic.logChannel);
+    if (ch) await ch.send({ embeds: [new EmbedBuilder()
+      .setTitle(`⚠️ ${prog.label} — <@${userId}>`)
+      .setDescription(`**Type:** ${type}\n**Reason:** ${reason}${game ? `\n**Game:** ${game}` : ''}\n**Moderator:** ${req.session.user.username}`)
+      .setColor(0xED4245).setTimestamp()] }).catch(() => {});
+  }
+
+  res.redirect(`/dashboard/${guildId}/punishments?ok=1`);
+});
+
+app.post('/dashboard/:guildId/punishments/settings', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const ic = getInfractionConfig(guildId);
+  if (req.body.logChannel !== undefined) ic.logChannel = req.body.logChannel || null;
+  if (req.body.dmMessage  !== undefined) ic.dmMessage  = req.body.dmMessage  || ic.dmMessage;
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/punishments?ok=1`);
+});
+
+// ── Infractions ───────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/infractions', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const ic = getInfractionConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Done!</div>` : '';
+
+  const rows = Object.entries(ic.userHistory ?? {}).map(([userId, history]) => {
+    const level = getEffectiveLevel(ic, userId);
+    const prog  = level > 0 ? getProgressionEntry(level) : null;
+    const badge = !prog ? `<span class="badge badge-green">Clean</span>`
+      : prog.category === 'Termination' ? `<span class="badge badge-red">Termination</span>`
+      : prog.category === 'Strike' ? `<span class="badge badge-red">${prog.label}</span>`
+      : `<span class="badge badge-yellow">${prog.label}</span>`;
+    return `<tr>
+      <td><code>${userId}</code></td>
+      <td>${badge}</td>
+      <td>${history.length}</td>
+      <td>${history[history.length - 1]?.reason?.slice(0, 60) ?? '—'}</td>
+      <td>
+        <a href="/dashboard/${guildId}/infractions/${userId}" class="btn btn-secondary" style="padding:.3rem .7rem;font-size:.8rem">View</a>
+        <form method="POST" action="/dashboard/${guildId}/infractions/clear" style="display:inline;margin-left:.25rem">
+          <input type="hidden" name="userId" value="${userId}">
+          <button class="btn btn-danger" style="padding:.3rem .7rem;font-size:.8rem">Clear</button>
+        </form>
+      </td>
+    </tr>`;
+  }).join('');
+
+  const table = rows
+    ? `<table><thead><tr><th>User ID</th><th>Level</th><th>Count</th><th>Last Reason</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`
+    : `<div class="empty">No infractions found.</div>`;
+
+  res.send(layout(req, 'Infractions', `
+    <div class="page-title">🔨 Infractions</div>
+    ${flash}<div class="card">${table}</div>
+  `, guildId));
+});
+
+app.get('/dashboard/:guildId/infractions/:userId', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId, userId } = req.params;
+  const ic      = getInfractionConfig(guildId);
+  const history = ic.userHistory?.[userId] ?? [];
+
+  const rows = history.map((e, i) => {
+    const prog = getProgressionEntry(e.level ?? 0);
+    return `<tr>
+      <td>${i + 1}</td>
+      <td>${prog?.label ?? e.type}</td>
+      <td>${e.reason ?? '—'}</td>
+      <td>${e.moderator ?? '—'}</td>
+      <td>${e.date ? new Date(e.date).toLocaleDateString() : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  res.send(layout(req, `Infractions — ${userId}`, `
+    <div class="page-title">🔨 Infractions: <code>${userId}</code></div>
+    <a href="/dashboard/${guildId}/infractions" class="btn btn-secondary" style="margin-bottom:1rem">← Back</a>
+    <div class="card">
+      ${rows ? `<table><thead><tr><th>#</th><th>Level</th><th>Reason</th><th>By</th><th>Date</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">No infractions.</div>'}
+    </div>
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/infractions/clear', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { userId } = req.body;
+  const ic = getInfractionConfig(guildId);
+  delete ic.userHistory[userId];
+  delete ic.warningCounts?.[userId];
+  delete ic.strikeCounts?.[userId];
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/infractions?ok=1`);
+});
+
+// ── Warnings ──────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/warnings', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const gc = getGuildConfig(guildId);
+  const warnings = gc.warnings ?? {};
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Done!</div>` : '';
+
+  const rows = Object.entries(warnings).flatMap(([userId, list]) =>
+    (list ?? []).map((w, i) => `<tr>
+      <td><code>${userId}</code></td>
+      <td>${w.reason ?? '—'}</td>
+      <td>${w.moderator ?? '—'}</td>
+      <td>${w.date ? new Date(w.date).toLocaleDateString() : '—'}</td>
+      <td>
+        <form method="POST" action="/dashboard/${guildId}/warnings/clear">
+          <input type="hidden" name="userId" value="${userId}">
+          <button class="btn btn-danger" style="padding:.3rem .7rem;font-size:.8rem">Clear All</button>
+        </form>
+      </td>
+    </tr>`)
+  ).join('');
+
+  res.send(layout(req, 'Warnings', `
+    <div class="page-title">⚡ Warnings</div>
+    ${flash}
+    <div class="card">
+      ${rows ? `<table><thead><tr><th>User ID</th><th>Reason</th><th>By</th><th>Date</th><th>Action</th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="empty">No warnings found.</div>'}
+    </div>
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/warnings/clear', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const { userId } = req.body;
+  const gc = getGuildConfig(guildId);
+  if (gc.warnings?.[userId]) delete gc.warnings[userId];
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/warnings?ok=1`);
+});
+
+// ── Chain / Prefix ────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/chain', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const cc = getChainConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  const chainRows = (cc.chain ?? []).map((entry, i) => `<tr>
+    <td>${i + 1}</td>
+    <td>${entry.prefix ?? '—'}</td>
+    <td><code>${entry.roleId ?? '—'}</code></td>
+    <td>
+      <form method="POST" action="/dashboard/${guildId}/chain/remove" style="display:inline">
+        <input type="hidden" name="index" value="${i}">
+        <button class="btn btn-danger" style="padding:.3rem .6rem;font-size:.8rem">Remove</button>
+      </form>
+    </td>
+  </tr>`).join('');
+
+  res.send(layout(req, 'Chain/Prefix', `
+    <div class="page-title">🔗 Chain / Prefix Config</div>
+    ${flash}
+    <div class="card"><h3>Current Chain</h3>
+      ${chainRows ? `<table><thead><tr><th>#</th><th>Prefix</th><th>Role ID</th><th>Action</th></tr></thead><tbody>${chainRows}</tbody></table>` : '<div class="empty">No chain entries.</div>'}
+    </div>
+    <div class="card"><h3>Add Entry</h3>
+    <form method="POST" action="/dashboard/${guildId}/chain/add">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Prefix (e.g. SM)</label><input name="prefix" required></div>
+        <div class="form-group"><label>Role ID</label><input name="roleId" required></div>
+      </div>
+      <button type="submit" class="btn btn-primary">➕ Add</button>
+    </form></div>
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/chain/add', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const cc = getChainConfig(guildId);
+  if (!cc.chain) cc.chain = [];
+  cc.chain.push({ prefix: req.body.prefix, roleId: req.body.roleId });
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/chain?ok=1`);
+});
+
+app.post('/dashboard/:guildId/chain/remove', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const cc = getChainConfig(guildId);
+  cc.chain?.splice(parseInt(req.body.index), 1);
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/chain?ok=1`);
+});
+
+// ── Tickets ───────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/tickets', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const tc    = getTicketConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  // Fetch open tickets from DB
+  const openTickets = await TicketModel.find({ guildId, status: 'open' }).sort({ createdAt: -1 }).limit(30).lean();
+
+  const ticketRows = openTickets.map(t => {
+    const priorityBadge = {
+      urgent: `<span class="badge badge-red">Urgent</span>`,
+      high:   `<span class="badge badge-yellow">High</span>`,
+      normal: `<span class="badge badge-blue">Normal</span>`,
+      low:    `<span class="badge badge-green">Low</span>`,
+    }[t.priority ?? 'normal'];
+    return `<tr>
+      <td>#${t.channelId?.slice(-4)}</td>
+      <td>${t.typeLabel ?? 'Support'}</td>
+      <td><code>${t.creatorId}</code></td>
+      <td>${priorityBadge}</td>
+      <td>${t.createdAt ? new Date(t.createdAt).toLocaleDateString() : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const settingsCard = `
+    <div class="card"><h3>⚙️ Ticket Settings</h3>
+    <form method="POST" action="/dashboard/${guildId}/tickets/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Log Channel ID</label><input name="logChannel" value="${tc.logChannel ?? ''}"></div>
+        <div class="form-group"><label>Transcript Channel ID</label><input name="transcriptChannel" value="${tc.transcriptChannel ?? ''}"></div>
+        <div class="form-group"><label>Staff Role ID</label><input name="staffRole" value="${tc.staffRole ?? ''}"></div>
+        <div class="form-group"><label>Max Open per User</label><input type="number" name="maxOpen" value="${tc.maxOpen ?? 1}" min="1" max="10"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save</button>
+    </form></div>`;
+
+  res.send(layout(req, 'Tickets', `
+    <div class="page-title">🎫 Tickets</div>
+    ${flash}
+    <div class="card"><h3>Open Tickets (${openTickets.length})</h3>
+      ${ticketRows ? `<table><thead><tr><th>ID</th><th>Type</th><th>Creator</th><th>Priority</th><th>Opened</th></tr></thead><tbody>${ticketRows}</tbody></table>` : '<div class="empty">No open tickets.</div>'}
+    </div>
+    ${settingsCard}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/tickets/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const tc = getTicketConfig(guildId);
+  if (req.body.logChannel        !== undefined) tc.logChannel        = req.body.logChannel        || null;
+  if (req.body.transcriptChannel !== undefined) tc.transcriptChannel = req.body.transcriptChannel || null;
+  if (req.body.staffRole         !== undefined) tc.staffRole         = req.body.staffRole         || null;
+  if (req.body.maxOpen           !== undefined) tc.maxOpen           = parseInt(req.body.maxOpen) || 1;
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/tickets?ok=1`);
+});
+
+// ── ERLC ──────────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/erlc', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const gc    = getGuildConfig(guildId);
+  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null };
+  const ec    = gc.erlcLogs;
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  // Try to fetch live server status
+  let statusCard = '';
+  if (ec.serverKey) {
+    try {
+      const sData = await erlcRequest('/server', 'GET', null, guildId);
+      statusCard = `<div class="card"><h3>🖥️ Live Server Status</h3>
+        <div class="grid grid-3">
+          <div class="stat-card"><div class="label">Server Name</div><div class="value" style="font-size:1.1rem">${sData.Name ?? '—'}</div></div>
+          <div class="stat-card"><div class="label">Players</div><div class="value">${sData.CurrentPlayers ?? 0}/${sData.MaxPlayers ?? 0}</div></div>
+          <div class="stat-card"><div class="label">Join Key</div><div class="value" style="font-size:1rem">${sData.JoinKey ?? '—'}</div></div>
+        </div>
+      </div>`;
+    } catch {}
+  }
+
+  const configCard = `
+    <div class="card"><h3>⚙️ ERLC Settings</h3>
+    <form method="POST" action="/dashboard/${guildId}/erlc/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Server API Key</label><input name="serverKey" type="password" placeholder="Leave blank to keep current" value=""></div>
+        <div class="form-group"><label>Enabled</label>
+          <select name="enabled"><option value="true" ${ec.enabled ? 'selected' : ''}>Yes</option><option value="false" ${!ec.enabled ? 'selected' : ''}>No</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>In-Game Role ID (given when player is in ERLC)</label><input name="inGameRole" value="${ec.inGameRole ?? ''}"></div>
+      <h3 style="margin:1rem 0 .5rem">Log Channels</h3>
+      <div class="grid grid-2">
+        <div class="form-group"><label>🔨 Kick/Bans</label><input name="kickBans" value="${ec.kickBans ?? ''}"></div>
+        <div class="form-group"><label>📥 Join/Leave</label><input name="joinLeave" value="${ec.joinLeave ?? ''}"></div>
+        <div class="form-group"><label>⌨️ Commands</label><input name="cmds" value="${ec.cmds ?? ''}"></div>
+        <div class="form-group"><label>🚨 Mod Calls</label><input name="modCall" value="${ec.modCall ?? ''}"></div>
+        <div class="form-group"><label>💀 Kill Logs</label><input name="kills" value="${ec.kills ?? ''}"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save</button>
+    </form></div>`;
+
+  res.send(layout(req, 'ERLC', `
+    <div class="page-title">🖥️ ERLC Settings</div>
+    ${flash}${statusCard}${configCard}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/erlc/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const gc = getGuildConfig(guildId);
+  if (!gc.erlcLogs) gc.erlcLogs = {};
+  const ec = gc.erlcLogs;
+  if (req.body.serverKey)  ec.serverKey  = req.body.serverKey  || ec.serverKey;
+  if (req.body.enabled)    ec.enabled    = req.body.enabled === 'true';
+  if (req.body.inGameRole !== undefined) ec.inGameRole = req.body.inGameRole || null;
+  if (req.body.kickBans   !== undefined) ec.kickBans   = req.body.kickBans   || null;
+  if (req.body.joinLeave  !== undefined) ec.joinLeave  = req.body.joinLeave  || null;
+  if (req.body.cmds       !== undefined) ec.cmds       = req.body.cmds       || null;
+  if (req.body.modCall    !== undefined) ec.modCall    = req.body.modCall    || null;
+  if (req.body.kills      !== undefined) ec.kills      = req.body.kills      || null;
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/erlc?ok=1`);
+});
+
+// ── Shifts / Quota (Melony) ───────────────────────────────────────────────────
+app.get('/dashboard/:guildId/shifts', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const gc    = getGuildConfig(guildId);
+  const mc    = gc.melony ?? {};
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  const configCard = `
+    <div class="card"><h3>⚙️ Shift Quota Settings (Melony)</h3>
+    <form method="POST" action="/dashboard/${guildId}/shifts/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Melony API Key</label><input name="apiKey" type="password" placeholder="Leave blank to keep current"></div>
+        <div class="form-group"><label>Quota Hours (per wave)</label><input type="number" step="0.5" name="quotaHours" value="${mc.quotaHours ?? 2}"></div>
+        <div class="form-group"><label>Log Channel ID</label><input name="logChannel" value="${mc.logChannel ?? ''}"></div>
+        <div class="form-group"><label>Enabled</label>
+          <select name="enabled"><option value="true" ${mc.enabled ? 'selected' : ''}>Yes</option><option value="false" ${!mc.enabled ? 'selected' : ''}>No</option></select>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save</button>
+    </form></div>`;
+
+  res.send(layout(req, 'Shifts', `
+    <div class="page-title">⏱️ Shifts & Quota</div>
+    ${flash}
+    <div class="card"><h3>Current Wave</h3>
+      <div class="grid grid-3">
+        <div class="stat-card"><div class="label">Wave Start</div><div class="value" style="font-size:1rem">${mc.wave?.start ? new Date(mc.wave.start).toLocaleDateString() : '—'}</div></div>
+        <div class="stat-card"><div class="label">Wave End</div><div class="value" style="font-size:1rem">${mc.wave?.end ? new Date(mc.wave.end).toLocaleDateString() : '—'}</div></div>
+        <div class="stat-card"><div class="label">Quota</div><div class="value">${mc.quotaHours ?? '—'}h</div></div>
+      </div>
+    </div>
+    ${configCard}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/shifts/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const gc = getGuildConfig(guildId);
+  if (!gc.melony) gc.melony = {};
+  const mc = gc.melony;
+  if (req.body.apiKey)      mc.apiKey      = req.body.apiKey    || mc.apiKey;
+  if (req.body.quotaHours)  mc.quotaHours  = parseFloat(req.body.quotaHours) || mc.quotaHours;
+  if (req.body.logChannel !== undefined) mc.logChannel = req.body.logChannel || null;
+  if (req.body.enabled)     mc.enabled     = req.body.enabled === 'true';
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/shifts?ok=1`);
+});
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/sessions', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const sc    = getSessionConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  const scheduled = Object.entries(sc.scheduled ?? {});
+
+  const schedRows = scheduled.map(([id, s]) => `<tr>
+    <td><code>${s.hostId}</code></td>
+    <td>${s.scheduledAt ? new Date(s.scheduledAt).toLocaleString() : '—'}</td>
+    <td>${s.joinLink ?? '—'}</td>
+    <td><span class="badge badge-${s.fired ? 'green' : 'yellow'}">${s.fired ? 'Sent' : 'Pending'}</span></td>
+    <td>
+      <form method="POST" action="/dashboard/${guildId}/sessions/cancel">
+        <input type="hidden" name="id" value="${id}">
+        <button class="btn btn-danger" style="padding:.3rem .6rem;font-size:.8rem">Cancel</button>
+      </form>
+    </td>
+  </tr>`).join('');
+
+  const configCard = `
+    <div class="card"><h3>⚙️ Session Settings</h3>
+    <form method="POST" action="/dashboard/${guildId}/sessions/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Session Channel ID</label><input name="channel" value="${sc.channel ?? ''}"></div>
+        <div class="form-group"><label>Vote Threshold</label><input type="number" name="voteThreshold" value="${sc.voteThreshold ?? 5}" min="1"></div>
+        <div class="form-group"><label>Default Join Link</label><input name="joinLink" value="${sc.joinLink ?? ''}"></div>
+        <div class="form-group"><label>Ping Roles (comma-sep IDs)</label><input name="pingRoles" value="${(sc.pingRoles ?? []).join(',')}"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save</button>
+    </form></div>`;
+
+  res.send(layout(req, 'Sessions', `
+    <div class="page-title">🎮 Sessions</div>
+    ${flash}
+    <div class="card"><h3>Scheduled Sessions</h3>
+      ${schedRows ? `<table><thead><tr><th>Host</th><th>Scheduled</th><th>Join Link</th><th>Status</th><th>Action</th></tr></thead><tbody>${schedRows}</tbody></table>` : '<div class="empty">No scheduled sessions.</div>'}
+    </div>
+    ${configCard}
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/sessions/cancel', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const sc = getSessionConfig(guildId);
+  delete sc.scheduled?.[req.body.id];
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/sessions?ok=1`);
+});
+
+app.post('/dashboard/:guildId/sessions/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const sc = getSessionConfig(guildId);
+  if (req.body.channel       !== undefined) sc.channel       = req.body.channel       || null;
+  if (req.body.voteThreshold !== undefined) sc.voteThreshold = parseInt(req.body.voteThreshold) || 5;
+  if (req.body.joinLink      !== undefined) sc.joinLink      = req.body.joinLink       || null;
+  if (req.body.pingRoles     !== undefined) sc.pingRoles     = req.body.pingRoles.split(',').map(s => s.trim()).filter(Boolean);
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/sessions?ok=1`);
+});
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+app.get('/dashboard/:guildId/logging', requireAuth, requireGuildAdmin, (req, res) => {
+  const { guildId } = req.params;
+  const gc    = getGuildConfig(guildId);
+  const ic    = getInfractionConfig(guildId);
+  const flash = req.query.ok ? `<div class="alert alert-success">✅ Saved!</div>` : '';
+
+  res.send(layout(req, 'Logging', `
+    <div class="page-title">📋 Logging Channels</div>
+    ${flash}
+    <div class="card"><h3>Configure Log Channels</h3>
+    <form method="POST" action="/dashboard/${guildId}/logging/config">
+      <div class="grid grid-2">
+        <div class="form-group"><label>Infraction / Punishment Log</label><input name="infractionLog" value="${ic.logChannel ?? ''}"></div>
+        <div class="form-group"><label>LOA Log</label><input name="loaLog" value="${getLOAConfig(guildId).logChannel ?? ''}"></div>
+        <div class="form-group"><label>Ticket Log</label><input name="ticketLog" value="${getTicketConfig(guildId).logChannel ?? ''}"></div>
+        <div class="form-group"><label>Shift/Quota Log</label><input name="melonyLog" value="${gc.melony?.logChannel ?? ''}"></div>
+        <div class="form-group"><label>ERLC Kick/Ban Log</label><input name="erlcKickBans" value="${gc.erlcLogs?.kickBans ?? ''}"></div>
+        <div class="form-group"><label>ERLC Join/Leave Log</label><input name="erlcJoinLeave" value="${gc.erlcLogs?.joinLeave ?? ''}"></div>
+        <div class="form-group"><label>ERLC Commands Log</label><input name="erlcCmds" value="${gc.erlcLogs?.cmds ?? ''}"></div>
+        <div class="form-group"><label>ERLC Mod Call Log</label><input name="erlcModCall" value="${gc.erlcLogs?.modCall ?? ''}"></div>
+      </div>
+      <button type="submit" class="btn btn-primary">💾 Save All</button>
+    </form></div>
+  `, guildId));
+});
+
+app.post('/dashboard/:guildId/logging/config', requireAuth, requireGuildAdmin, async (req, res) => {
+  const { guildId } = req.params;
+  const gc = getGuildConfig(guildId);
+  const ic = getInfractionConfig(guildId);
+  const lc = getLOAConfig(guildId);
+  const tc = getTicketConfig(guildId);
+  if (!gc.melony)   gc.melony   = {};
+  if (!gc.erlcLogs) gc.erlcLogs = {};
+  if (req.body.infractionLog  !== undefined) ic.logChannel            = req.body.infractionLog  || null;
+  if (req.body.loaLog         !== undefined) lc.logChannel            = req.body.loaLog         || null;
+  if (req.body.ticketLog      !== undefined) tc.logChannel            = req.body.ticketLog      || null;
+  if (req.body.melonyLog      !== undefined) gc.melony.logChannel     = req.body.melonyLog      || null;
+  if (req.body.erlcKickBans   !== undefined) gc.erlcLogs.kickBans     = req.body.erlcKickBans   || null;
+  if (req.body.erlcJoinLeave  !== undefined) gc.erlcLogs.joinLeave    = req.body.erlcJoinLeave  || null;
+  if (req.body.erlcCmds       !== undefined) gc.erlcLogs.cmds         = req.body.erlcCmds       || null;
+  if (req.body.erlcModCall    !== undefined) gc.erlcLogs.modCall      = req.body.erlcModCall    || null;
+  await saveGuildConfig(guildId);
+  res.redirect(`/dashboard/${guildId}/logging?ok=1`);
+});
+
+// ── Healthcheck ───────────────────────────────────────────────────────────────
+app.get('/health', (req, res) => res.send('OK'));
+
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Web server listening on port ${PORT}`);
+  console.log(`🌐 Dashboard running on port ${PORT} — ${DASHBOARD_URL}`);
 });
 
 //Start: connect to DB first, then log the bot in //
