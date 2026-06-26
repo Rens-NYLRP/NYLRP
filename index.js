@@ -10085,11 +10085,106 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'tkt__select_type') {
         const typeId = interaction.values[0];
         const tc = getTicketConfig(guildId);
-        const ticketType = tc.ticketTypes.find(t => String(t.id) === typeId);
-        if (!ticketType) return interaction.reply({ content: '❌ Ticket type not found.', flags: MessageFlags.Ephemeral });
-        // Fake a button interaction context for reuse of existing open logic
-        interaction.customId = `tkt__open__${typeId}`;
-        // Fall through to the existing tkt__open handler below
+        const pc = getTicketPreCheckConfig(guildId);
+        const type = tc.ticketTypes.find(t => String(t.id) === typeId);
+        if (!type) return interaction.reply({ content: '❌ Ticket type not found.', flags: MessageFlags.Ephemeral });
+
+        // Required roles check
+        if (type.requiredRoles?.length && !type.requiredRoles.some(r => interaction.member.roles.cache.has(r)) && !hasSetup(interaction.member)) {
+          return interaction.reply({ content: `❌ You need one of the following roles to open this ticket: ${type.requiredRoles.map(r => `<@&${r}>`).join(', ')}`, flags: MessageFlags.Ephemeral });
+        }
+
+        // Minimum rank check
+        if (type.minimumStaffRank && type.minimumStaffRank > 0) {
+          if (!meetsMinimumRank(interaction.member, guildId, type.minimumStaffRank)) {
+            return interaction.reply({ content: `❌ You need a staff rank higher than **level ${type.minimumStaffRank}** to open this ticket type.`, flags: MessageFlags.Ephemeral });
+          }
+        }
+
+        // Duplicate ticket check
+        if (openTickets.has(interaction.user.id)) {
+          const existingId = openTickets.get(interaction.user.id);
+          const existing = interaction.guild.channels.cache.get(existingId);
+          if (existing) return interaction.reply({ content: `❌ You already have an open ticket: <#${existing.id}>`, flags: MessageFlags.Ephemeral });
+          openTickets.delete(interaction.user.id);
+        }
+        const v2check = getTicketV2Config(guildId);
+        const existingV2 = Object.entries(v2check.openTickets ?? {}).find(([chId, rec]) =>
+          rec.userId === interaction.user.id && rec.status === 'open' && interaction.guild.channels.cache.has(chId)
+        );
+        if (existingV2) {
+          return interaction.reply({ content: `❌ You already have an open ticket: <#${existingV2[0]}>`, flags: MessageFlags.Ephemeral });
+        }
+        ticketIntakeData.delete(interaction.user.id);
+
+        // Per-type cooldown check
+        if (type.cooldownMinutes) {
+          const cdKey = `${guildId}:${interaction.user.id}:${typeId}`;
+          const lastUsed = ticketCooldowns.get(cdKey);
+          if (lastUsed) {
+            const remaining = type.cooldownMinutes * 60000 - (Date.now() - lastUsed);
+            if (remaining > 0) {
+              const mins = Math.ceil(remaining / 60000);
+              return interaction.reply({ content: `⏳ You can open another **${type.label}** ticket in **${mins}** minute${mins !== 1 ? 's' : ''}.`, flags: MessageFlags.Ephemeral });
+            }
+          }
+        }
+
+        // Per-type max open tickets check
+        if (type.maxOpen) {
+          const openCount = interaction.guild.channels.cache.filter(ch =>
+            ch.topic?.includes(`| ${type.label}`) && ch.name.includes('ticket-')
+          ).size;
+          if (openCount >= type.maxOpen) {
+            return interaction.reply({ content: `❌ The maximum number of **${type.label}** tickets (**${type.maxOpen}**) is currently open. Please wait for one to close.`, flags: MessageFlags.Ephemeral });
+          }
+        }
+
+        // Intake form
+        if (Array.isArray(type.intakeFields) && type.intakeFields.length > 0) {
+          const intakeModal = new ModalBuilder()
+            .setCustomId(`modal_intake_submit__${typeId}`)
+            .setTitle(`📋 ${String(type.label).slice(0, 40)}`);
+          for (const field of type.intakeFields.slice(0, 4)) {
+            const input = new TextInputBuilder()
+              .setCustomId(`intake_${field.id}`)
+              .setLabel(String(field.label).slice(0, 45))
+              .setStyle(field.style === 'paragraph' ? TextInputStyle.Paragraph : TextInputStyle.Short)
+              .setRequired(field.required ?? true)
+              .setMaxLength(field.style === 'paragraph' ? 1000 : 200);
+            if (field.placeholder) input.setPlaceholder(String(field.placeholder).slice(0, 100));
+            intakeModal.addComponents(new ActionRowBuilder().addComponents(input));
+          }
+          return interaction.showModal(intakeModal);
+        }
+
+        // Pre-check / rules
+        const resolvedPreCheckEnabled = resolveTicketSetting(type, tc, pc, 'preCheck.enabled');
+        const resolvedRulesText       = resolveTicketSetting(type, tc, pc, 'preCheck.rulesText');
+        if (resolvedPreCheckEnabled === true) {
+          ticketRulesPending.set(interaction.user.id, { typeId, guildId, messageId: null });
+          const rulesEmbed = new EmbedBuilder()
+            .setTitle('📋 Ticket Rules')
+            .setDescription(resolvedRulesText)
+            .setColor(0x5865F2)
+            .setFooter({ text: 'You must accept the rules to open a ticket.' });
+          const rulesRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`tkt__rules_accept__${typeId}`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('tkt__rules_decline').setLabel('❌ Decline').setStyle(ButtonStyle.Danger),
+          );
+          return interaction.reply({ embeds: [rulesEmbed], components: [rulesRow], flags: MessageFlags.Ephemeral });
+        }
+
+        // No pre-check — create ticket directly
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        try {
+          await createTicketChannel(interaction, type, tc, pc, guildId, false);
+        } catch (e) {
+          console.error('createTicketChannel (from select) error:', e);
+          ticketIntakeData.delete(interaction.user.id);
+          await interaction.editReply({ content: `❌ Could not create ticket: ${e.message}` }).catch(() => {});
+        }
+        return;
       }
 
       const id = interaction.customId; const val = interaction.values[0];
