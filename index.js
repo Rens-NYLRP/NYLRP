@@ -12,6 +12,8 @@ const {
   Options,
 } = require('discord.js');
 
+const embedsModule = require('./embeds.js');
+
 process.chdir(path.dirname(require.main.filename));
 
 const client = new Client({
@@ -246,7 +248,15 @@ function getHandbookConfig(guildId) {
 
 function getTicketConfig(guildId) {
   const gc = getGuildConfig(guildId);
-  if (!gc.ticket) gc.ticket = { pingRoles: [], transcriptChannel: null, ticketChannel: null, ticketCategory: null, panelTitle: '🎫 Support Tickets', panelDescription: 'Click a button below to open a support ticket.', panelColor: '#5865F2', panelThumbnail: null, welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [] };
+  if (!gc.ticket) gc.ticket = { pingRoles: [], transcriptChannel: null, ticketChannel: null, ticketCategory: null, panelTitle: '🎫 Support Tickets', panelDescription: 'Click a button below to open a support ticket.', panelColor: '#5865F2', panelThumbnail: null, welcomeText: 'Hello {user}, thank you for opening a ticket!', ticketTypes: [], embed: null };
+  // Migrate legacy panelTitle/panelDescription/panelColor/panelThumbnail into the new Discohook-style embed config (one-time, preserves existing panels)
+  if (!gc.ticket.embed) {
+    gc.ticket.embed = embedsModule.defaultEmbedConfig();
+    gc.ticket.embed.title = gc.ticket.panelTitle || null;
+    gc.ticket.embed.description = gc.ticket.panelDescription || null;
+    gc.ticket.embed.color = gc.ticket.panelColor || '#5865F2';
+    gc.ticket.embed.image = gc.ticket.panelThumbnail || null;
+  }
   // Fallback to main server for ticket types and global settings if not set locally
   if (!isMainServer(guildId)) {
     const mainTicket = getMainConfig('ticket');
@@ -1902,6 +1912,8 @@ function canRunSession(member, guildId) {
 }
 
 const openTickets        = new Map();
+const freeEmbedDrafts  = new Map(); // scope -> embed config draft (for /embed command)
+const freeEmbedTargets = new Map(); // scope -> { channelId, guildId } (for /embed command)
 const ticketRulesPending = new Map(); // userId → { typeId, guildId, intakeAnswers? }
 const ticketIntakeData   = new Map(); // userId → intakeAnswers[] — bewaard tot ticket aangemaakt is
 const srPendingRoleAdd = new Map();
@@ -2142,7 +2154,7 @@ function getBloxlinkConfig(guildId) {
 
 // ════════════════════════════════════════════
 // MELONLY API
-// API key is read from process.env.MELONLY_API_KEY (set in Render).
+// API key is read from process.env.MELONLY_API_KEY (configured as a Koyeb secret/env var).
 // Base URL: https://api.melonly.xyz/api/v1
 // ════════════════════════════════════════════
 
@@ -3183,9 +3195,8 @@ function buildApplicationPanelMessage(panel, ac, guildId) {
 }
 
 function buildTicketPanelEmbed(tc) {
-  const embed = new EmbedBuilder().setTitle(embedSafe.title(tc.panelTitle || '🎫 Support Tickets')).setDescription(embedSafe.desc(tc.panelDescription || 'Click a button below.')).setColor(hexToInt(tc.panelColor));
-  if (tc.panelThumbnail) embed.setImage(tc.panelThumbnail);
-  return embed;
+  // Now backed by the centralized Discohook-style embed system.
+  return embedsModule.renderEmbed(tc.embed);
 }
 function buildTicketTypeDropdown(ticketTypes) {
   // Ticket selectie via dropdown — max 25 opties
@@ -3566,6 +3577,9 @@ async function createTicketChannel(interaction, type, tc, pc, guildId, alreadyUp
 // ════════════════════════════════════════════
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
+  { name: 'embed', description: 'Build and send a fully custom embed (Discohook-style)', options: [
+    { name: 'channel', type: 7, description: 'Channel to send the embed to', required: true },
+  ]},
   { name: 'avatar', description: 'Show avatar', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
   { name: 'serverinfo', description: 'Server information' },
   { name: 'roleinfo', description: 'Role information', options: [{ name: 'role', type: 8, description: 'Which role?', required: true }] },
@@ -5082,11 +5096,39 @@ client.on('messageReactionRemove', async (reaction, user) => {
   } catch (e) { console.error('Reaction remove error:', e); }
 });
 
+// ════ EMBED SYSTEM: PANEL REGISTRATIONS ════
+// Each panel that should use the Discohook-style embed editor registers
+// itself here. See embeds.js for full wiring docs.
+embedsModule.registerEmbedScope('tkt', {
+  get: (guildId) => getTicketConfig(guildId).embed,
+  set: (guildId, cfg) => { getTicketConfig(guildId).embed = cfg; },
+  onSaved: (guildId) => saveGuildConfig(guildId),
+});
+
+// Free-standing /embed command — resolves where to send the finished embed.
+embedsModule.registerSendTargetResolver((scope) => freeEmbedTargets.get(scope) || null);
+
 // ════════════════════════════════════════════
 // INTERACTIONS
 // ════════════════════════════════════════════
 client.on('interactionCreate', async interaction => {
   const guildId = interaction.guildId;
+
+  // ════ DISCOHOOK-STYLE EMBED EDITOR ════
+  // Handles all customIds starting with emb__, embsel__, emb_modal__.
+  // Safe no-op for everything else, so it never collides with existing
+  // t_ / s_ / d_ / etc. prefixes used elsewhere in this file.
+  if (guildId) {
+    try {
+      if (await embedsModule.handleEmbedInteraction(interaction, guildId)) return;
+    } catch (e) {
+      console.error('[embeds.js] router error:', e);
+      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+        try { await interaction.reply({ content: '❌ Embed editor error — please try again.', flags: MessageFlags.Ephemeral }); } catch {}
+      }
+      return;
+    }
+  }
 
   // Rating buttons and modals come from DMs — these must not have a guildId
   const isDMRating = !guildId && (
@@ -5134,6 +5176,19 @@ client.on('interactionCreate', async interaction => {
       try { user   = interaction.options.getUser('user') ?? null;   } catch {}
       try { member = user ? interaction.options.getMember('user') : null; } catch {}
       try { reason = interaction.options.getString('reason') ?? 'No reason provided'; } catch {}
+
+      if (cmd === 'embed') {
+        const channel = interaction.options.getChannel('channel');
+        if (!channel?.isTextBased?.()) return interaction.reply({ content: '❌ Pick a text channel.', flags: MessageFlags.Ephemeral });
+        const scope = `freeembed_${interaction.user.id}`;
+        freeEmbedTargets.set(scope, { channelId: channel.id, guildId: interaction.guildId });
+        embedsModule.registerEmbedScope(scope, {
+          get: () => freeEmbedDrafts.get(scope) || embedsModule.defaultEmbedConfig(),
+          set: (_guildId, cfg) => freeEmbedDrafts.set(scope, cfg),
+          onSaved: () => {}, // nothing to persist — it's a one-off draft
+        });
+        return embedsModule.openEmbedEditorRoot(interaction, scope, interaction.guildId);
+      }
 
       if (cmd === 'invite') {
   const inviteUrl = `https://discord.com/oauth2/authorize?client_id=${client.user.id}&permissions=8&scope=bot%20applications.commands`;
@@ -8847,15 +8902,7 @@ client.on('interactionCreate', async interaction => {
         if (id === 't_channel')    return interaction.reply({ content: '### 📬 Panel channel', components: [channelDropdown('td_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 't_category')   return interaction.reply({ content: '### 📁 Category', components: [channelDropdown('td_category', 'Select category...', [ChannelType.GuildCategory])], flags: MessageFlags.Ephemeral });
         if (id === 't_panel_embed') {
-          const tc = getTicketConfig(guildId);
-          const modal = new ModalBuilder().setCustomId('modal_t_embed').setTitle('Ticket Panel Embed');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(tc.panelTitle || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_desc').setLabel('Description').setStyle(TextInputStyle.Paragraph).setValue(tc.panelDescription || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_color').setLabel('Color hex').setStyle(TextInputStyle.Short).setValue(tc.panelColor || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t_embed_thumbnail').setLabel('Image URL').setStyle(TextInputStyle.Short).setValue(tc.panelThumbnail || '').setRequired(false)),
-          );
-          return interaction.showModal(modal);
+          return embedsModule.openEmbedEditorRoot(interaction, 'tkt', guildId);
         }
         if (id === 't_welcome') {
           const tc = getTicketConfig(guildId);
@@ -12170,7 +12217,7 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Pre-check settings saved for **${type.label}**!\n*Empty fields fall back to global.*`, flags: MessageFlags.Ephemeral });
       }
 
-      if (mid === 'modal_t_embed')   { const tc = getTicketConfig(guildId); const t = interaction.fields.getTextInputValue('t_embed_title').trim(); const d = interaction.fields.getTextInputValue('t_embed_desc').trim(); const c = interaction.fields.getTextInputValue('t_embed_color').trim(); const th = interaction.fields.getTextInputValue('t_embed_thumbnail').trim(); if (t) tc.panelTitle = t; if (d) tc.panelDescription = d; if (c) tc.panelColor = c; if (th) tc.panelThumbnail = th; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Panel embed updated!', flags: MessageFlags.Ephemeral }); }
+      if (mid === 'modal_t_embed')   { /* obsolete — replaced by the Discohook-style embed editor (embeds.js) */ }
       if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Welcome text saved!', flags: MessageFlags.Ephemeral }); }
       if (mid === 'modal_t_add_type') { const tc = getTicketConfig(guildId); tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null }); await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Ticket type added!`, flags: MessageFlags.Ephemeral }); }
 
@@ -12377,7 +12424,8 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-// Render healthcheck server
+// Healthcheck server (used by Koyeb's health checks and by an external
+// keep-alive ping to prevent the free instance from scaling to zero)
 const express = require('express');
 const app = express();
 
@@ -12385,6 +12433,16 @@ const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
   res.status(200).send('Bot is running');
+});
+
+// Lightweight dedicated endpoint for uptime monitors (e.g. cron-job.org, UptimeRobot)
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    discordReady: client.isReady?.() ?? false,
+    dbReady,
+    uptimeSeconds: process.uptime(),
+  });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
