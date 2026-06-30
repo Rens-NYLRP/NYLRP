@@ -156,6 +156,13 @@ function buildEditorPayload(scope, guildId) {
 
 async function openEmbedEditorRoot(interaction, scope, guildId) {
   const payload = buildEditorPayload(scope, guildId);
+  // Als de editor geopend wordt vanaf een knop/select op een bestaand bericht
+  // (bv. "Panel Embed" in de Ticket Setup), wordt dat bericht IN-PLACE vervangen
+  // door de editor i.p.v. dat er een nieuw los bericht bijkomt. Dat voorkomt dat
+  // je twee panelen (setup-paneel + editor) tegelijk open hebt staan.
+  if (typeof interaction.update === 'function' && (interaction.isButton?.() || interaction.isStringSelectMenu?.() || interaction.isRoleSelectMenu?.() || interaction.isChannelSelectMenu?.() || interaction.isUserSelectMenu?.())) {
+    return interaction.update(payload);
+  }
   return interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
 }
 
@@ -324,7 +331,12 @@ async function handleEmbedInteraction(interaction, guildId) {
     }
 
     await persist(scope, guildId, cfg);
-    if (interaction.isFromMessage?.()) {
+    // Altijd het bestaande editor-bericht bijwerken zodat je direct ziet wat je
+    // net bevestigd hebt — alleen als er écht geen bericht is om te updaten
+    // (zou niet moeten voorkomen bij de embed editor, want die wordt altijd
+    // vanaf een knop geopend) valt dit terug op een nieuwe reply.
+    const canUpdateInPlace = interaction.isFromMessage?.() || !!interaction.message;
+    if (canUpdateInPlace) {
       await interaction.update(buildEditorPayload(scope, guildId));
     } else {
       await interaction.reply({ ...buildEditorPayload(scope, guildId), flags: MessageFlags.Ephemeral });
@@ -570,6 +582,14 @@ function getHandbookConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.handbooks) gc.handbooks = { panels: {} }; // panelId → { title, description, color, channel, messageId, books: [{ id, label, url, requiredRoles[] }] }
   return gc.handbooks;
+}
+
+// Opslag voor losse /embed drafts (per gebruiker), zodat een halfafgemaakte
+// embed niet verloren gaat als de bot herstart.
+function getFreeEmbedStore(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.freeEmbeds) gc.freeEmbeds = {}; // userId → { cfg, target: { channelId } }
+  return gc.freeEmbeds;
 }
 
 function getTicketConfig(guildId) {
@@ -1228,9 +1248,10 @@ async function applyInfractionLevelRole(member, ic, level) {
 }
 
 function getPermissionsConfig(guildId) {
-  if (!guildId) return { adminRoles: [], modRoles: [], staffRoles: [], shrRoles: [] };
+  if (!guildId) return { adminRoles: [], modRoles: [], staffRoles: [], shrRoles: [], embedEditorRoles: [] };
   const gc = getGuildConfig(guildId);
-  if (!gc.permissions) gc.permissions = { adminRoles: [], modRoles: [], staffRoles: [], shrRoles: [] };
+  if (!gc.permissions) gc.permissions = { adminRoles: [], modRoles: [], staffRoles: [], shrRoles: [], embedEditorRoles: [] };
+  if (!gc.permissions.embedEditorRoles) gc.permissions.embedEditorRoles = [];
   if (!isMainServer(guildId)) {
     const mainPerms = getMainConfig('permissions');
     if (mainPerms) {
@@ -1238,6 +1259,7 @@ function getPermissionsConfig(guildId) {
       if (!gc.permissions.modRoles?.length)   gc.permissions.modRoles   = mainPerms.modRoles   ?? [];
       if (!gc.permissions.staffRoles?.length) gc.permissions.staffRoles = mainPerms.staffRoles ?? [];
       if (!gc.permissions.shrRoles?.length)   gc.permissions.shrRoles   = mainPerms.shrRoles   ?? [];
+      if (!gc.permissions.embedEditorRoles?.length) gc.permissions.embedEditorRoles = mainPerms.embedEditorRoles ?? [];
     }
   }
   return gc.permissions;
@@ -1819,6 +1841,18 @@ function hasSetup(m) {
 }
 function hasAnyStaff(m) { return hasStaff(m) || hasSHR(m) || hasSetup(m); }
 
+// Losse rol die (naast Admin/Setup) ook de embed editor mag gebruiken,
+// ook als die rol verder geen staff/admin rechten heeft.
+function hasEmbedEditorAccess(m) {
+  if (!m) return false;
+  if (hasSetup(m)) return true;
+  const pc = getPermissionsConfig(m.guild?.id);
+  if (pc.embedEditorRoles?.length && m.roles?.cache) {
+    return pc.embedEditorRoles.some(id => m.roles.cache.has(id));
+  }
+  return false;
+}
+
 function isMainServer(guildId) {
   const dc = getDepartmentsConfig(guildId);
   return dc.isMainServer === true;
@@ -2238,7 +2272,6 @@ function canRunSession(member, guildId) {
 }
 
 const openTickets        = new Map();
-const freeEmbedDrafts  = new Map(); // scope -> embed config draft (for /embed command)
 const freeEmbedTargets = new Map(); // scope -> { channelId, guildId } (for /embed command)
 const ticketRulesPending = new Map(); // userId → { typeId, guildId, intakeAnswers? }
 const ticketIntakeData   = new Map(); // userId → intakeAnswers[] — bewaard tot ticket aangemaakt is
@@ -3210,6 +3243,7 @@ function buildPermissionsSetupPayload(guildId) {
       '👑 **Admin** — Setup & configuration commands.\n' +
       '🛡️ **Mod** — Moderation commands (ban, kick, mute, warn, etc.).\n' +
       '👤 **Staff** — Basic staff commands (close ticket, warn, etc.).\n\n' +
+      '🎨 **Embed Editor** — Mag de embed editor gebruiken (`/embed`, paneel-embeds), ook zonder Staff/Admin.\n\n' +
       '> If SHR roles are not set, server owner and Admins automatically get full access.'
     )
     .addFields(
@@ -3217,12 +3251,14 @@ function buildPermissionsSetupPayload(guildId) {
       { name: '👑 Admin Roles',                 value: fmt(pc.adminRoles),    inline: true  },
       { name: '🛡️ Mod Roles',                  value: fmt(pc.modRoles),      inline: true  },
       { name: '👤 Staff Roles',                 value: fmt(pc.staffRoles),    inline: true  },
+      { name: '🎨 Embed Editor Roles',          value: fmt(pc.embedEditorRoles), inline: true },
     );
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('perms__shr').setLabel('SHR Roles (Full Override)').setStyle(ButtonStyle.Success).setEmoji('⭐'),
     new ButtonBuilder().setCustomId('perms__admin').setLabel('Admin Roles').setStyle(ButtonStyle.Primary).setEmoji('👑'),
     new ButtonBuilder().setCustomId('perms__mod').setLabel('Mod Roles').setStyle(ButtonStyle.Primary).setEmoji('🛡️'),
     new ButtonBuilder().setCustomId('perms__staff').setLabel('Staff Roles').setStyle(ButtonStyle.Primary).setEmoji('👤'),
+    new ButtonBuilder().setCustomId('perms__embed').setLabel('Embed Editor Roles').setStyle(ButtonStyle.Secondary).setEmoji('🎨'),
   );
   return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
 }
@@ -3992,11 +4028,6 @@ const commands = [
   { name: 'note', description: '[SHR] Add note', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true }] },
   { name: 'notes', description: '[SHR] View notes', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
   { name: 'announce', description: '[SHR] Send an announcement' },
-  { name: 'embed', description: '[SHR] Send custom embed', options: [
-    { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'title', type: 3, description: 'Title', required: true },
-    { name: 'description', type: 3, description: 'Description', required: true }, { name: 'color', type: 3, description: 'Hex color', required: false },
-    { name: 'image', type: 3, description: 'Image URL', required: false }, { name: 'footer', type: 3, description: 'Footer', required: false },
-  ]},
   { name: 'giveaway', description: '[SHR] Start giveaway', options: [
     { name: 'channel', type: 7, description: 'Channel', required: true }, { name: 'prize', type: 3, description: 'Prize', required: true },
     { name: 'minutes', type: 4, description: 'Duration (minutes)', required: true }, { name: 'winners', type: 4, description: 'Winners', required: true },
@@ -5493,8 +5524,13 @@ client.on('interactionCreate', async interaction => {
       const cmd = interaction.commandName;
 
       // ════ GLOBAL STAFF-ONLY GATE ════
-      // All commands are staff-only, except /reviewstaff (which anyone may use).
-      if (cmd !== 'reviewstaff' && !hasAnyStaff(interaction.member)) {
+      // All commands are staff-only, except /reviewstaff (which anyone may use)
+      // and /embed (which Embed Editor roles may also use, even without Staff/Admin).
+      if (cmd === 'embed') {
+        if (!hasEmbedEditorAccess(interaction.member)) {
+          return interaction.reply({ content: '❌ You do not have permission to use the embed editor.', flags: MessageFlags.Ephemeral });
+        }
+      } else if (cmd !== 'reviewstaff' && !hasAnyStaff(interaction.member)) {
         return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
       }
 
@@ -5507,11 +5543,18 @@ client.on('interactionCreate', async interaction => {
         const channel = interaction.options.getChannel('channel');
         if (!channel?.isTextBased?.()) return interaction.reply({ content: '❌ Pick a text channel.', flags: MessageFlags.Ephemeral });
         const scope = `freeembed_${interaction.user.id}`;
-        freeEmbedTargets.set(scope, { channelId: channel.id, guildId: interaction.guildId });
+        const store = getFreeEmbedStore(guildId);
+        if (!store[interaction.user.id]) store[interaction.user.id] = { cfg: embedsModule.defaultEmbedConfig(), target: null };
+        store[interaction.user.id].target = { channelId: channel.id, guildId: interaction.guildId };
+        await saveGuildConfig(guildId);
+        freeEmbedTargets.set(scope, store[interaction.user.id].target);
         embedsModule.registerEmbedScope(scope, {
-          get: () => freeEmbedDrafts.get(scope) || embedsModule.defaultEmbedConfig(),
-          set: (_guildId, cfg) => freeEmbedDrafts.set(scope, cfg),
-          onSaved: () => {}, // nothing to persist — it's a one-off draft
+          get: () => getFreeEmbedStore(guildId)[interaction.user.id]?.cfg || embedsModule.defaultEmbedConfig(),
+          set: (_guildId, cfg) => {
+            const s = getFreeEmbedStore(guildId);
+            s[interaction.user.id] = { ...(s[interaction.user.id] || {}), cfg };
+          },
+          onSaved: () => saveGuildConfig(guildId), // bewaart de draft, overleeft een herstart
         });
         return embedsModule.openEmbedEditorRoot(interaction, scope, interaction.guildId);
       }
@@ -6112,14 +6155,6 @@ client.on('interactionCreate', async interaction => {
         pendingAnnounceChannel.set(interaction.user.id, interaction.channel.id);
         const sel = new StringSelectMenuBuilder().setCustomId('announce_pick').setPlaceholder('Select type...').addOptions(types.slice(0, 25).map(([tid, t]) => ({ label: `${t.emoji ? t.emoji + ' ' : ''}${t.name}`.slice(0, 100), value: tid })));
         return interaction.reply({ content: `### 📣 Select announcement type`, components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
-      }
-      if (cmd === 'embed') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const ch = interaction.options.getChannel('channel');
-        const embed = new EmbedBuilder().setTitle(interaction.options.getString('title')).setDescription(interaction.options.getString('description')).setColor(hexToInt(interaction.options.getString('color') ?? '#5865F2'));
-        const img = interaction.options.getString('image'); const footer = interaction.options.getString('footer');
-        if (img) embed.setImage(img); if (footer) embed.setFooter({ text: footer });
-        await ch.send({ embeds: [embed] }); return interaction.reply({ content: `✅ Sent to <#${ch.id}>!`, flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'giveaway') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
@@ -8123,12 +8158,14 @@ client.on('interactionCreate', async interaction => {
           mod:   'Mod',
           staff: 'Staff',
           shr:   'SHR (Full Override)',
+          embed: 'Embed Editor',
         };
         const descMap = {
           shr:   '### ⭐ Select **SHR** roles\n> SHR has **full override** for all commands — no rank restrictions, no permission checks. If left empty, server owner and Admins get full access automatically.',
           admin: '### 👑 Select **Admin** roles\n> Admins can use setup and configuration commands.',
           mod:   '### 🛡️ Select **Mod** roles\n> Mods can use moderation commands (ban, kick, mute, warn, etc.).',
           staff: '### 👤 Select **Staff** roles\n> Staff can use basic commands (close ticket, warn, view infractions, etc.).',
+          embed: '### 🎨 Select **Embed Editor** roles\n> These roles may use the embed editor (`/embed` and panel embeds) even without Staff/Admin permissions.',
         };
         if (!labelMap[level]) return;
         return interaction.reply({
@@ -9222,14 +9259,17 @@ client.on('interactionCreate', async interaction => {
 
       // ════ TICKET SETUP BUTTONS ════
       if (id.startsWith('t_')) {
+        // "Panel Embed" mag ook door losse Embed Editor-rollen gebruikt worden,
+        // de rest van de ticket setup blijft Admin/Setup-only.
+        if (id === 't_panel_embed') {
+          if (!hasEmbedEditorAccess(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use the embed editor.', flags: MessageFlags.Ephemeral });
+          return embedsModule.openEmbedEditorRoot(interaction, 'tkt', guildId);
+        }
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         if (id === 't_ping_roles') return interaction.reply({ content: '### 📢 Ping roles', components: [roleDropdown('td_ping_roles', 'Select roles...')], flags: MessageFlags.Ephemeral });
         if (id === 't_transcript') return interaction.reply({ content: '### 📋 Transcript channel', components: [channelDropdown('td_transcript', 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 't_channel')    return interaction.reply({ content: '### 📬 Panel channel', components: [channelDropdown('td_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 't_category')   return interaction.reply({ content: '### 📁 Category', components: [channelDropdown('td_category', 'Select category...', [ChannelType.GuildCategory])], flags: MessageFlags.Ephemeral });
-        if (id === 't_panel_embed') {
-          return embedsModule.openEmbedEditorRoot(interaction, 'tkt', guildId);
-        }
         if (id === 't_welcome') {
           const tc = getTicketConfig(guildId);
           const modal = new ModalBuilder().setCustomId('modal_t_welcome').setTitle('Ticket Welcome Text');
@@ -9978,7 +10018,7 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId.startsWith('perms_save__')) {
         const level = interaction.customId.replace('perms_save__', '');
         const pc = getPermissionsConfig(guildId);
-        const keyMap = { admin: 'adminRoles', mod: 'modRoles', staff: 'staffRoles', shr: 'shrRoles' };
+        const keyMap = { admin: 'adminRoles', mod: 'modRoles', staff: 'staffRoles', shr: 'shrRoles', embed: 'embedEditorRoles' };
         const key = keyMap[level];
         if (!key) return interaction.reply({ content: '❌ Unknown level.', flags: MessageFlags.Ephemeral });
         pc[key] = interaction.values;
