@@ -12,7 +12,333 @@ const {
   Options,
 } = require('discord.js');
 
-const embedsModule = require('./embeds.js');
+// ════════════════════════════════════════════
+// EMBEDS MODULE (inlined from embeds.js)
+// ════════════════════════════════════════════
+const embedsModule = (function () {
+const scopes = new Map();
+let sendTargetResolver = null;
+
+function registerEmbedScope(scope, handlers) {
+  scopes.set(scope, handlers);
+}
+
+function registerSendTargetResolver(fn) {
+  sendTargetResolver = fn;
+}
+
+function defaultEmbedConfig() {
+  return {
+    title: null,
+    url: null,
+    description: null,
+    color: '#5865F2',
+    image: null,
+    thumbnail: null,
+    author: { name: null, iconURL: null, url: null },
+    footer: { text: null, iconURL: null },
+    fields: [],
+    timestamp: false,
+  };
+}
+
+function isValidUrl(str) {
+  if (!str) return false;
+  try {
+    const u = new URL(str);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function hexToInt(hex) {
+  if (!hex) return 0x5865F2;
+  const cleaned = String(hex).trim().replace(/^#/, '');
+  const n = parseInt(cleaned, 16);
+  return Number.isNaN(n) ? 0x5865F2 : n;
+}
+
+function renderEmbed(cfg) {
+  cfg = cfg || defaultEmbedConfig();
+  const e = new EmbedBuilder().setColor(hexToInt(cfg.color));
+
+  if (cfg.title) e.setTitle(String(cfg.title).slice(0, 256));
+  if (cfg.url && isValidUrl(cfg.url)) e.setURL(cfg.url);
+  if (cfg.description) e.setDescription(String(cfg.description).slice(0, 4096));
+  if (cfg.image && isValidUrl(cfg.image)) e.setImage(cfg.image);
+  if (cfg.thumbnail && isValidUrl(cfg.thumbnail)) e.setThumbnail(cfg.thumbnail);
+
+  if (cfg.author?.name) {
+    const opts = { name: String(cfg.author.name).slice(0, 256) };
+    if (cfg.author.iconURL && isValidUrl(cfg.author.iconURL)) opts.iconURL = cfg.author.iconURL;
+    if (cfg.author.url && isValidUrl(cfg.author.url)) opts.url = cfg.author.url;
+    e.setAuthor(opts);
+  }
+
+  if (cfg.footer?.text) {
+    const opts = { text: String(cfg.footer.text).slice(0, 2048) };
+    if (cfg.footer.iconURL && isValidUrl(cfg.footer.iconURL)) opts.iconURL = cfg.footer.iconURL;
+    e.setFooter(opts);
+  }
+
+  if (Array.isArray(cfg.fields) && cfg.fields.length) {
+    e.addFields(cfg.fields.slice(0, 25).map(f => ({
+      name: String(f.name || '\u200b').slice(0, 256),
+      value: String(f.value || '\u200b').slice(0, 1024),
+      inline: !!f.inline,
+    })));
+  }
+
+  if (cfg.timestamp) e.setTimestamp();
+
+  if (!cfg.title && !cfg.description && !cfg.image && !cfg.fields?.length && !cfg.author?.name) {
+    e.setDescription('*Empty embed — click a button below to start editing.*');
+  }
+
+  return e;
+}
+
+function cid(action, scope) { return `emb__${action}__${scope}`; }
+function selcid(action, scope) { return `embsel__${action}__${scope}`; }
+function modalcid(action, scope) { return `emb_modal__${action}__${scope}`; }
+
+function parseCid(customId) {
+  const parts = customId.split('__');
+  return { prefix: parts[0], action: parts[1], scope: parts.slice(2).join('__') };
+}
+
+function getCfg(scope, guildId) {
+  const def = scopes.get(scope);
+  if (!def) return null;
+  return def.get(guildId) || defaultEmbedConfig();
+}
+
+async function persist(scope, guildId, cfg) {
+  const def = scopes.get(scope);
+  if (!def) return;
+  def.set(guildId, cfg);
+  if (def.onSaved) await def.onSaved(guildId);
+}
+
+function buildEditorPayload(scope, guildId) {
+  const cfg = getCfg(scope, guildId);
+  const embed = renderEmbed(cfg);
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(cid('titledesc', scope)).setLabel('Title & Description').setStyle(ButtonStyle.Secondary).setEmoji('📝'),
+    new ButtonBuilder().setCustomId(cid('color', scope)).setLabel('Color').setStyle(ButtonStyle.Secondary).setEmoji('🎨'),
+    new ButtonBuilder().setCustomId(cid('urlts', scope)).setLabel('URL & Timestamp').setStyle(ButtonStyle.Secondary).setEmoji('🔗'),
+    new ButtonBuilder().setCustomId(cid('author', scope)).setLabel('Author').setStyle(ButtonStyle.Secondary).setEmoji('👤'),
+    new ButtonBuilder().setCustomId(cid('footer', scope)).setLabel('Footer').setStyle(ButtonStyle.Secondary).setEmoji('🦶'),
+  );
+
+  const row2Buttons = [
+    new ButtonBuilder().setCustomId(cid('images', scope)).setLabel('Image & Thumbnail').setStyle(ButtonStyle.Secondary).setEmoji('🖼️'),
+    new ButtonBuilder().setCustomId(cid('addfield', scope)).setLabel('Add Field').setStyle(ButtonStyle.Secondary).setEmoji('➕'),
+  ];
+  if (cfg.fields?.length) {
+    row2Buttons.push(new ButtonBuilder().setCustomId(cid('removefield', scope)).setLabel('Remove Field').setStyle(ButtonStyle.Danger).setEmoji('➖'));
+  }
+  if (sendTargetResolver && sendTargetResolver(scope)) {
+    row2Buttons.push(new ButtonBuilder().setCustomId(cid('send', scope)).setLabel('Send').setStyle(ButtonStyle.Success).setEmoji('📤'));
+  }
+  row2Buttons.push(new ButtonBuilder().setCustomId(cid('close', scope)).setLabel('Close').setStyle(ButtonStyle.Secondary).setEmoji('✖️'));
+
+  const row2 = new ActionRowBuilder().addComponents(row2Buttons.slice(0, 5));
+
+  return {
+    content: '### 🎨 Embed Editor',
+    embeds: [embed],
+    components: [row1, row2],
+  };
+}
+
+async function openEmbedEditorRoot(interaction, scope, guildId) {
+  const payload = buildEditorPayload(scope, guildId);
+  return interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+}
+
+function buildModal(action, scope, title, fields) {
+  const modal = new ModalBuilder().setCustomId(modalcid(action, scope)).setTitle(title.slice(0, 45));
+  for (const f of fields) {
+    const style = f.style || TextInputStyle.Short;
+    const input = new TextInputBuilder()
+      .setCustomId(f.id)
+      .setLabel(f.label.slice(0, 45))
+      .setStyle(style)
+      .setRequired(!!f.required)
+      .setMaxLength(f.maxLength || (style === TextInputStyle.Paragraph ? 4000 : 400));
+    if (f.value) input.setValue(String(f.value).slice(0, f.maxLength || 4000));
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+  }
+  return modal;
+}
+
+async function handleEmbedInteraction(interaction, guildId) {
+  const customId = interaction.customId;
+  if (!customId) return false;
+  if (!customId.startsWith('emb__') && !customId.startsWith('embsel__') && !customId.startsWith('emb_modal__')) return false;
+
+  const { prefix, action, scope } = parseCid(customId);
+  if (!scopes.has(scope)) {
+    if (interaction.isRepliable()) {
+      try { await interaction.reply({ content: '❌ This embed editor session has expired.', flags: MessageFlags.Ephemeral }); } catch {}
+    }
+    return true;
+  }
+
+  // ── BUTTONS ──
+  if (prefix === 'emb' && interaction.isButton()) {
+    const cfg = getCfg(scope, guildId);
+
+    if (action === 'close') {
+      await interaction.update({ content: '✅ Embed editor closed.', embeds: [], components: [] });
+      return true;
+    }
+
+    if (action === 'send') {
+      const target = sendTargetResolver?.(scope);
+      if (!target?.channelId) {
+        await interaction.reply({ content: '❌ No target channel set.', flags: MessageFlags.Ephemeral });
+        return true;
+      }
+      try {
+        const guild = interaction.client.guilds.cache.get(target.guildId || guildId);
+        const channel = guild?.channels.cache.get(target.channelId);
+        if (!channel?.isTextBased?.()) {
+          await interaction.reply({ content: '❌ Target channel not found.', flags: MessageFlags.Ephemeral });
+          return true;
+        }
+        await channel.send({ embeds: [renderEmbed(cfg)] });
+        await interaction.update({ content: `✅ Embed sent to <#${target.channelId}>!`, embeds: [], components: [] });
+      } catch (e) {
+        await interaction.reply({ content: `❌ Failed to send: ${e.message?.slice(0, 200) ?? 'unknown error'}`, flags: MessageFlags.Ephemeral });
+      }
+      return true;
+    }
+
+    if (action === 'removefield') {
+      if (!cfg.fields?.length) {
+        await interaction.reply({ content: '❌ No fields to remove.', flags: MessageFlags.Ephemeral });
+        return true;
+      }
+      const select = new StringSelectMenuBuilder()
+        .setCustomId(selcid('removefield', scope))
+        .setPlaceholder('Select field to remove...')
+        .addOptions(cfg.fields.slice(0, 25).map((f, i) => ({
+          label: (f.name || `Field ${i + 1}`).slice(0, 100),
+          value: String(i),
+        })));
+      await interaction.reply({ content: '### ➖ Remove field', components: [new ActionRowBuilder().addComponents(select)], flags: MessageFlags.Ephemeral });
+      return true;
+    }
+
+    const modalMap = {
+      titledesc: () => buildModal('titledesc', scope, 'Title & Description', [
+        { id: 'title', label: 'Title', value: cfg.title, required: false, maxLength: 256 },
+        { id: 'url', label: 'Title URL (optional)', value: cfg.url, required: false, maxLength: 512 },
+        { id: 'description', label: 'Description', style: TextInputStyle.Paragraph, value: cfg.description, required: false, maxLength: 4000 },
+      ]),
+      color: () => buildModal('color', scope, 'Embed Color', [
+        { id: 'color', label: 'Hex color (e.g. #5865F2)', value: cfg.color, required: false, maxLength: 7 },
+      ]),
+      urlts: () => buildModal('urlts', scope, 'URL & Timestamp', [
+        { id: 'url', label: 'Title URL', value: cfg.url, required: false, maxLength: 512 },
+        { id: 'timestamp', label: 'Show timestamp? (yes / no)', value: cfg.timestamp ? 'yes' : 'no', required: false, maxLength: 3 },
+      ]),
+      author: () => buildModal('author', scope, 'Author', [
+        { id: 'name', label: 'Author name', value: cfg.author?.name, required: false, maxLength: 256 },
+        { id: 'iconURL', label: 'Author icon URL', value: cfg.author?.iconURL, required: false, maxLength: 512 },
+        { id: 'url', label: 'Author URL', value: cfg.author?.url, required: false, maxLength: 512 },
+      ]),
+      footer: () => buildModal('footer', scope, 'Footer', [
+        { id: 'text', label: 'Footer text', value: cfg.footer?.text, required: false, maxLength: 2048 },
+        { id: 'iconURL', label: 'Footer icon URL', value: cfg.footer?.iconURL, required: false, maxLength: 512 },
+      ]),
+      images: () => buildModal('images', scope, 'Image & Thumbnail', [
+        { id: 'image', label: 'Image URL', value: cfg.image, required: false, maxLength: 512 },
+        { id: 'thumbnail', label: 'Thumbnail URL', value: cfg.thumbnail, required: false, maxLength: 512 },
+      ]),
+      addfield: () => buildModal('addfield', scope, 'Add Field', [
+        { id: 'name', label: 'Field name', required: true, maxLength: 256 },
+        { id: 'value', label: 'Field value', style: TextInputStyle.Paragraph, required: true, maxLength: 1024 },
+        { id: 'inline', label: 'Inline? (yes / no)', value: 'no', required: false, maxLength: 3 },
+      ]),
+    };
+
+    if (modalMap[action]) {
+      await interaction.showModal(modalMap[action]());
+      return true;
+    }
+
+    return false;
+  }
+
+  // ── SELECT MENUS ──
+  if (prefix === 'embsel' && interaction.isStringSelectMenu()) {
+    if (action === 'removefield') {
+      const cfg = getCfg(scope, guildId);
+      const idx = parseInt(interaction.values[0], 10);
+      if (!Number.isNaN(idx) && cfg.fields?.[idx]) cfg.fields.splice(idx, 1);
+      await persist(scope, guildId, cfg);
+      await interaction.update(buildEditorPayload(scope, guildId));
+      return true;
+    }
+    return false;
+  }
+
+  // ── MODAL SUBMITS ──
+  if (prefix === 'emb_modal' && interaction.isModalSubmit()) {
+    const cfg = getCfg(scope, guildId);
+    const val = (id) => { try { return interaction.fields.getTextInputValue(id).trim(); } catch { return ''; } };
+
+    if (action === 'titledesc') {
+      cfg.title = val('title') || null;
+      cfg.url = val('url') || null;
+      cfg.description = val('description') || null;
+    } else if (action === 'color') {
+      const color = val('color');
+      cfg.color = color ? (color.startsWith('#') ? color : `#${color}`) : '#5865F2';
+    } else if (action === 'urlts') {
+      const ts = val('timestamp').toLowerCase();
+      cfg.url = val('url') || null;
+      cfg.timestamp = ts === 'yes' || ts === 'y' || ts === 'true';
+    } else if (action === 'author') {
+      cfg.author = { name: val('name') || null, iconURL: val('iconURL') || null, url: val('url') || null };
+    } else if (action === 'footer') {
+      cfg.footer = { text: val('text') || null, iconURL: val('iconURL') || null };
+    } else if (action === 'images') {
+      cfg.image = val('image') || null;
+      cfg.thumbnail = val('thumbnail') || null;
+    } else if (action === 'addfield') {
+      const inline = val('inline').toLowerCase();
+      if (!cfg.fields) cfg.fields = [];
+      if (cfg.fields.length >= 25) {
+        await interaction.reply({ content: '❌ Maximum of 25 fields reached.', flags: MessageFlags.Ephemeral });
+        return true;
+      }
+      cfg.fields.push({ name: val('name') || '\u200b', value: val('value') || '\u200b', inline: inline === 'yes' || inline === 'y' || inline === 'true' });
+    } else {
+      return false;
+    }
+
+    await persist(scope, guildId, cfg);
+    if (interaction.isFromMessage?.()) {
+      await interaction.update(buildEditorPayload(scope, guildId));
+    } else {
+      await interaction.reply({ ...buildEditorPayload(scope, guildId), flags: MessageFlags.Ephemeral });
+    }
+    return true;
+  }
+
+  return false;
+}
+
+  return { defaultEmbedConfig, renderEmbed, registerEmbedScope, registerSendTargetResolver, handleEmbedInteraction, openEmbedEditorRoot };
+})();
+
+
 
 process.chdir(path.dirname(require.main.filename));
 
