@@ -1148,6 +1148,84 @@ function getBirthdayConfig(guildId) {
   return gc.birthdays;
 }
 
+// ════════════════════════════════════════════
+// LEVELING SYSTEM (XP for chatting)
+// ════════════════════════════════════════════
+function getLevelsConfig(guildId) {
+  const gc = getGuildConfig(guildId);
+  if (!gc.levels) gc.levels = {
+    enabled: false,
+    xpMin: 15,
+    xpMax: 25,
+    cooldownSeconds: 60,
+    channelMode: 'blacklist', // 'blacklist' = channels in xpChannels do NOT earn XP | 'whitelist' = ONLY channels in xpChannels earn XP
+    xpChannels: [],           // channel IDs, meaning depends on channelMode
+    boostRoles: {},           // roleId → multiplier (e.g. 2 for 2x XP, for boosters etc.)
+    levelRoles: {},           // level (string) → roleId — only the highest reached level's role is kept
+    announceChannel: null,    // null = announce in the channel the message was sent in
+    announceMessage: '🎉 {userMention} just reached **Level {level}**!',
+    users: {},                // userId → { xp: number, level: number }
+  };
+  if (!gc.levels.xpChannels) gc.levels.xpChannels = [];
+  if (!gc.levels.xpCategories) gc.levels.xpCategories = []; // category IDs — no XP earned in channels under these (e.g. ticket categories)
+  if (!gc.levels.boostRoles) gc.levels.boostRoles = {};
+  if (!gc.levels.levelRoles) gc.levels.levelRoles = {};
+  if (!gc.levels.users) gc.levels.users = {};
+  if (!gc.levels.channelMode) gc.levels.channelMode = 'blacklist';
+  if (gc.levels.announceMessage === undefined) gc.levels.announceMessage = '🎉 {userMention} just reached **Level {level}**!';
+  return gc.levels;
+}
+
+// XP needed to go from `level` to `level + 1` (MEE6-style curve)
+function xpForNextLevel(level) {
+  return 5 * (level * level) + 50 * level + 100;
+}
+// Cumulative XP required to reach `level` starting from 0
+function totalXpForLevel(level) {
+  let total = 0;
+  for (let i = 0; i < level; i++) total += xpForNextLevel(i);
+  return total;
+}
+// Convert a total XP amount into a level
+function getLevelFromXP(xp) {
+  let level = 0;
+  let remaining = xp;
+  while (remaining >= xpForNextLevel(level)) {
+    remaining -= xpForNextLevel(level);
+    level++;
+    if (level > 1000) break; // safety cap
+  }
+  return level;
+}
+// Highest multiplier among the member's boost roles (1 = no boost)
+function getXpMultiplier(member, lc) {
+  if (!lc.boostRoles || !Object.keys(lc.boostRoles).length) return 1;
+  let mult = 1;
+  for (const [roleId, multiplier] of Object.entries(lc.boostRoles)) {
+    if (member.roles.cache.has(roleId)) mult = Math.max(mult, Number(multiplier) || 1);
+  }
+  return mult;
+}
+// Removes all other configured level roles and gives the role for the highest
+// configured level the member's current level qualifies for (like the infraction hierarchy).
+async function applyLevelRole(member, lc, level) {
+  const configuredLevels = Object.keys(lc.levelRoles).map(Number).filter(n => !isNaN(n)).sort((a, b) => a - b);
+  let targetRoleId = null;
+  for (const lvl of configuredLevels) {
+    if (level >= lvl) targetRoleId = lc.levelRoles[lvl];
+  }
+  for (const lvl of configuredLevels) {
+    const roleId = lc.levelRoles[lvl];
+    if (roleId && roleId !== targetRoleId && member.roles.cache.has(roleId)) {
+      await member.roles.remove(roleId).catch(() => {});
+    }
+  }
+  if (targetRoleId) {
+    const role = member.guild.roles.cache.get(targetRoleId);
+    if (role && !member.roles.cache.has(targetRoleId)) await member.roles.add(role).catch(() => {});
+  }
+}
+
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 function formatBirthdayDate(month, day) {
@@ -1636,28 +1714,16 @@ function buildRequestSetupPayload(guildId, type) {
 function buildErlcLogSetupPayload(guildId) {
   const ec = getErlcLogConfig(guildId);
   const bc = getBloxlinkConfig(guildId);
-  const embed = new EmbedBuilder().setTitle('📋 ERLC Log Setup').setColor(0x5865F2)
-    .setDescription(`**Status:** ${ec.enabled ? '✅ Active' : '❌ Inactive'}\n**Server Key:** ${ec.serverKey ? '✅ Set' : '❌ Not set — use `/erlcconfig`'}\n**Bloxlink Key:** ${bc.apiKey ? '✅ Set' : '❌ Not set — use `/bloxlinkconfig`'}\n\nSet the Discord channel for each ERLC log type. Polls every **30 seconds**.**`)
+  const embed = new EmbedBuilder().setTitle('📋 ERLC In-Game Role').setColor(0x5865F2)
+    .setDescription(`**Status:** ${ec.enabled ? '✅ Active' : '❌ Inactive'}\n**Server Key:** ${ec.serverKey ? '✅ Set' : '❌ Not set — use `/erlcconfig`'}\n**Bloxlink Key:** ${bc.apiKey ? '✅ Set' : '❌ Not set — use `/bloxlinkconfig`'}\n\nMembers who are in the ERLC server automatically get this role. Polls every **30 seconds**.`)
     .addFields(
-      { name: '🔨 Kick/Ban Logs',   value: ec.kickBans  ? `<#${ec.kickBans}>`  : '*Not set*', inline: true },
-      { name: '📥 Join/Leave Logs', value: ec.joinLeave ? `<#${ec.joinLeave}>` : '*Not set*', inline: true },
-      { name: '⌨️ Command Logs',    value: ec.cmds      ? `<#${ec.cmds}>`      : '*Not set*', inline: true },
-      { name: '🚨 Mod Call Logs',   value: ec.modCall   ? `<#${ec.modCall}>`   : '*Not set*', inline: true },
-      { name: '💀 Kill Logs',       value: ec.kills     ? `<#${ec.kills}>`     : '*Not set*', inline: true },
       { name: '🎮 In-Game Role',    value: ec.inGameRole ? `<@&${ec.inGameRole}>` : '*Not set*', inline: true },
     );
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('erlc_toggle').setLabel(ec.enabled ? '🔴 Disable' : '🟢 Enable').setStyle(ec.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('erlc_set_kickbans').setLabel('Kick/Ban Channel').setStyle(ButtonStyle.Primary).setEmoji('🔨'),
-    new ButtonBuilder().setCustomId('erlc_set_joinleave').setLabel('Join/Leave Channel').setStyle(ButtonStyle.Primary).setEmoji('📥'),
-    new ButtonBuilder().setCustomId('erlc_set_cmds').setLabel('Commands Channel').setStyle(ButtonStyle.Primary).setEmoji('⌨️'),
-  );
-  const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('erlc_set_modcall').setLabel('Mod Call Channel').setStyle(ButtonStyle.Primary).setEmoji('🚨'),
-    new ButtonBuilder().setCustomId('erlc_set_kills').setLabel('Kill Logs Channel').setStyle(ButtonStyle.Primary).setEmoji('💀'),
     new ButtonBuilder().setCustomId('erlc_set_inrole').setLabel('In-Game Role').setStyle(ButtonStyle.Primary).setEmoji('🎮'),
   );
-  return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
+  return { embeds: [embed], components: [r1], flags: MessageFlags.Ephemeral };
 }
 
 function buildChainSetupPayload(guildId) {
@@ -1930,11 +1996,7 @@ function buildDepartmentSetupPayload(guildId) {
       { name: '👤 Staff Roles',            value: fmtRFb(gc.permissions?.staffRoles, mc.permissions?.staffRoles),    inline: true },
       { name: '⭐ SHR Roles',              value: fmtRFb(gc.permissions?.shrRoles, mc.permissions?.shrRoles),        inline: true },
       { name: '━━━ 📡 ERLC ━━━',          value: '\u200b', inline: false },
-      { name: '🔨 Kick/Ban',               value: fmtFb(gc.erlcLogs?.kickBans, mc.erlcLogs?.kickBans),              inline: true },
-      { name: '📥 Join/Leave',             value: fmtFb(gc.erlcLogs?.joinLeave, mc.erlcLogs?.joinLeave),            inline: true },
-      { name: '⌨️ Commands',               value: fmtFb(gc.erlcLogs?.cmds, mc.erlcLogs?.cmds),                      inline: true },
-      { name: '🚨 Mod Call',               value: fmtFb(gc.erlcLogs?.modCall, mc.erlcLogs?.modCall),                inline: true },
-      { name: '💀 Kill Logs',              value: fmtFb(gc.erlcLogs?.kills, mc.erlcLogs?.kills),                    inline: true },
+      { name: '🎮 In-Game Role',           value: gc.erlcLogs?.inGameRole ? `<@&${gc.erlcLogs.inGameRole}>` : (mc.erlcLogs?.inGameRole ? `<@&${mc.erlcLogs.inGameRole}> *(main)*` : '*Not configured*'), inline: true },
     );
 
   const r1 = new ActionRowBuilder().addComponents(
@@ -1965,15 +2027,7 @@ function buildDepartmentSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('dept_setup__autorole').setLabel('Autorole').setStyle(ButtonStyle.Secondary).setEmoji('🎭'),
     new ButtonBuilder().setCustomId('dept_setup__perms').setLabel('Permissions').setStyle(ButtonStyle.Secondary).setEmoji('👑'),
   );
-  const r5 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dept_setup__erlc_kickbans').setLabel('ERLC Kick/Ban').setStyle(ButtonStyle.Secondary).setEmoji('🔨'),
-    new ButtonBuilder().setCustomId('dept_setup__erlc_joinleave').setLabel('ERLC Join/Leave').setStyle(ButtonStyle.Secondary).setEmoji('📥'),
-    new ButtonBuilder().setCustomId('dept_setup__erlc_cmds').setLabel('ERLC Cmds').setStyle(ButtonStyle.Secondary).setEmoji('⌨️'),
-    new ButtonBuilder().setCustomId('dept_setup__erlc_modcall').setLabel('ERLC Mod Call').setStyle(ButtonStyle.Secondary).setEmoji('🚨'),
-    new ButtonBuilder().setCustomId('dept_setup__erlc_kills').setLabel('ERLC Kills').setStyle(ButtonStyle.Secondary).setEmoji('💀'),
-  );
-
-  return { embeds: [embed1, embed2], components: [r1, r2, r3, r4, r5], flags: MessageFlags.Ephemeral };
+  return { embeds: [embed1, embed2], components: [r1, r2, r3, r4], flags: MessageFlags.Ephemeral };
 }
 function isChannelSelectButton(id) {
   const channelBtns = [
@@ -2509,219 +2563,6 @@ function getBloxlinkConfig(guildId) {
   if (!gc.bloxlink) gc.bloxlink = { apiKey: null };
   if (gc.bloxlink.apiKey === undefined) gc.bloxlink.apiKey = null;
   return gc.bloxlink;
-}
-
-// ════════════════════════════════════════════
-// MELONLY API
-// API key is read from process.env.MELONLY_API_KEY (configured as a Koyeb secret/env var).
-// Base URL: https://api.melonly.xyz/api/v1
-// ════════════════════════════════════════════
-
-const MELONLY_BASE = 'https://api.melonly.xyz/api/v1';
-
-// Fetch all pages of a Melonly paginated endpoint.
-// Returns a flat array of all items across all pages.
-async function melonlyFetchAll(path, apiKey) {
-  const results = [];
-  let page = 1;
-  while (true) {
-    const res = await fetch(`${MELONLY_BASE}${path}?page=${page}&limit=100`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) throw new Error(`Melonly API ${res.status}: ${await res.text()}`);
-    const body = await res.json();
-    results.push(...(body.data ?? []));
-    if (page >= (body.totalPages ?? 1)) break;
-    page++;
-  }
-  return results;
-}
-
-// Per-guild Melonly quota configuration.
-// melony: { apiKey (overridden by env), quotaHours, logChannel, wave (auto from Melonly) }
-function getMelonlyConfig(guildId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.melony) gc.melony = {
-    enabled:    false,
-    quotaHours: 2,       // default quota — configurable per guild
-    logChannel: null,    // channel to post the quota review message
-    currentWave: null,   // wave number we last ran a check for
-  };
-  return gc.melony;
-}
-
-// Build a cache of { discordId → melonyMemberId } for quick lookups.
-// We walk all Melonly members page by page. The members endpoint returns
-// the Melonly internal id but NOT a discordId directly — however the
-// GET /server/members/discord/:discordId endpoint lets us confirm a user.
-// For the quota check we go the other direction: for each Discord member
-// we look them up by Discord ID once per wave and cache the result.
-const _melonyMemberCache = new Map(); // guildId → Map(discordId → melonyMemberId)
-
-async function getMelonyMemberId(guildId, discordId, apiKey) {
-  if (!_melonyMemberCache.has(guildId)) _melonyMemberCache.set(guildId, new Map());
-  const cache = _melonyMemberCache.get(guildId);
-  if (cache.has(discordId)) return cache.get(discordId);
-  try {
-    const res = await fetch(`${MELONLY_BASE}/server/members/discord/${discordId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) { cache.set(discordId, null); return null; }
-    const data = await res.json();
-    cache.set(discordId, data.id ?? null);
-    return data.id ?? null;
-  } catch { cache.set(discordId, null); return null; }
-}
-
-// Core quota check — called at wave end (or manually via /checkquota).
-// Flow:
-//   1. Fetch all shifts for current wave from Melonly
-//   2. Group by memberId, sum hours (endedAt - createdAt - break time)
-//   3. For every Discord member in the guild:
-//      a. Look up their Melonly memberId
-//      b. Check if they are on LOA → skip with a note
-//      c. Compare hours against quota
-//   4. Post a summary to the log channel, ping SHR roles
-//   5. Staff clicks ✅ Confirm to issue infractions, or ❌ Cancel to abort
-async function runMelonyQuotaCheck(guild) {
-  const guildId = guild.id;
-  const mc = getMelonlyConfig(guildId);
-  const apiKey = process.env.MELONLY_API_KEY;
-  if (!apiKey || !mc.enabled || !mc.logChannel) return;
-  const logCh = guild.channels.cache.get(mc.logChannel);
-  if (!logCh) return;
-
-  // Fetch all shifts for the current wave
-  let shifts;
-  try {
-    shifts = await melonlyFetchAll('/server/shifts', apiKey);
-  } catch (e) {
-    await logCh.send({ content: `❌ Melonly quota check failed: could not fetch shifts.\n\`${e.message}\`` }).catch(() => {});
-    return;
-  }
-
-  // Only look at the latest wave (highest wave number)
-  const latestWave = shifts.reduce((max, s) => Math.max(max, s.wave ?? 0), 0);
-  const waveShifts = shifts.filter(s => s.wave === latestWave && s.endedAt);
-
-  // Sum hours per Melonly memberId (subtract break time)
-  const hoursPerMember = new Map(); // melonyMemberId → total hours
-  for (const shift of waveShifts) {
-    if (!shift.memberId || !shift.endedAt || !shift.createdAt) continue;
-    const totalMs = (shift.endedAt - shift.createdAt) * 1000;
-    const breakMs = (shift.breakTimestamps ?? []).reduce((sum, b) => {
-      if (b.start && b.end) return sum + ((b.end - b.start) * 1000);
-      return sum;
-    }, 0);
-    const netHours = Math.max(0, (totalMs - breakMs) / 3_600_000);
-    hoursPerMember.set(shift.memberId, (hoursPerMember.get(shift.memberId) ?? 0) + netHours);
-  }
-
-  // Get active LOAs for this guild
-  const lc = getLOAConfig(guildId);
-  const now = Date.now();
-  const onLOA = new Set(
-    Object.entries(lc.active ?? {})
-      .filter(([, l]) => l.applied && l.endsAt > now)
-      .map(([uid]) => uid)
-  );
-
-  // Check every guild member (non-bot) against the quota
-  const pc = getPermissionsConfig(guildId);
-  const allMembers = await guild.members.fetch().catch(() => null);
-  if (!allMembers) return;
-
-  const failed  = []; // { discordId, hours }
-  const skipped = []; // { discordId, reason }
-
-  for (const [discordId, member] of allMembers) {
-    if (member.user.bot) continue;
-    // Only check members who have at least one SHR/staff role (skip normal members)
-    const isStaff = [...(pc.shrRoles ?? []), ...(pc.adminRoles ?? []), ...(pc.modRoles ?? []), ...(pc.staffRoles ?? [])].some(r => member.roles.cache.has(r));
-    if (!isStaff) continue;
-
-    if (onLOA.has(discordId)) {
-      skipped.push({ discordId, reason: 'On LOA' });
-      continue;
-    }
-
-    const melonyId = await getMelonyMemberId(guildId, discordId, apiKey);
-    if (!melonyId) {
-      skipped.push({ discordId, reason: 'Not in Melonly' });
-      continue;
-    }
-
-    const hours = hoursPerMember.get(melonyId) ?? 0;
-    if (hours < mc.quotaHours) {
-      failed.push({ discordId, hours: Math.round(hours * 10) / 10 });
-    }
-  }
-
-  if (!failed.length && !skipped.length) {
-    await logCh.send({ content: `✅ **Wave ${latestWave} Quota Check** — Everyone met the quota of **${mc.quotaHours}h**! 🎉` }).catch(() => {});
-    return;
-  }
-
-  // Build the confirm message
-  const shrPing = (pc.shrRoles ?? []).map(r => `<@&${r}>`).join(' ');
-  const failLines  = failed.map(f  => `> <@${f.discordId}> — **${f.hours}h** / ${mc.quotaHours}h`).join('\n') || '*None*';
-  const skipLines  = skipped.map(s => `> <@${s.discordId}> — ${s.reason}`).join('\n') || '*None*';
-
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 Wave ${latestWave} — Quota Check`)
-    .setColor(0xED4245)
-    .setDescription(`Quota: **${mc.quotaHours} hours** per wave\n\nReview the list below. Click **✅ Confirm** to issue infractions to everyone who failed, or **❌ Cancel** to do nothing.`)
-    .addFields(
-      { name: `❌ Failed Quota (${failed.length})`, value: failLines.slice(0, 1024), inline: false },
-      { name: `⏭️ Skipped (${skipped.length})`, value: skipLines.slice(0, 1024), inline: false },
-    )
-    .setFooter({ text: `Wave ${latestWave} • ${new Date().toUTCString()}` })
-    .setTimestamp();
-
-  // Store pending check in memory so the confirm button can access it
-  const checkId = `mqc_${guildId}_${latestWave}`;
-  pendingMelonyChecks.set(checkId, { failed, wave: latestWave, guildId });
-  setTimeout(() => pendingMelonyChecks.delete(checkId), 24 * 60 * 60 * 1000); // expire after 24h
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`melony_confirm__${checkId}`).setLabel('✅ Confirm — Issue Infractions').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(`melony_cancel__${checkId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Secondary),
-  );
-
-  await logCh.send({ content: shrPing || undefined, embeds: [embed], components: [row] }).catch(() => {});
-}
-
-// In-memory store for pending quota confirm actions
-const pendingMelonyChecks = new Map(); // checkId → { failed, wave, guildId }
-
-// getMelonlyConfig getter for setup command (reused below)
-function buildMelonySetupPayload(guildId) {
-  const mc = getMelonlyConfig(guildId);
-  const hasKey = !!process.env.MELONLY_API_KEY;
-  return {
-    embeds: [new EmbedBuilder()
-      .setTitle('🍈 Melonly Integration')
-      .setColor(0x57F287)
-      .setDescription(
-        `**API Key:** ${hasKey ? '✅ Set via Render env `MELONLY_API_KEY`' : '❌ Not set — add `MELONLY_API_KEY` to Render env vars'}\n` +
-        `**Status:** ${mc.enabled ? '✅ Enabled' : '❌ Disabled'}\n` +
-        `**Quota:** ${mc.quotaHours}h per wave\n` +
-        `**Log Channel:** ${mc.logChannel ? `<#${mc.logChannel}>` : '*Not set*'}\n\n` +
-        `When a wave ends, the bot fetches shift data from Melonly, compares against the quota, skips anyone on LOA, then posts a review message here for SHR to confirm before issuing infractions.`
-      )
-    ],
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('melony__toggle').setLabel(mc.enabled ? '⏸️ Disable' : '▶️ Enable').setStyle(mc.enabled ? ButtonStyle.Danger : ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('melony__set_quota').setLabel('⏱️ Set Quota Hours').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('melony__set_channel').setLabel('📢 Set Log Channel').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('melony__run_now').setLabel('🔄 Run Check Now').setStyle(ButtonStyle.Secondary),
-      ),
-    ],
-    flags: MessageFlags.Ephemeral,
-  };
 }
 
 // ════════════════════════════════════════════
@@ -3966,6 +3807,7 @@ const commands = [
   { name: 'lock', description: 'Lock channel' },
   { name: 'unlock', description: 'Unlock channel' },
   { name: 'clear', description: 'Delete messages', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
+  { name: 'purge', description: 'Purge messages (requires special role)', options: [{ name: 'amount', type: 4, description: 'How many (max 100)', required: true }] },
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
   { name: 'send', description: 'Send a custom message to this channel' },
@@ -4075,18 +3917,20 @@ const commands = [
   { name: 'setup', description: '[SHR] Open the setup menu' },
   { name: 'erlcconfig', description: '[SHR] Set the ERLC server API key' },
   { name: 'bloxlinkconfig', description: '[SHR] Set the Bloxlink server API key (for in-game role feature)' },
-  { name: 'melonysetup', description: '[SHR] Configure Melonly shift quota integration' },
   { name: 'reviewstaff', description: 'Leave a review for a staff member or view the leaderboard', options: [
     { name: 'staff', type: 6, description: 'Which staff member do you want to review?', required: false },
     { name: 'leaderboard', type: 5, description: 'Show the staff review leaderboard', required: false },
   ]},
   { name: 'infract', description: '[SHR] Give a user an infraction', options: [
-    { name: 'user',   type: 6, description: 'Who?',   required: true  },
-    { name: 'type',   type: 3, description: 'Type of infraction', required: true, choices: [
-      { name: 'Warning', value: 'warning' },
-      { name: 'Strike',  value: 'strike'  },
+    { name: 'warning', type: 1, description: 'Give a warning', options: [
+      { name: 'user', type: 6, description: 'Who?', required: true },
     ]},
-    { name: 'reason', type: 3, description: 'Reason', required: true  },
+    { name: 'strike', type: 1, description: 'Give a strike', options: [
+      { name: 'user', type: 6, description: 'Who?', required: true },
+    ]},
+    { name: 'termination', type: 1, description: 'Terminate a user directly', options: [
+      { name: 'user', type: 6, description: 'Who?', required: true },
+    ]},
   ]},
   { name: 'infractions', description: '[SHR] View infractions of a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
@@ -4127,8 +3971,10 @@ const commands = [
     { name: 'remove', type: 1, description: 'Remove foundership role', options: [{ name: 'role', type: 8, description: 'Role', required: true }] },
     { name: 'list', type: 1, description: 'List foundership roles' },
   ]},
+  { name: 'rank', description: 'View your (or someone else\'s) level and XP', options: [{ name: 'user', type: 6, description: 'Who?', required: false }] },
+  { name: 'leaderboard', description: 'View the server XP leaderboard' },
+  { name: 'levelnotify', description: 'Toggle whether you get pinged when you level up' },
 ];
-
 // ════════════════════════════════════════════
 // READY
 // ════════════════════════════════════════════
@@ -4358,6 +4204,62 @@ function buildBirthdaySetupPayload(guildId) {
     new ButtonBuilder().setCustomId('bday__set_message').setLabel('Edit Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
   );
   return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
+}
+
+function buildLevelsSetupPayload(guildId) {
+  const lc = getLevelsConfig(guildId);
+  const roleList = Object.entries(lc.levelRoles)
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([lvl, roleId]) => `**Level ${lvl}** → <@&${roleId}>`)
+    .join('\n') || '*No level roles set*';
+  const boostList = Object.entries(lc.boostRoles)
+    .map(([roleId, mult]) => `<@&${roleId}> — **${mult}x**`)
+    .join('\n') || '*No boost roles set*';
+  const embed = new EmbedBuilder()
+    .setTitle('📈 Leveling System Setup')
+    .setColor(0x5865F2)
+    .setDescription(
+      'Members earn XP for chatting and level up over time.\n\n' +
+      '**Variables:** `{userMention}` `{username}` `{level}` `{server}`\n\n' +
+      '**Channel Mode:** *Blacklist* = XP everywhere except the listed channels. *Whitelist* = XP ONLY in the listed channels.\n' +
+      '**Categories** are always a blacklist — no XP is ever earned in channels under a listed category (great for tickets).\n' +
+      'Members can turn off their own level-up ping with `/levelnotify`.'
+    )
+    .addFields(
+      { name: '✅ Enabled', value: lc.enabled ? 'Yes' : 'No', inline: true },
+      { name: '⚡ XP per message', value: `${lc.xpMin}-${lc.xpMax}`, inline: true },
+      { name: '⏱️ Cooldown', value: `${lc.cooldownSeconds}s`, inline: true },
+      { name: '📋 Channel Mode', value: lc.channelMode === 'whitelist' ? '✅ Whitelist (only listed channels earn XP)' : '🚫 Blacklist (listed channels do NOT earn XP)', inline: false },
+      { name: '📂 Channels', value: lc.xpChannels?.length ? lc.xpChannels.map(c => `<#${c}>`).join(', ') : '*None set*', inline: false },
+      { name: '📁 Blacklisted Categories', value: lc.xpCategories?.length ? lc.xpCategories.map(c => `<#${c}>`).join(', ') : '*None set*', inline: false },
+      { name: '🚀 Boost Roles (extra XP)', value: boostList, inline: false },
+      { name: '🎭 Level Roles', value: roleList, inline: false },
+      { name: '📢 Announce Channel', value: lc.announceChannel ? `<#${lc.announceChannel}>` : '*Same channel*', inline: true },
+      { name: '💬 Announce Message', value: `\`${String(lc.announceMessage).slice(0, 100)}\``, inline: false },
+    );
+  const r1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('lvl__toggle').setLabel(lc.enabled ? 'Disable' : 'Enable').setStyle(lc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(lc.enabled ? '🔴' : '🟢'),
+    new ButtonBuilder().setCustomId('lvl__xp_range').setLabel('XP Range').setStyle(ButtonStyle.Primary).setEmoji('⚡'),
+    new ButtonBuilder().setCustomId('lvl__cooldown').setLabel('Cooldown').setStyle(ButtonStyle.Primary).setEmoji('⏱️'),
+    new ButtonBuilder().setCustomId('lvl__channel_mode').setLabel(lc.channelMode === 'whitelist' ? 'Set: Blacklist' : 'Set: Whitelist').setStyle(ButtonStyle.Secondary).setEmoji('🔀'),
+    new ButtonBuilder().setCustomId('lvl__set_channels').setLabel('Set Channels').setStyle(ButtonStyle.Primary).setEmoji('📂'),
+  );
+  const r2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('lvl__add_boost_role').setLabel('Add Boost Role').setStyle(ButtonStyle.Success).setEmoji('🚀'),
+    new ButtonBuilder().setCustomId('lvl__remove_boost_role').setLabel('Remove Boost Role').setStyle(ButtonStyle.Danger).setEmoji('🚀'),
+    new ButtonBuilder().setCustomId('lvl__add_level_role').setLabel('Add Level Role').setStyle(ButtonStyle.Success).setEmoji('🎭'),
+    new ButtonBuilder().setCustomId('lvl__remove_level_role').setLabel('Remove Level Role').setStyle(ButtonStyle.Danger).setEmoji('🎭'),
+  );
+  const r3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('lvl__announce_channel').setLabel('Announce Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
+    new ButtonBuilder().setCustomId('lvl__announce_message').setLabel('Announce Message').setStyle(ButtonStyle.Primary).setEmoji('💬'),
+    new ButtonBuilder().setCustomId('lvl__reset_all').setLabel('Reset All XP').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
+  );
+  const r4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('lvl__set_categories').setLabel('Blacklist Category').setStyle(ButtonStyle.Secondary).setEmoji('📁'),
+    new ButtonBuilder().setCustomId('lvl__manage_user').setLabel('Manage User Level').setStyle(ButtonStyle.Primary).setEmoji('👤'),
+  );
+  return { embeds: [embed], components: [r1, r2, r3, r4], flags: MessageFlags.Ephemeral };
 }
 
 client.once('clientReady', async () => {
@@ -4932,6 +4834,7 @@ client.on('guildCreate', async guild => {
   getFoundershipConfig(guild.id);
   getStaffRankConfig(guild.id);
   getChainConfig(guild.id);
+  getLevelsConfig(guild.id);
   await saveGuildConfig(guild.id);
   console.log(`✅ Joined guild: ${guild.name} (${guild.id}) — config initialized.`);
 });
@@ -4965,6 +4868,70 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
   if (!roleChanged) return;
 
   await syncChainPrefix(newMember, guildId);
+});
+
+// ════════════════════════════════════════════
+// LEVELING — XP ON MESSAGE
+// ════════════════════════════════════════════
+const levelCooldowns = new Map(); // `${guildId}:${userId}` → timestamp
+
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
+  const guildId = message.guild.id;
+  try {
+    const lc = getLevelsConfig(guildId);
+    if (!lc.enabled) return;
+
+    const inList = lc.xpChannels?.includes(message.channel.id);
+    if (lc.channelMode === 'whitelist' && !inList) return;
+    if (lc.channelMode === 'blacklist' && inList) return;
+
+    // Category blacklist — never earn XP inside these categories (e.g. ticket categories)
+    if (lc.xpCategories?.length && message.channel.parentId && lc.xpCategories.includes(message.channel.parentId)) return;
+
+    const cdKey = `${guildId}:${message.author.id}`;
+    const cooldownMs = (lc.cooldownSeconds ?? 60) * 1000;
+    if (Date.now() - (levelCooldowns.get(cdKey) ?? 0) < cooldownMs) return;
+    levelCooldowns.set(cdKey, Date.now());
+
+    if (!lc.users[message.author.id]) lc.users[message.author.id] = { xp: 0, level: 0, pingOnLevelUp: true };
+    const userData = lc.users[message.author.id];
+    if (userData.pingOnLevelUp === undefined) userData.pingOnLevelUp = true;
+    const multiplier = message.member ? getXpMultiplier(message.member, lc) : 1;
+    const baseXp = Math.floor(Math.random() * ((lc.xpMax ?? 25) - (lc.xpMin ?? 15) + 1)) + (lc.xpMin ?? 15);
+    userData.xp += Math.round(baseXp * multiplier);
+
+    const newLevel = getLevelFromXP(userData.xp);
+    if (newLevel > userData.level) {
+      userData.level = newLevel;
+      if (message.member) await applyLevelRole(message.member, lc, newLevel);
+
+      const wantsPing = userData.pingOnLevelUp !== false;
+      const mentionText = wantsPing ? `<@${message.author.id}>` : `**${message.author.username}**`;
+      const announceText = (lc.announceMessage || '🎉 {userMention} just reached **Level {level}**!')
+        .replace(/{userMention}/g, mentionText)
+        .replace(/{username}/g, message.author.username)
+        .replace(/{level}/g, `${newLevel}`)
+        .replace(/{server}/g, message.guild.name);
+
+      const targetChannel = lc.announceChannel
+        ? (message.guild.channels.cache.get(lc.announceChannel) ?? await message.guild.channels.fetch(lc.announceChannel).catch(() => null))
+        : message.channel;
+      if (targetChannel?.isTextBased?.()) {
+        await targetChannel.send({
+          embeds: [new EmbedBuilder()
+            .setTitle('🎉 Level Up!')
+            .setColor(0x57F287)
+            .setDescription(announceText)
+            .setThumbnail(message.author.displayAvatarURL({ dynamic: true }))
+            .setTimestamp()
+          ],
+          allowedMentions: { users: wantsPing ? [message.author.id] : [] },
+        }).catch(() => {});
+      }
+    }
+    await saveGuildConfig(guildId);
+  } catch (e) { console.error('Levels XP error:', e); }
 });
 
 // ════════════════════════════════════════════
@@ -5530,7 +5497,7 @@ client.on('interactionCreate', async interaction => {
         if (!hasEmbedEditorAccess(interaction.member)) {
           return interaction.reply({ content: '❌ You do not have permission to use the embed editor.', flags: MessageFlags.Ephemeral });
         }
-      } else if (cmd !== 'reviewstaff' && !hasAnyStaff(interaction.member)) {
+      } else if (!['reviewstaff', 'rank', 'leaderboard', 'levelnotify', 'purge'].includes(cmd) && !hasAnyStaff(interaction.member)) {
         return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
       }
 
@@ -5732,6 +5699,7 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'lock')   { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', flags: MessageFlags.Ephemeral }); await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: false }); return interaction.reply({ content: '🔒 Channel **locked**.', flags: MessageFlags.Ephemeral }); }
       if (cmd === 'unlock') { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', flags: MessageFlags.Ephemeral }); await interaction.channel.permissionOverwrites.edit(interaction.guild.roles.everyone, { SendMessages: true }); return interaction.reply({ content: '🔓 Channel **unlocked**.', flags: MessageFlags.Ephemeral }); }
       if (cmd === 'clear')  { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff or SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); const del = await interaction.channel.bulkDelete(Math.min(interaction.options.getInteger('amount'), 100), true); return interaction.editReply({ content: `✅ Deleted **${del.size}** messages.` }); }
+      if (cmd === 'purge')   { if (!interaction.member.roles.cache.has('1379173469446602966')) return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); const del = await interaction.channel.bulkDelete(Math.min(interaction.options.getInteger('amount'), 100), true); return interaction.editReply({ content: `✅ Purged **${del.size}** messages.` }); }
       if (cmd === 'executiverequest') {
         const ec = getExecRequestConfig(guildId);
         if (!ec.channel) return interaction.reply({ content: '❌ Executive request channel not set up. Ask an admin to configure it.', flags: MessageFlags.Ephemeral });
@@ -5939,12 +5907,47 @@ client.on('interactionCreate', async interaction => {
         return interaction.showModal(modal);
       }
 
-      if (cmd === 'melonysetup') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        return interaction.reply(buildMelonySetupPayload(guildId));
-      }
-
       if (cmd === 'warnings') { if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral }); const warns = getWarnings(guildId, user.id); if (!warns.length) return interaction.reply({ content: `✅ No warnings.`, flags: MessageFlags.Ephemeral }); return interaction.reply({ flags: MessageFlags.Ephemeral, embeds: [new EmbedBuilder().setTitle(`⚠️ Warnings — ${userDisplay(user)}`).setColor(0xFEE75C).setDescription(warns.map((w, i) => `**${i + 1}.** ${w.reason} — *${w.moderator}*`).join('\n'))] }); }
+          if (cmd === 'rank') {
+        const lc = getLevelsConfig(guildId);
+        const targetUser = interaction.options.getUser('user') ?? interaction.user;
+        const data = lc.users[targetUser.id];
+        if (!data) return interaction.reply({ content: `📊 **${userDisplay(targetUser)}** hasn't earned any XP yet.`, flags: MessageFlags.Ephemeral });
+        const currentLevelXp = totalXpForLevel(data.level);
+        const nextLevelXp = totalXpForLevel(data.level + 1);
+        const xpIntoLevel = data.xp - currentLevelXp;
+        const xpNeeded = nextLevelXp - currentLevelXp;
+        const barLen = 15;
+        const filled = Math.max(0, Math.min(barLen, Math.round((xpIntoLevel / xpNeeded) * barLen)));
+        const bar = '█'.repeat(filled) + '░'.repeat(barLen - filled);
+        return interaction.reply({ embeds: [new EmbedBuilder()
+          .setTitle(`📊 Rank — ${userDisplay(targetUser)}`)
+          .setColor(0x5865F2)
+          .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+          .addFields(
+            { name: '🏆 Level', value: `${data.level}`, inline: true },
+            { name: '⚡ Total XP', value: `${data.xp}`, inline: true },
+            { name: '📈 Progress', value: `\`${bar}\` ${xpIntoLevel}/${xpNeeded} XP`, inline: false },
+          )
+          .setTimestamp()
+        ] });
+      }
+      if (cmd === 'leaderboard') {
+        const lc = getLevelsConfig(guildId);
+        const entries = Object.entries(lc.users).sort((a, b) => b[1].xp - a[1].xp).slice(0, 10);
+        if (!entries.length) return interaction.reply({ content: '📭 No one has earned XP yet.', flags: MessageFlags.Ephemeral });
+        const medals = ['🥇', '🥈', '🥉'];
+        const lines = entries.map(([uid, d], i) => `${medals[i] ?? `**${i + 1}.**`} <@${uid}> — Level **${d.level}** (${d.xp} XP)`);
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏆 XP Leaderboard').setColor(0xF1C40F).setDescription(lines.join('\n')).setTimestamp()] });
+      }
+      if (cmd === 'levelnotify') {
+        const lc = getLevelsConfig(guildId);
+        if (!lc.users[interaction.user.id]) lc.users[interaction.user.id] = { xp: 0, level: 0, pingOnLevelUp: true };
+        const userData = lc.users[interaction.user.id];
+        userData.pingOnLevelUp = userData.pingOnLevelUp === false ? true : false;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: userData.pingOnLevelUp ? '🔔 You will now be **pinged** when you level up.' : '🔕 You will **no longer be pinged** when you level up — you\'ll still see the announcement, just without a mention.', flags: MessageFlags.Ephemeral });
+      }
       if (cmd === 'reviewstaff') {
         const src = getStaffReviewConfig(guildId);
         if (!src.channel) return interaction.reply({ content: '❌ Staff review channel is not set up. Ask an admin to run `/setup`.', flags: MessageFlags.Ephemeral });
@@ -6345,18 +6348,18 @@ client.on('interactionCreate', async interaction => {
       if (cmd === 'infract') {
         if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
         const targetUser = interaction.options.getUser('user');
-        const infrType   = interaction.options.getString('type'); // 'warning' | 'strike'
+        const infrType   = interaction.options.getSubcommand(); // 'warning' | 'strike' | 'termination'
         if (!targetUser) return interaction.reply({ content: '❌ User not found.', flags: MessageFlags.Ephemeral });
 
-        const isStrike = infrType === 'strike';
+        const titleMap = { warning: '🟡 Issue Warning', strike: '🔴 Issue Strike', termination: '🚨 Issue Termination' };
         const modal = new ModalBuilder()
           .setCustomId(`modal_infract__${infrType}__${targetUser.id}`)
-          .setTitle(isStrike ? '🔴 Issue Strike' : '🟡 Issue Warning');
+          .setTitle(titleMap[infrType] ?? '🟡 Issue Warning');
         modal.addComponents(
           new ActionRowBuilder().addComponents(
             new TextInputBuilder()
               .setCustomId('infract_reason')
-              .setLabel(`Reason for this ${isStrike ? 'strike' : 'warning'}`)
+              .setLabel(`Reason for this ${infrType}`)
               .setStyle(TextInputStyle.Paragraph)
               .setPlaceholder('Describe the rule violation or behaviour...')
               .setRequired(true)
@@ -6904,6 +6907,7 @@ client.on('interactionCreate', async interaction => {
               { label: 'Sticky Messages', value: 'stickymessages', emoji: '📌' },
               { label: 'Ticket Inactivity', value: 'ticketinactivity', emoji: '⏱️' },
               { label: 'Birthdays', value: 'birthdays', emoji: '🎂' },
+              { label: 'Leveling', value: 'levels', emoji: '📈' },
             );
           const row = new ActionRowBuilder().addComponents(select);
           const row2 = new ActionRowBuilder().addComponents(select2);
@@ -6920,128 +6924,6 @@ client.on('interactionCreate', async interaction => {
 
     // ══ BUTTONS ══
     if (interaction.isButton()) {
-      // ════ MELONLY QUOTA CONFIRM ════
-      if (interaction.customId.startsWith('melony_cancel__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const checkId = interaction.customId.replace('melony_cancel__', '');
-        pendingMelonyChecks.delete(checkId);
-        return interaction.update({ content: '❌ Quota check cancelled. No infractions were issued.', embeds: [], components: [] });
-      }
-
-      if (interaction.customId.startsWith('melony_confirm__')) {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const checkId = interaction.customId.replace('melony_confirm__', '');
-        const pending = pendingMelonyChecks.get(checkId);
-        pendingMelonyChecks.delete(checkId);
-        if (!pending) return interaction.update({ content: '❌ This check has expired or was already processed.', embeds: [], components: [] });
-        await interaction.deferUpdate();
-
-        const ic = getInfractionConfig(guildId);
-        if (!ic.userStrikes)  ic.userStrikes  = {};
-        if (!ic.userHistory)  ic.userHistory  = {};
-
-        const maxLevel = INFRACTION_PROGRESSION.length;
-        let issued = 0;
-
-        for (const { discordId, hours } of pending.failed) {
-          const currentLevel = ic.userStrikes[discordId] ?? 0;
-          const newLevel     = Math.min(currentLevel + 1, maxLevel);
-          ic.userStrikes[discordId] = newLevel;
-          if (!ic.userHistory[discordId]) ic.userHistory[discordId] = [];
-          ic.userHistory[discordId].push({
-            type:      'Warning',
-            reason:    `Shift quota not met for Wave ${pending.wave} (${hours}h logged, required ${getMelonlyConfig(guildId).quotaHours}h)`,
-            evidence:  null,
-            moderator: `Auto (Melonly • Wave ${pending.wave})`,
-            date:      new Date().toUTCString(),
-            level:     newLevel,
-          });
-
-          // Apply progression role if configured
-          const targetMember = await interaction.guild.members.fetch(discordId).catch(() => null);
-          if (targetMember) await applyInfractionLevelRole(targetMember, ic, newLevel).catch(() => {});
-
-          // DM the user
-          const progEntry = getProgressionEntry(newLevel);
-          await client.users.fetch(discordId).then(u => u.send({
-            embeds: [new EmbedBuilder()
-              .setTitle('⚠️ Warning — Shift Quota Not Met')
-              .setColor(0xFEE75C)
-              .setDescription(`You have received a **Warning** in **${interaction.guild.name}** for not meeting your shift quota.`)
-              .addFields(
-                { name: '📝 Reason', value: `Shift quota not met for Wave ${pending.wave} (${hours}h logged, required ${getMelonlyConfig(guildId).quotaHours}h)`, inline: false },
-                { name: '📊 Progression', value: `${progEntry.label} (${newLevel}/${maxLevel})`, inline: true },
-              )
-              .setFooter({ text: 'If you believe this is incorrect, contact a staff member.' })
-              .setTimestamp()
-            ],
-          })).catch(() => {});
-
-          // Post in log channel
-          if (ic.logChannel) {
-            const logCh = interaction.guild.channels.cache.get(ic.logChannel);
-            if (logCh) {
-              const progEntry = getProgressionEntry(newLevel);
-              await logCh.send({ embeds: [new EmbedBuilder()
-                .setTitle(`⚠️ Auto Warning — Quota Not Met`)
-                .setColor(0xFEE75C)
-                .addFields(
-                  { name: '👤 User',     value: `<@${discordId}>`, inline: true },
-                  { name: '⏱️ Hours',    value: `${hours}h / ${getMelonlyConfig(guildId).quotaHours}h`, inline: true },
-                  { name: '📊 Level',    value: `${progEntry.label} (${newLevel}/${maxLevel})`, inline: true },
-                  { name: '🌊 Wave',     value: `${pending.wave}`, inline: true },
-                  { name: '👮 Issued by', value: `Auto (confirmed by ${userDisplay(interaction.user)})`, inline: false },
-                )
-                .setTimestamp()
-              ] }).catch(() => {});
-            }
-          }
-          issued++;
-        }
-
-        await saveGuildConfig(guildId);
-        return interaction.editReply({
-          content: `✅ **${issued}** infraction${issued !== 1 ? 's' : ''} issued for Wave ${pending.wave}. Confirmed by ${userDisplay(interaction.user)}.`,
-          embeds: [],
-          components: [],
-        });
-      }
-
-      // ════ MELONLY SETUP BUTTONS ════
-      if (interaction.customId === 'melony__toggle') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const mc = getMelonlyConfig(guildId);
-        mc.enabled = !mc.enabled;
-        await saveGuildConfig(guildId);
-        return interaction.update(buildMelonySetupPayload(guildId));
-      }
-      if (interaction.customId === 'melony__set_quota') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const modal = new ModalBuilder().setCustomId('modal_melony_quota').setTitle('Set Shift Quota');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('melony_quota_hours').setLabel('Required hours per wave (e.g. 2)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('2').setValue(String(getMelonlyConfig(guildId).quotaHours)),
-          ),
-        );
-        return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'melony__set_channel') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const modal = new ModalBuilder().setCustomId('modal_melony_channel').setTitle('Set Quota Log Channel');
-        modal.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId('melony_channel_id').setLabel('Channel ID').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Right-click channel → Copy Channel ID'),
-          ),
-        );
-        return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'melony__run_now') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        await interaction.reply({ content: '🔄 Running quota check now...', flags: MessageFlags.Ephemeral });
-        await runMelonyQuotaCheck(interaction.guild);
-        return interaction.editReply({ content: '✅ Quota check complete. Check the log channel.' });
-      }
-
       // ════ BAN CONFIRMATION ════
       if (interaction.customId === 'ban_cancel') {
         pendingBans.delete(interaction.user.id);
@@ -7851,6 +7733,68 @@ client.on('interactionCreate', async interaction => {
             ),
           );
           return interaction.showModal(modal);
+        }
+      }
+
+            // ════ LEVELS SETUP BUTTONS ════
+      if (id.startsWith('lvl__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        const action = id.replace('lvl__', '');
+        if (action === 'toggle') { lc.enabled = !lc.enabled; await saveGuildConfig(guildId); return interaction.update(buildLevelsSetupPayload(guildId)); }
+        if (action === 'channel_mode') { lc.channelMode = lc.channelMode === 'whitelist' ? 'blacklist' : 'whitelist'; await saveGuildConfig(guildId); return interaction.update(buildLevelsSetupPayload(guildId)); }
+        if (action === 'xp_range') {
+          const modal = new ModalBuilder().setCustomId('modal_lvl_xp_range').setTitle('XP per message');
+          modal.addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_xp_min').setLabel('Min XP').setStyle(TextInputStyle.Short).setValue(String(lc.xpMin)).setRequired(true).setMaxLength(4)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_xp_max').setLabel('Max XP').setStyle(TextInputStyle.Short).setValue(String(lc.xpMax)).setRequired(true).setMaxLength(4)),
+          );
+          return interaction.showModal(modal);
+        }
+        if (action === 'cooldown') {
+          const modal = new ModalBuilder().setCustomId('modal_lvl_cooldown').setTitle('XP Cooldown');
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_cd_val').setLabel('Cooldown in seconds').setStyle(TextInputStyle.Short).setValue(String(lc.cooldownSeconds)).setRequired(true).setMaxLength(5)));
+          return interaction.showModal(modal);
+        }
+        if (action === 'set_channels') return interaction.reply({ content: '### 📂 Select a channel to add/remove from the list\n*Use Channel Mode to decide whether this list is a whitelist or blacklist.*', components: [channelDropdown('lvld_channels', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        if (action === 'add_boost_role') {
+          return interaction.reply({
+            content: '### 🚀 Select a role that should earn extra XP (e.g. Boosters)',
+            components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('lvld_boost_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (action === 'remove_boost_role') {
+          const entries = Object.entries(lc.boostRoles);
+          if (!entries.length) return interaction.reply({ content: '❌ No boost roles set.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder().setCustomId('lvl_remove_boost_sel').setPlaceholder('Select boost role to remove...').addOptions(entries.map(([roleId, mult]) => ({ label: `${interaction.guild.roles.cache.get(roleId)?.name ?? roleId} — ${mult}x`, value: roleId })));
+          return interaction.reply({ content: '### 🚀 Remove boost role', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'add_level_role') {
+          const modal = new ModalBuilder().setCustomId('modal_lvl_add_level_role').setTitle('Add Level Role');
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_role_level').setLabel('Level number (e.g. 5)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(4)));
+          return interaction.showModal(modal);
+        }
+        if (action === 'remove_level_role') {
+          const entries = Object.entries(lc.levelRoles);
+          if (!entries.length) return interaction.reply({ content: '❌ No level roles set.', flags: MessageFlags.Ephemeral });
+          const sel = new StringSelectMenuBuilder().setCustomId('lvl_remove_level_role_sel').setPlaceholder('Select level role to remove...').addOptions(entries.map(([lvl]) => ({ label: `Level ${lvl}`, value: lvl })));
+          return interaction.reply({ content: '### 🎭 Remove level role', components: [new ActionRowBuilder().addComponents(sel)], flags: MessageFlags.Ephemeral });
+        }
+        if (action === 'announce_channel') return interaction.reply({ content: '### 📢 Select announce channel', components: [channelDropdown('lvld_announce_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
+        if (action === 'announce_message') {
+          const modal = new ModalBuilder().setCustomId('modal_lvl_announce_msg').setTitle('Level Up Message');
+          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_announce_val').setLabel('Message ({userMention} {username} {level} {server})').setStyle(TextInputStyle.Paragraph).setValue(lc.announceMessage || '').setRequired(true).setMaxLength(500)));
+          return interaction.showModal(modal);
+        }
+        if (action === 'reset_all') { lc.users = {}; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ All XP/levels reset.', flags: MessageFlags.Ephemeral }); }
+        if (action === 'set_categories') return interaction.reply({ content: '### 📁 Select a category to add/remove from the blacklist\n*No XP is earned in channels under this category — perfect for ticket categories.*', components: [channelDropdown('lvld_categories', 'Select category...', [ChannelType.GuildCategory])], flags: MessageFlags.Ephemeral });
+        if (action === 'manage_user') {
+          return interaction.reply({
+            content: '### 👤 Select a member to manage their level/XP',
+            components: [new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId('lvld_manage_user_select').setPlaceholder('Select member...').setMinValues(1).setMaxValues(1))],
+            flags: MessageFlags.Ephemeral,
+          });
         }
       }
 
@@ -9011,26 +8955,16 @@ client.on('interactionCreate', async interaction => {
         const applicant = await interaction.guild.members.fetch(applicantId).catch(() => null);
 
         if (action === 'accept' || action === 'acceptsilent') {
-          // Chain of command promotie bij application accept
+          // Chain of command promotie bij application accept (optioneel, náást de Accept Roles)
           const cc = getChainConfig(guildId);
           if (cc.chain.length > 0 && applicant) {
-            const result = await promoteInChain(interaction.guild, applicant, interaction.user, guildId);
-            if (!result.success) {
-              // Chain promotie mislukt — val terug op acceptRoles
-              if (appType?.acceptRoles?.length) {
-                for (const roleId of appType.acceptRoles) {
-                  const role = interaction.guild.roles.cache.get(roleId);
-                  if (role) await applicant.roles.add(role).catch(e => console.error('Accept role add error:', e));
-                }
-              }
-            }
-          } else {
-            // No chain — use acceptRoles as before
-            if (appType?.acceptRoles?.length && applicant) {
-              for (const roleId of appType.acceptRoles) {
-                const role = interaction.guild.roles.cache.get(roleId);
-                if (role) await applicant.roles.add(role).catch(e => console.error('Accept role add error:', e));
-              }
+            await promoteInChain(interaction.guild, applicant, interaction.user, guildId).catch(() => {});
+          }
+          // Always give the ranks configured under "Accept Roles" for this application type
+          if (appType?.acceptRoles?.length && applicant) {
+            for (const roleId of appType.acceptRoles) {
+              const role = interaction.guild.roles.cache.get(roleId);
+              if (role) await applicant.roles.add(role).catch(e => console.error('Accept role add error:', e));
             }
           }
 
@@ -9988,6 +9922,19 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({ content: ids[0] ? `✅ Birthday ping role set to <@&${ids[0]}>!` : '✅ Birthday ping role removed.', flags: MessageFlags.Ephemeral });
       }
+      if (interaction.customId === 'lvld_boost_role') {
+        const roleId = ids[0];
+        const modal = new ModalBuilder().setCustomId(`modal_lvl_boost_mult__${roleId}`).setTitle('XP Multiplier');
+        modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_boost_mult_val').setLabel('Multiplier (e.g. 1.5 or 2)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(5)));
+        return interaction.showModal(modal);
+      }
+      if (interaction.customId.startsWith('lvl_level_role_save__')) {
+        const lvl = interaction.customId.replace('lvl_level_role_save__', '');
+        const lc = getLevelsConfig(guildId);
+        lc.levelRoles[lvl] = ids[0];
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Level **${lvl}** role set to <@&${ids[0]}>!`, flags: MessageFlags.Ephemeral });
+      }
       if (interaction.customId === 'load_approval_roles') {
         const lc = getLOAConfig(guildId);
         lc.approvalRoles = ids;
@@ -10268,6 +10215,19 @@ client.on('interactionCreate', async interaction => {
 
     // ══ USER SELECT MENUS ══
     if (interaction.isUserSelectMenu()) {
+      if (interaction.customId === 'lvld_manage_user_select') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const targetId = interaction.values[0];
+        const lc = getLevelsConfig(guildId);
+        const current = lc.users[targetId];
+        const modal = new ModalBuilder().setCustomId(`modal_lvl_manage_user__${targetId}`).setTitle('Manage Level / XP');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_manage_set_level').setLabel('Set Level to (optional)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(4).setPlaceholder(current ? `Current: ${current.level}` : 'e.g. 5')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_manage_add_xp').setLabel('Add/Remove XP (optional, use -N to remove)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(6)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('lvl_manage_reset').setLabel('Reset completely? (yes/no)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(3).setValue('no')),
+        );
+        return interaction.showModal(modal);
+      }
       if (interaction.customId === 'sr2_panel_user') {
         const src = getStaffReviewConfig(guildId);
         const targetUserId = interaction.values[0];
@@ -10400,6 +10360,35 @@ client.on('interactionCreate', async interaction => {
         bc.channel = chId;
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Birthday announcement channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'lvld_channels') {
+        const lc = getLevelsConfig(guildId);
+        if (lc.xpChannels.includes(chId)) {
+          lc.xpChannels = lc.xpChannels.filter(c => c !== chId);
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: `✅ <#${chId}> removed from the list.`, flags: MessageFlags.Ephemeral });
+        }
+        lc.xpChannels.push(chId);
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ <#${chId}> added to the list.`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'lvld_announce_channel') {
+        const lc = getLevelsConfig(guildId);
+        lc.announceChannel = chId;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Announce channel set to <#${chId}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (interaction.customId === 'lvld_categories') {
+        const lc = getLevelsConfig(guildId);
+        if (!lc.xpCategories) lc.xpCategories = [];
+        if (lc.xpCategories.includes(chId)) {
+          lc.xpCategories = lc.xpCategories.filter(c => c !== chId);
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: `✅ <#${chId}> removed from the blacklisted categories.`, flags: MessageFlags.Ephemeral });
+        }
+        lc.xpCategories.push(chId);
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ <#${chId}> added to the blacklist — no XP will be earned in channels under this category (e.g. tickets).`, flags: MessageFlags.Ephemeral });
       }
 
       if (interaction.customId === 'inf_log_channel') {
@@ -10768,6 +10757,7 @@ client.on('interactionCreate', async interaction => {
           chainofcommand:() => buildChainSetupPayload(guildId),
           ticketinactivity: () => buildTicketInactivitySetupPayload(guildId),
           birthdays:        () => buildBirthdaySetupPayload(guildId),
+          levels:           () => buildLevelsSetupPayload(guildId),
         };
         const builder = payloadMap[val];
         if (!builder) return interaction.reply({ content: '❌ Unknown category.', flags: MessageFlags.Ephemeral });
@@ -10867,6 +10857,21 @@ client.on('interactionCreate', async interaction => {
         src.ranks = src.ranks.filter(r => String(r.id) !== String(val));
         await saveGuildConfig(guildId);
         return interaction.reply({ content: '✅ Rank removed.', flags: MessageFlags.Ephemeral });
+      }
+
+      if (id === 'lvl_remove_boost_sel') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        delete lc.boostRoles[val];
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: '✅ Boost role removed.', flags: MessageFlags.Ephemeral });
+      }
+      if (id === 'lvl_remove_level_role_sel') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        delete lc.levelRoles[val];
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Level ${val} role removed.`, flags: MessageFlags.Ephemeral });
       }
 
       // ════ CHAIN OF COMMAND SELECTS ════
@@ -11433,6 +11438,95 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: '✅ Birthday message updated!', flags: MessageFlags.Ephemeral });
       }
 
+      if (mid === 'modal_lvl_xp_range') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        const min = parseInt(interaction.fields.getTextInputValue('lvl_xp_min').trim(), 10);
+        const max = parseInt(interaction.fields.getTextInputValue('lvl_xp_max').trim(), 10);
+        if (isNaN(min) || isNaN(max) || min < 1 || max < min) return interaction.reply({ content: '❌ Invalid range.', flags: MessageFlags.Ephemeral });
+        lc.xpMin = min; lc.xpMax = max;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ XP range set to ${min}-${max} per message.`, flags: MessageFlags.Ephemeral });
+      }
+      if (mid === 'modal_lvl_cooldown') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        const val = parseInt(interaction.fields.getTextInputValue('lvl_cd_val').trim(), 10);
+        if (isNaN(val) || val < 0) return interaction.reply({ content: '❌ Invalid value.', flags: MessageFlags.Ephemeral });
+        lc.cooldownSeconds = val;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ Cooldown set to ${val}s.`, flags: MessageFlags.Ephemeral });
+      }
+      if (mid === 'modal_lvl_announce_msg') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lc = getLevelsConfig(guildId);
+        lc.announceMessage = interaction.fields.getTextInputValue('lvl_announce_val').trim();
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: '✅ Level up message saved!', flags: MessageFlags.Ephemeral });
+      }
+      if (mid.startsWith('modal_lvl_manage_user__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const targetId = mid.replace('modal_lvl_manage_user__', '');
+        const lc = getLevelsConfig(guildId);
+        const resetRaw = interaction.fields.getTextInputValue('lvl_manage_reset').trim().toLowerCase();
+        const levelRaw = interaction.fields.getTextInputValue('lvl_manage_set_level').trim();
+        const addXpRaw = interaction.fields.getTextInputValue('lvl_manage_add_xp').trim();
+
+        if (!lc.users[targetId]) lc.users[targetId] = { xp: 0, level: 0, pingOnLevelUp: true };
+        const userData = lc.users[targetId];
+        const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
+
+        if (resetRaw === 'yes') {
+          userData.xp = 0; userData.level = 0;
+          if (targetMember) await applyLevelRole(targetMember, lc, 0);
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: `✅ Reset XP/level for <@${targetId}>.`, flags: MessageFlags.Ephemeral });
+        }
+
+        if (levelRaw) {
+          const newLevel = parseInt(levelRaw, 10);
+          if (isNaN(newLevel) || newLevel < 0 || newLevel > 1000) return interaction.reply({ content: '❌ Invalid level.', flags: MessageFlags.Ephemeral });
+          userData.level = newLevel;
+          userData.xp = totalXpForLevel(newLevel);
+          if (targetMember) await applyLevelRole(targetMember, lc, newLevel);
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: `✅ <@${targetId}> set to **Level ${newLevel}**.`, flags: MessageFlags.Ephemeral });
+        }
+
+        if (addXpRaw) {
+          const addXp = parseInt(addXpRaw, 10);
+          if (isNaN(addXp)) return interaction.reply({ content: '❌ Invalid XP amount.', flags: MessageFlags.Ephemeral });
+          userData.xp = Math.max(0, userData.xp + addXp);
+          const recomputedLevel = getLevelFromXP(userData.xp);
+          userData.level = recomputedLevel;
+          if (targetMember) await applyLevelRole(targetMember, lc, recomputedLevel);
+          await saveGuildConfig(guildId);
+          return interaction.reply({ content: `✅ <@${targetId}> now has **${userData.xp} XP** (Level ${recomputedLevel}).`, flags: MessageFlags.Ephemeral });
+        }
+
+        return interaction.reply({ content: '❌ Nothing changed — fill in at least one field.', flags: MessageFlags.Ephemeral });
+      }
+      if (mid === 'modal_lvl_add_level_role') {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const lvl = parseInt(interaction.fields.getTextInputValue('lvl_role_level').trim(), 10);
+        if (isNaN(lvl) || lvl < 1 || lvl > 1000) return interaction.reply({ content: '❌ Invalid level.', flags: MessageFlags.Ephemeral });
+        return interaction.reply({
+          content: `### 🎭 Select role to give at **Level ${lvl}**`,
+          components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`lvl_level_role_save__${lvl}`).setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      if (mid.startsWith('modal_lvl_boost_mult__')) {
+        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
+        const roleId = mid.replace('modal_lvl_boost_mult__', '');
+        const lc = getLevelsConfig(guildId);
+        const mult = parseFloat(interaction.fields.getTextInputValue('lvl_boost_mult_val').trim());
+        if (isNaN(mult) || mult <= 0) return interaction.reply({ content: '❌ Invalid multiplier.', flags: MessageFlags.Ephemeral });
+        lc.boostRoles[roleId] = mult;
+        await saveGuildConfig(guildId);
+        return interaction.reply({ content: `✅ <@&${roleId}> will now earn **${mult}x** XP!`, flags: MessageFlags.Ephemeral });
+      }
+
       if (mid === 'modal_inf_embed') {
         const ic = getInfractionConfig(guildId);
         ic.embedTitle       = interaction.fields.getTextInputValue('inf_title').trim();
@@ -11562,25 +11656,6 @@ client.on('interactionCreate', async interaction => {
           .setTimestamp();
         await ch.send({ embeds: [embed] });
         return interaction.reply({ content: `✅ Your review for **${targetUser?.tag ?? 'this staff member'}** has been submitted!`, flags: MessageFlags.Ephemeral });
-      }
-
-      // ════ MELONLY SETUP MODALS ════
-      if (mid === 'modal_melony_quota') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const hours = parseFloat(interaction.fields.getTextInputValue('melony_quota_hours'));
-        if (isNaN(hours) || hours <= 0) return interaction.reply({ content: '❌ Enter a valid number of hours (e.g. 2).', flags: MessageFlags.Ephemeral });
-        getMelonlyConfig(guildId).quotaHours = hours;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Quota set to **${hours}h** per wave.`, flags: MessageFlags.Ephemeral });
-      }
-      if (mid === 'modal_melony_channel') {
-        if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral });
-        const channelId = interaction.fields.getTextInputValue('melony_channel_id').trim();
-        const ch = interaction.guild.channels.cache.get(channelId);
-        if (!ch) return interaction.reply({ content: '❌ Channel not found. Make sure you copied the right Channel ID.', flags: MessageFlags.Ephemeral });
-        getMelonlyConfig(guildId).logChannel = channelId;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Log channel set to <#${channelId}>.`, flags: MessageFlags.Ephemeral });
       }
 
       if (mid === 'modal_dept_add') {
@@ -11909,10 +11984,10 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
-      // ── Infraction modal (Warning / Strike via progression system) ──
+      // ── Infraction modal (Warning / Strike / Termination via progression system) ──
       if (mid.startsWith('modal_infract__')) {
         const parts     = mid.split('__'); // ['modal_infract', type, userId]
-        const infrType  = parts[1]; // 'warning' | 'strike'
+        const infrType  = parts[1]; // 'warning' | 'strike' | 'termination'
         const targetId  = parts[2];
         const targetUser   = await client.users.fetch(targetId).catch(() => null);
         const targetMember = await interaction.guild.members.fetch(targetId).catch(() => null);
@@ -11926,19 +12001,31 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const ic = getInfractionConfig(guildId);
-        if (!ic.userStrikes)  ic.userStrikes  = {};
-        if (!ic.userHistory)  ic.userHistory  = {};
+        if (!ic.userStrikes)   ic.userStrikes   = {};
+        if (!ic.warningCounts) ic.warningCounts = {};
+        if (!ic.strikeCounts)  ic.strikeCounts  = {};
+        if (!ic.userHistory)   ic.userHistory   = {};
 
-        const maxLevel     = INFRACTION_PROGRESSION.length;
-        const currentLevel = ic.userStrikes[targetId] ?? 0;
-        const newLevel     = Math.min(currentLevel + 1, maxLevel);
-        ic.userStrikes[targetId] = newLevel;
+        const maxLevel = INFRACTION_PROGRESSION.length;
+
+        // Warnings and Strikes are separate tracks — a Strike now correctly advances
+        // toward the Strike roles (levels 4-6) instead of the Warning roles (levels 1-3).
+        if (infrType === 'strike') {
+          ic.strikeCounts[targetId] = Math.min((ic.strikeCounts[targetId] ?? 0) + 1, 3);
+        } else if (infrType === 'warning') {
+          ic.warningCounts[targetId] = Math.min((ic.warningCounts[targetId] ?? 0) + 1, 3);
+        } else if (infrType === 'termination') {
+          ic.strikeCounts[targetId] = 3; // maxes the strike track so the effective level becomes 7 (Termination)
+        }
+
+        const newLevel = getEffectiveLevel(ic, targetId);
+        ic.userStrikes[targetId] = newLevel; // kept in sync for /infractions, /clearinfractions, /setinfractions
 
         const progEntry  = getProgressionEntry(newLevel);
         const levelLabel = progEntry.label;
-        const typeLabel  = infrType === 'strike' ? 'Strike' : 'Warning';
-        const typeColor  = infrType === 'strike' ? 0xED4245 : 0xFEE75C;
-        const typeIcon   = infrType === 'strike' ? '🔴' : '🟡';
+        const typeLabel  = infrType === 'termination' ? 'Termination' : infrType === 'strike' ? 'Strike' : 'Warning';
+        const typeColor  = infrType === 'termination' ? 0x992D22 : infrType === 'strike' ? 0xED4245 : 0xFEE75C;
+        const typeIcon   = infrType === 'termination' ? '🚨' : infrType === 'strike' ? '🔴' : '🟡';
 
         if (!ic.userHistory[targetId]) ic.userHistory[targetId] = [];
         ic.userHistory[targetId].push({
