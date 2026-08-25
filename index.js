@@ -837,28 +837,6 @@ async function safeDM(user, payload) {
   }
 }
 
-function getSessionConfig(guildId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.session) gc.session = { channel: null, pingRoles: [], allowedRoles: [], joinLink: null, startImage: null, startDescription: null, voteImage: null, voteDescription: null, shutdownImage: null, shutdownDescription: null, voteThreshold: 5 };
-  if (gc.session.voteThreshold === undefined) gc.session.voteThreshold = 5;
-  if (!gc.session.scheduled) gc.session.scheduled = {}; // id → { hostId, scheduledAt, joinLink, voters: [], messageId, channelId, fired }
-  if (!isMainServer(guildId)) {
-    const mainSession = getMainConfig('session');
-    if (mainSession) {
-      if (!gc.session.pingRoles?.length)    gc.session.pingRoles    = mainSession.pingRoles    ?? [];
-      if (!gc.session.allowedRoles?.length) gc.session.allowedRoles = mainSession.allowedRoles ?? [];
-      if (!gc.session.joinLink)             gc.session.joinLink     = mainSession.joinLink     ?? null;
-      if (!gc.session.voteThreshold)        gc.session.voteThreshold = mainSession.voteThreshold ?? 5;
-      if (!gc.session.startDescription)     gc.session.startDescription  = mainSession.startDescription  ?? null;
-      if (!gc.session.voteDescription)      gc.session.voteDescription   = mainSession.voteDescription   ?? null;
-      if (!gc.session.shutdownDescription)  gc.session.shutdownDescription = mainSession.shutdownDescription ?? null;
-      if (!gc.session.startImage)           gc.session.startImage   = mainSession.startImage   ?? null;
-      if (!gc.session.voteImage)            gc.session.voteImage    = mainSession.voteImage    ?? null;
-      if (!gc.session.shutdownImage)        gc.session.shutdownImage = mainSession.shutdownImage ?? null;
-    }
-  }
-  return gc.session;
-}
 function getSelfRoleConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.selfroles) gc.selfroles = { panels: {} }; return gc.selfroles; }
 function getAnnouncementConfig(guildId) { const gc = getGuildConfig(guildId); if (!gc.announcements) gc.announcements = { types: {} }; return gc.announcements; }
 function getWelcomerConfig(guildId) {
@@ -1411,52 +1389,6 @@ async function setDeptValue(guildId, path, value) {
   await saveGuildConfig(guildId);
 }
 
-// Sends announcement to all department servers after a successful vote
-async function sendCrossServerAnnouncement(hostUser, joinLink, voterMentions) {
-  const depts = getMainServerDepartments();
-  for (const dept of depts) {
-    try {
-      // Bot uses webhook if available, falls back to bot being in guild
-      const guild = client.guilds.cache.get(dept.guildId);
-      const webhookUrl = dept.webhookUrl;
-
-      // Try webhook first (works without bot being in server)
-      if (webhookUrl && isValidUrl(webhookUrl)) {
-        const embed = {
-          title: '🟢 Session Started!',
-          description: `A session has been started by **${typeof hostUser === "string" ? hostUser : userDisplay(hostUser)}**!`,
-          fields: [{ name: '🗳️ Voted by', value: voterMentions || '*Vote passed*', inline: false }],
-          color: 0x57F287,
-          timestamp: new Date().toISOString(),
-        };
-        const body = { embeds: [embed] };
-        if (joinLink && isValidUrl(joinLink)) body.content = `[🚀 Join Session](${joinLink})`;
-        await fetch(webhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }).catch(() => {});
-        continue;
-      }
-
-      // Fallback: bot must be in guild
-      if (!guild) continue;
-      const ch = guild.channels.cache.get(dept.announcementChannelId);
-      if (!ch) continue;
-      const embed = new EmbedBuilder()
-        .setTitle('🟢 Session Started!')
-        .setColor(0x57F287)
-        .setDescription(`A session has been started by **${typeof hostUser === "string" ? hostUser : userDisplay(hostUser)}**!`)
-        .addFields({ name: '🗳️ Voted by', value: voterMentions || '*Vote passed*', inline: false })
-        .setTimestamp();
-      const comps = [];
-      if (joinLink && isValidUrl(joinLink)) {
-        comps.push(new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(joinLink.trim())
-        ));
-      }
-      await ch.send({ embeds: [embed], components: comps }).catch(() => {});
-    } catch { /* skip on error */ }
   }
 }
 
@@ -2004,11 +1936,8 @@ function buildDepartmentSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('dept_setup__transcript').setLabel('Transcript').setStyle(ButtonStyle.Primary).setEmoji('📋'),
     new ButtonBuilder().setCustomId('dept_setup__ticket_category').setLabel('Category').setStyle(ButtonStyle.Primary).setEmoji('📁'),
     new ButtonBuilder().setCustomId('dept_setup__ticket_ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-    new ButtonBuilder().setCustomId('dept_setup__session_channel').setLabel('Session Ch.').setStyle(ButtonStyle.Primary).setEmoji('🎮'),
   );
   const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dept_setup__session_ping_roles').setLabel('Session Pings').setStyle(ButtonStyle.Primary).setEmoji('👥'),
-    new ButtonBuilder().setCustomId('dept_setup__session_allowed_roles').setLabel('Session Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
     new ButtonBuilder().setCustomId('dept_setup__welcome_channel').setLabel('Welcome Ch.').setStyle(ButtonStyle.Primary).setEmoji('👋'),
     new ButtonBuilder().setCustomId('dept_setup__verify_channel').setLabel('Verify Ch.').setStyle(ButtonStyle.Primary).setEmoji('✅'),
     new ButtonBuilder().setCustomId('dept_setup__verify_role').setLabel('Verify Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
@@ -2035,8 +1964,7 @@ function isChannelSelectButton(id) {
     'wc_channel', 'vcd_channel', 'sd_channel', 'ar_channel',
     'vc_channel', 'vc_deploy',
     'am_log', 'tr_setup__channel', 'tr_setup__announce_channel',
-    'cmdlist__channel', 'erlc_set_kickbans', 'erlc_set_joinleave',
-    'erlc_set_cmds', 'erlc_set_modcall', 'erlc_set_kills', 'erlc_set_inrole',
+    'cmdlist__channel',
     'ap_review_channel', 'ap_log_channel',
     'vote_setup__log', 'vote_setup__announce_channel',
   ];
@@ -2551,7 +2479,7 @@ async function erlcRequest(p, method = 'GET', body = null, guildId = null) {
 function getErlcLogConfig(guildId) {
   if (!config[guildId]) config[guildId] = {};
   const gc = config[guildId];
-  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null, kickBans: null, joinLeave: null, cmds: null, modCall: null, kills: null, inGameRole: null };
+  if (!gc.erlcLogs) gc.erlcLogs = { enabled: false, serverKey: null, inGameRole: null };
   if (!gc.erlcLogs.serverKey) gc.erlcLogs.serverKey = null;
   if (gc.erlcLogs.inGameRole === undefined) gc.erlcLogs.inGameRole = null;
   return gc.erlcLogs;
@@ -3879,10 +3807,6 @@ const commands = [
     { name: 'type', type: 3, description: 'Type', required: true, choices: [{ name: 'Warn', value: 'warn' }, { name: 'Mute 10min', value: 'mute' }, { name: 'Kick', value: 'kick' }, { name: 'Ban', value: 'ban' }] },
     { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
-  { name: 'players', description: '[SHR] ERLC players' },
-  { name: 'serverstatus', description: '[SHR] ERLC server status' },
-  { name: 'erlckick', description: '[SHR] Kick ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
-  { name: 'erlcban', description: '[SHR] Ban ERLC player', options: [{ name: 'username', type: 3, description: 'Roblox username', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'trainrequest', description: 'Request a trainer (Trial Staff only)' },
   { name: 'startvote', description: 'Start a yes/no vote', options: [
     { name: 'question', type: 3, description: 'The vote question', required: true },
@@ -4598,205 +4522,81 @@ client.once('clientReady', async () => {
     }
   }, 5 * 60_000); // Check every 5 minutes
 
-  // ════ ERLC LOG POLLING ════
+  // ════ ERLC IN-GAME ROLE POLLING (silent — no log messages) ════
   setInterval(async () => {
     for (const guild of client.guilds.cache.values()) {
       try {
         const ec = getErlcLogConfig(guild.id);
-        if (!ec.enabled) continue;
+        if (!ec.enabled || !ec.inGameRole) continue;
 
         if (!erlcState.has(guild.id)) {
-          erlcState.set(guild.id, { players: new Set(), kills: new Set(), modCalls: new Set(), cmds: new Set(), bans: new Set(), firstPoll: true });
+          erlcState.set(guild.id, { players: new Set(), firstPoll: true });
         }
         const state = erlcState.get(guild.id);
 
-        // ── Join/Leave logs + In-Game Role ──
-        if (ec.joinLeave || ec.inGameRole) {
-          const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
-          if (playersRaw) {
-            // ERLC returns { [internalKey]: { Player: "Username:RobloxId", Team, Permission, Callsign } }
-            // The Roblox ID is the last segment of Player after splitting on ':'
-            const currentPlayers = new Map(); // robloxId → { username, team }
-            for (const p of Object.values(playersRaw)) {
-              const raw = String(p.Player ?? '');
-              const colonIdx = raw.lastIndexOf(':');
-              if (colonIdx === -1) continue;
-              const robloxId = raw.slice(colonIdx + 1).trim();
-              const username = raw.slice(0, colonIdx).trim();
-              if (robloxId && /^\d+$/.test(robloxId)) {
-                currentPlayers.set(robloxId, { username, team: p.Team || 'Civilian' });
-              }
-            }
+        const playersRaw = await erlcRequest('/server/players', 'GET', null, guild.id).catch(() => null);
+        if (!playersRaw) continue;
 
-            const currentIds = new Set(currentPlayers.keys());
-            const ch = ec.joinLeave ? guild.channels.cache.get(ec.joinLeave) : null;
-            const bc = getBloxlinkConfig(guild.id);
-
-            // Helper: apply in-game role via Bloxlink (rate-limited via centrale queue)
-            const applyInGameRole = async (robloxId) => {
-              if (!ec.inGameRole || !bc.apiKey) return;
-              try {
-                const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
-                if (!discordIds?.length) return;
-                for (const discordId of discordIds) {
-                  const member = await guild.members.fetch(discordId).catch(() => null);
-                  if (!member) continue;
-                  if (member.roles.cache.has(ec.inGameRole)) continue;
-                  await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC] Could not add in-game role to ${discordId}: ${e.message}`));
-                  await syncChainPrefix(member, guild.id);
-                }
-              } catch (e) { console.warn(`[ERLC] applyInGameRole error for ${robloxId}: ${e.message}`); }
-            };
-
-            // Helper: remove in-game role via Bloxlink (rate-limited via centrale queue)
-            const removeInGameRole = async (robloxId) => {
-              if (!ec.inGameRole || !bc.apiKey) return;
-              try {
-                const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
-                if (!discordIds?.length) return;
-                for (const discordId of discordIds) {
-                  const member = await guild.members.fetch(discordId).catch(() => null);
-                  if (!member) continue;
-                  if (!member.roles.cache.has(ec.inGameRole)) continue;
-                  await member.roles.remove(ec.inGameRole).catch(() => {});
-                  await syncChainPrefix(member, guild.id);
-                }
-              } catch (e) { console.warn(`[ERLC] removeInGameRole error for ${robloxId}: ${e.message}`); }
-            };
-
-            // ── Joined ──
-            for (const [robloxId, p] of currentPlayers) {
-              if (!state.players.has(robloxId)) {
-                // On first poll after (re)start: apply role silently — don't spam join messages
-                if (ch && !state.firstPoll) {
-                  await ch.send({ embeds: [new EmbedBuilder()
-                    .setTitle('📥 Player Joined')
-                    .setColor(0x57F287)
-                    .addFields(
-                      { name: '👤 Player',    value: p.username || robloxId, inline: true },
-                      { name: '🆔 Roblox ID', value: robloxId,               inline: true },
-                      { name: '🎭 Team',      value: p.team,                 inline: true },
-                    )
-                    .setTimestamp()
-                  ] }).catch(() => {});
-                }
-                await applyInGameRole(robloxId);
-              }
-            }
-
-            // ── Left ──
-            for (const robloxId of state.players) {
-              if (!currentIds.has(robloxId)) {
-                const username = state.playerNames?.get(robloxId) ?? robloxId;
-                if (ch) {
-                  await ch.send({ embeds: [new EmbedBuilder()
-                    .setTitle('📤 Player Left')
-                    .setColor(0xED4245)
-                    .addFields(
-                      { name: '👤 Player',    value: username,  inline: true },
-                      { name: '🆔 Roblox ID', value: robloxId, inline: true },
-                    )
-                    .setTimestamp()
-                  ] }).catch(() => {});
-                }
-                await removeInGameRole(robloxId);
-              }
-            }
-
-            // Update state
-            state.players = currentIds;
-            if (!state.playerNames) state.playerNames = new Map();
-            for (const [robloxId, p] of currentPlayers) {
-              state.playerNames.set(robloxId, p.username);
-            }
+        // ERLC returns { [internalKey]: { Player: "Username:RobloxId", Team, Permission, Callsign } }
+        // The Roblox ID is the last segment of Player after splitting on ':'
+        const currentPlayers = new Map(); // robloxId → { username }
+        for (const p of Object.values(playersRaw)) {
+          const raw = String(p.Player ?? '');
+          const colonIdx = raw.lastIndexOf(':');
+          if (colonIdx === -1) continue;
+          const robloxId = raw.slice(colonIdx + 1).trim();
+          const username = raw.slice(0, colonIdx).trim();
+          if (robloxId && /^\d+$/.test(robloxId)) {
+            currentPlayers.set(robloxId, { username });
           }
         }
 
-        // ── Kill logs ──
-        if (ec.kills) {
-          const ch = guild.channels.cache.get(ec.kills);
-          if (ch) {
-            const kills = await erlcRequest('/server/killlogs', 'GET', null, guild.id).catch(() => null);
-            if (kills) {
-              for (const k of kills) {
-                const key = `${k.Killer}-${k.Killed}-${k.Timestamp}`;
-                if (!state.kills.has(key)) {
-                  state.kills.add(key);
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('💀 Kill Log').setColor(0xFF0000).addFields({ name: '🔫 Killer', value: k.Killer, inline: true }, { name: '💀 Killed', value: k.Killed, inline: true }, { name: '🗡️ Weapon', value: k.Weapon || 'Unknown', inline: true }).setTimestamp()] }).catch(() => {});
-                }
-              }
-              // Houd state klein
-              if (state.kills.size > 500) state.kills = new Set([...state.kills].slice(-200));
+        const currentIds = new Set(currentPlayers.keys());
+        const bc = getBloxlinkConfig(guild.id);
+
+        // Helper: apply in-game role via Bloxlink (rate-limited via centrale queue)
+        const applyInGameRole = async (robloxId) => {
+          if (!bc.apiKey) return;
+          try {
+            const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
+            if (!discordIds?.length) return;
+            for (const discordId of discordIds) {
+              const member = await guild.members.fetch(discordId).catch(() => null);
+              if (!member) continue;
+              if (member.roles.cache.has(ec.inGameRole)) continue;
+              await member.roles.add(ec.inGameRole).catch(e => console.warn(`[ERLC] Could not add in-game role to ${discordId}: ${e.message}`));
+              await syncChainPrefix(member, guild.id);
             }
-          }
+          } catch (e) { console.warn(`[ERLC] applyInGameRole error for ${robloxId}: ${e.message}`); }
+        };
+
+        // Helper: remove in-game role via Bloxlink (rate-limited via centrale queue)
+        const removeInGameRole = async (robloxId) => {
+          if (!bc.apiKey) return;
+          try {
+            const discordIds = await bloxlinkRobloxToDiscord(guild.id, robloxId);
+            if (!discordIds?.length) return;
+            for (const discordId of discordIds) {
+              const member = await guild.members.fetch(discordId).catch(() => null);
+              if (!member) continue;
+              if (!member.roles.cache.has(ec.inGameRole)) continue;
+              await member.roles.remove(ec.inGameRole).catch(() => {});
+              await syncChainPrefix(member, guild.id);
+            }
+          } catch (e) { console.warn(`[ERLC] removeInGameRole error for ${robloxId}: ${e.message}`); }
+        };
+
+        // ── Joined — apply role silently ──
+        for (const robloxId of currentPlayers.keys()) {
+          if (!state.players.has(robloxId)) await applyInGameRole(robloxId);
         }
 
-        // ── Command logs ──
-        if (ec.cmds) {
-          const ch = guild.channels.cache.get(ec.cmds);
-          if (ch) {
-            const cmds = await erlcRequest('/server/commandlogs', 'GET', null, guild.id).catch(() => null);
-            if (cmds) {
-              for (const c of cmds) {
-                const key = `${c.Player}-${c.Command}-${c.Timestamp}`;
-                if (!state.cmds.has(key)) {
-                  state.cmds.add(key);
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('⌨️ Command Log').setColor(0x5865F2).addFields({ name: '👤 Player', value: c.Player, inline: true }, { name: '💬 Command', value: c.Command || 'Unknown', inline: false }).setTimestamp()] }).catch(() => {});
-                }
-              }
-              if (state.cmds.size > 500) state.cmds = new Set([...state.cmds].slice(-200));
-            }
-          }
+        // ── Left — remove role silently ──
+        for (const robloxId of state.players) {
+          if (!currentIds.has(robloxId)) await removeInGameRole(robloxId);
         }
 
-        // ── Mod call logs ──
-        if (ec.modCall) {
-          const ch = guild.channels.cache.get(ec.modCall);
-          if (ch) {
-            const modcalls = await erlcRequest('/server/modcalls', 'GET', null, guild.id).catch(() => null);
-            if (modcalls) {
-              for (const m of modcalls) {
-                const key = `${m.Caller}-${m.Timestamp}`;
-                if (!state.modCalls.has(key)) {
-                  state.modCalls.add(key);
-                  await ch.send({ embeds: [new EmbedBuilder().setTitle('🚨 Mod Call').setColor(0xFEE75C).addFields({ name: '📞 Caller', value: m.Caller, inline: true }, { name: '🛡️ Responder', value: m.Responder || '*No responder yet*', inline: true }).setTimestamp()] }).catch(() => {});
-                }
-              }
-              if (state.modCalls.size > 500) state.modCalls = new Set([...state.modCalls].slice(-200));
-            }
-          }
-        }
-
-        // ── Kick/Ban logs ──
-        // state.bans = in-memory Set for this session; seededBans = persistent Set
-        // so that after a restart, existing bans are NOT logged again.
-        if (ec.kickBans) {
-          const ch = guild.channels.cache.get(ec.kickBans);
-          if (ch) {
-            const bans = await erlcRequest('/server/bans', 'GET', null, guild.id).catch(() => null);
-            if (bans) {
-              // Eerste poll na (her)start: seed state.bans met alle huidige bans zodat
-              // only NEW bans (after the first poll) get a log message.
-              if (state.firstPoll) {
-                for (const b of Object.keys(bans)) state.bans.add(b);
-              } else {
-                for (const b of Object.keys(bans)) {
-                  if (!state.bans.has(b)) {
-                    state.bans.add(b);
-                    const ban = bans[b];
-                    await ch.send({ embeds: [new EmbedBuilder().setTitle('🔨 Ban Log').setColor(0xFF0000).addFields(
-                      { name: '👤 Player', value: ban.UserName || b, inline: true },
-                      { name: '👮 By', value: ban.moderatorName || 'Unknown', inline: true },
-                      { name: '📝 Reason', value: ban.Reason || '*No reason*', inline: false }
-                    ).setTimestamp()] }).catch(() => {});
-                  }
-                }
-              }
-              if (state.bans.size > 2000) state.bans = new Set([...state.bans].slice(-1000));
-            }
-          }
-        }
-        // only set firstPoll to false AFTER all initial data has been seeded
+        state.players = currentIds;
         state.firstPoll = false;
 
       } catch (e) { /* silently skip guild on error */ }
@@ -6195,10 +5995,6 @@ client.on('interactionCreate', async interaction => {
 > **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
         }
       }
-      if (cmd === 'players') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); try { const data = await erlcRequest('/server/players'); const list = Object.values(data); if (!list.length) return interaction.editReply('No players.'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle(`👥 Players (${list.length})`).setDescription(list.map((p, i) => `${i + 1}. **${p.Player}** — ${p.Team || 'None'}`).join('\n').slice(0, 4000)).setColor(0x5865F2)] }); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
-      if (cmd === 'serverstatus') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); try { const d = await erlcRequest('/server'); return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🖥️ ERLC Status').setColor(0x57F287).addFields({ name: 'Name', value: d.Name || 'Unknown', inline: true }, { name: 'Players', value: `${d.CurrentPlayers ?? 0}/${d.MaxPlayers ?? 0}`, inline: true }, { name: 'Key', value: d.JoinKey || 'N/A', inline: true }).setTimestamp()] }); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
-      if (cmd === 'erlckick') { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); const u = interaction.options.getString('username'); try { await erlcRequest('/server/command', 'POST', { command: `:kick ${u}` }); return interaction.editReply(`✅ **${u}** kicked from ERLC.`); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
-      if (cmd === 'erlcban')  { if (!hasSHR(interaction.member)) return interaction.reply({ content: '❌ SHR only.', flags: MessageFlags.Ephemeral }); await interaction.deferReply({ flags: MessageFlags.Ephemeral }); const u = interaction.options.getString('username'); try { await erlcRequest('/server/command', 'POST', { command: `:ban ${u}` }); return interaction.editReply(`✅ **${u}** banned from ERLC.`); } catch (e) { return interaction.editReply(`❌ ${e.message}`); } }
       if (cmd === 'session') {
         if (!isMainServer(guildId)) return interaction.reply({ content: '❌ Sessions can only be started from the main server.', flags: MessageFlags.Ephemeral });
         if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
@@ -7257,7 +7053,6 @@ client.on('interactionCreate', async interaction => {
         if (action === 'ticket_channel')        return interaction.reply({ content: '### 🎫 Ticket panel channel',         components: [channelDropdown('td_channel',               'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'transcript')            return interaction.reply({ content: '### 📋 Transcript channel',            components: [channelDropdown('td_transcript',             'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'ticket_category')       return interaction.reply({ content: '### 📁 Ticket category',              components: [channelDropdown('td_category',               'Select category...',  [ChannelType.GuildCategory])], flags: MessageFlags.Ephemeral });
-        if (action === 'session_channel')       return interaction.reply({ content: '### 🎮 Session channel',              components: [channelDropdown('sd_channel',                'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'welcome_channel')       return interaction.reply({ content: '### 👋 Welcome channel',              components: [channelDropdown('wcd_channel',               'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'verify_channel')        return interaction.reply({ content: '### ✅ Verification channel',         components: [channelDropdown('vcd_channel',               'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'app_review')            return interaction.reply({ content: '### 📋 App review channel',           components: [channelDropdown('apd_review_channel',        'Select channel...')],                              flags: MessageFlags.Ephemeral });
@@ -7273,8 +7068,6 @@ client.on('interactionCreate', async interaction => {
 
         // ── Roles ──
         if (action === 'ticket_ping_roles')     return interaction.reply({ content: '### 📢 Ticket ping roles\n*Leave empty to inherit from main server*',     components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('td_ping_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],     flags: MessageFlags.Ephemeral });
-        if (action === 'session_ping_roles')    return interaction.reply({ content: '### 👥 Session ping roles\n*Leave empty to inherit from main server*',     components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('sd_ping_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],     flags: MessageFlags.Ephemeral });
-        if (action === 'session_allowed_roles') return interaction.reply({ content: '### 🔑 Session allowed roles\n*Leave empty to inherit from main server*',  components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('sd_allowed_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],  flags: MessageFlags.Ephemeral });
         if (action === 'verify_role')           return interaction.reply({ content: '### 🎭 Verified role',                                                      components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('vcd_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],                   flags: MessageFlags.Ephemeral });
         if (action === 'loa_role')              return interaction.reply({ content: '### 🏖️ LOA role',                                                           components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('load_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],                    flags: MessageFlags.Ephemeral });
         if (action === 'loa_approval_roles')    return interaction.reply({ content: '### 🔑 LOA approval roles\n*Leave empty to inherit from main server*',     components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('load_approval_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
@@ -7549,69 +7342,6 @@ client.on('interactionCreate', async interaction => {
           }
           return;
         }
-      }
-
-      // ════ SESSION VOTE BUTTON ════
-      if (id === 'session__vote') {
-        const voteData = activeVotes.get(guildId);
-        if (!voteData || voteData.messageId !== interaction.message.id) {
-          return interaction.reply({ content: '❌ This vote is no longer active.', flags: MessageFlags.Ephemeral });
-        }
-        const userId = interaction.user.id;
-        if (voteData.voters.includes(userId)) {
-          return interaction.reply({ content: '❌ You have already voted!', flags: MessageFlags.Ephemeral });
-        }
-        voteData.voters.push(userId);
-        const count = voteData.voters.length;
-        const threshold = voteData.threshold;
-
-        // Update embed met nieuwe vote count
-        const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-          .setDescription(interaction.message.embeds[0].description.replace(/\*\*Votes: \d+\/\d+\*\*/, `**Votes: ${count}/${threshold}**`));
-
-        if (count >= threshold) {
-          // Vote passed — disable the button and start session
-          activeVotes.delete(guildId);
-          const disabledRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('session__vote').setLabel(`✅ Vote Passed! (${count}/${threshold})`).setStyle(ButtonStyle.Success).setDisabled(true),
-          );
-          await interaction.update({ embeds: [updatedEmbed.setTitle('✅ Vote Passed!').setColor(0x57F287)], components: [disabledRow] });
-          const sc = getSessionConfig(guildId);
-          const hostUser = await client.users.fetch(voteData.hostId).catch(() => ({ tag: 'Unknown', id: voteData.hostId }));
-          const vars = { userMention: `<@${voteData.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: userDisplay(hostUser) ?? 'Unknown', memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
-          const voterMentions = voteData.voters.map(id => `<@${id}>`).join(' ');
-          await postSessionStart(interaction.guild, sc, hostUser, voteData.joinLink, vars, voterMentions);
-          // Cross-server announcement to all departments
-          await sendCrossServerAnnouncement(hostUser, voteData.joinLink, voterMentions).catch(console.error);
-        } else {
-          // Not enough votes yet — update the count
-          await interaction.update({ embeds: [updatedEmbed], components: interaction.message.components });
-        }
-        return;
-      }
-
-      // ════ SCHEDULED SESSION — "I'm coming" BUTTON ════
-      if (id.startsWith('session_sched_vote__')) {
-        const schedId = id.replace('session_sched_vote__', '');
-        const sc = getSessionConfig(guildId);
-        const sched = sc.scheduled?.[schedId];
-        if (!sched) return interaction.reply({ content: '❌ This schedule no longer exists.', flags: MessageFlags.Ephemeral });
-        if (sched.fired) return interaction.reply({ content: '❌ This session has already started.', flags: MessageFlags.Ephemeral });
-
-        const userId = interaction.user.id;
-        const idx = sched.voters.indexOf(userId);
-        let joined;
-        if (idx === -1) { sched.voters.push(userId); joined = true; }
-        else { sched.voters.splice(idx, 1); joined = false; }
-        await saveGuildConfig(guildId);
-
-        const count = sched.voters.length;
-        const listValue = count ? sched.voters.map(uid => `<@${uid}>`).join(', ') : '*No one yet*';
-        const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0])
-          .spliceFields(interaction.message.embeds[0].fields.findIndex(f => f.name?.startsWith('✅ Coming')), 1, { name: `✅ Coming (${count})`, value: listValue.slice(0, 1024), inline: false });
-
-        await interaction.update({ embeds: [updatedEmbed] });
-        return interaction.followUp({ content: joined ? "✅ You're marked as coming! You'll be pinged when the session starts." : '❌ Removed from the list.', flags: MessageFlags.Ephemeral });
       }
 
       // ════ TICKET TYPE CONFIG BUTTONS ════
@@ -8334,15 +8064,6 @@ client.on('interactionCreate', async interaction => {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
         const ec = getErlcLogConfig(guildId);
         if (id === 'erlc_toggle') { ec.enabled = !ec.enabled; await saveGuildConfig(guildId); return interaction.update(buildErlcLogSetupPayload(guildId)); }
-        const channelMap = {
-          erlc_set_kickbans:  { key: 'kickBans',  label: '🔨 Kick/Ban logs channel',    cid: 'erlcd_kickbans' },
-          erlc_set_joinleave: { key: 'joinLeave', label: '📥 Join/Leave logs channel',   cid: 'erlcd_joinleave' },
-          erlc_set_cmds:      { key: 'cmds',      label: '⌨️ Command logs channel',      cid: 'erlcd_cmds' },
-          erlc_set_modcall:   { key: 'modCall',   label: '🚨 Mod call logs channel',     cid: 'erlcd_modcall' },
-          erlc_set_kills:     { key: 'kills',     label: '💀 Kill logs channel',         cid: 'erlcd_kills' },
-        };
-        const entry = channelMap[id];
-        if (entry) return interaction.reply({ content: `### ${entry.label}`, components: [channelDropdown(entry.cid, 'Select channel...')], flags: MessageFlags.Ephemeral });
         if (id === 'erlc_set_inrole') {
           return interaction.reply({
             content: '### 🎮 In-Game Role\n*Members who are in the ERLC server automatically receive this role. The role is removed as soon as they leave the server. Vereist een Bloxlink API key (`/bloxlinkconfig`) en dat Bloxlink in je server staat.*',
@@ -9283,45 +9004,6 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
-      // ════ SESSION SETUP BUTTONS ════
-      if (id.startsWith('s_')) {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
-        if (id === 's_channel')       return interaction.reply({ content: '### 📢 Session channel', components: [channelDropdown('sd_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
-        if (id === 's_ping_roles')    return interaction.reply({ content: '### 👥 Ping roles', components: [roleDropdown('sd_ping_roles', 'Select roles...')], flags: MessageFlags.Ephemeral });
-        if (id === 's_allowed_roles') return interaction.reply({ content: '### 🔑 Allowed roles', components: [roleDropdown('sd_allowed_roles', 'Select roles...')], flags: MessageFlags.Ephemeral });
-        if (id === 's_join_link') {
-          const modal = new ModalBuilder().setCustomId('modal_s_joinlink').setTitle('Default Join Link');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_link_val').setLabel('Join link URL').setStyle(TextInputStyle.Short).setRequired(true)));
-          return interaction.showModal(modal);
-        }
-        if (id === 's_descriptions') {
-          const sc = getSessionConfig(guildId);
-          const modal = new ModalBuilder().setCustomId('modal_s_desc').setTitle('Session Descriptions');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_start_desc').setLabel('Start description').setStyle(TextInputStyle.Paragraph).setValue(sc.startDescription || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_vote_desc').setLabel('Vote description').setStyle(TextInputStyle.Paragraph).setValue(sc.voteDescription || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_shutdown_desc').setLabel('Shutdown description').setStyle(TextInputStyle.Paragraph).setValue(sc.shutdownDescription || '').setRequired(false)),
-          );
-          return interaction.showModal(modal);
-        }
-        if (id === 's_images') {
-          const sc = getSessionConfig(guildId);
-          const modal = new ModalBuilder().setCustomId('modal_s_images').setTitle('Session Images');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_start_img').setLabel('Start image URL').setStyle(TextInputStyle.Short).setValue(sc.startImage || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_vote_img').setLabel('Vote image URL').setStyle(TextInputStyle.Short).setValue(sc.voteImage || '').setRequired(false)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_shutdown_img').setLabel('Shutdown image URL').setStyle(TextInputStyle.Short).setValue(sc.shutdownImage || '').setRequired(false)),
-          );
-          return interaction.showModal(modal);
-        }
-        if (id === 's_vote_threshold') {
-          const sc = getSessionConfig(guildId);
-          const modal = new ModalBuilder().setCustomId('modal_s_threshold').setTitle('Vote Threshold');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('s_threshold_val').setLabel('Votes needed to auto-start').setStyle(TextInputStyle.Short).setValue(String(sc.voteThreshold ?? 5)).setRequired(true)));
-          return interaction.showModal(modal);
-        }
-      }
-
       // ════ ANNOUNCEMENT SETUP BUTTONS ════
       if (id.startsWith('an_') || id.startsWith('ane__') || id === 'an__back') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ You do not have permission to use setup.', flags: MessageFlags.Ephemeral });
@@ -9980,8 +9662,6 @@ client.on('interactionCreate', async interaction => {
 
       if (interaction.customId === 'ard_add')          { const ar = getAutoroleConfig(guildId); for (const id of ids) { if (!ar.roles.includes(id)) ar.roles.push(id); } await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Autoroles added.`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_ping_roles')     { getTicketConfig(guildId).pingRoles = ids; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Ticket ping roles set.', flags: MessageFlags.Ephemeral }); }
-      if (interaction.customId === 'sd_ping_roles')     { getSessionConfig(guildId).pingRoles = ids; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Session ping roles set.', flags: MessageFlags.Ephemeral }); }
-      if (interaction.customId === 'sd_allowed_roles')  { getSessionConfig(guildId).allowedRoles = ids; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Allowed roles set.', flags: MessageFlags.Ephemeral }); }
       if (interaction.customId.startsWith('anpr__'))    { const typeId = interaction.customId.replace('anpr__', ''); getAnnouncementConfig(guildId).types[typeId].pingRole = ids[0]; await saveGuildConfig(guildId); return interaction.update(buildAnnouncementEditor(guildId, typeId)); }
 
       // Application type accept roles
@@ -10275,7 +9955,6 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'td_rating_public')   { getTicketRatingConfig(guildId).publicChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Public reviews channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_channel')          { getTicketConfig(guildId).ticketChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_category')         { getTicketConfig(guildId).ticketCategory = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Category: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
-      if (interaction.customId === 'sd_channel')          { getSessionConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Session channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'apd_review_channel')  { getApplicationConfig(guildId).reviewChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Global review channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'apd_log_channel')     { getApplicationConfig(guildId).logChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Log channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'apd_transcript_channel') { getApplicationConfig(guildId).transcriptChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Application transcript channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
@@ -10300,14 +9979,6 @@ client.on('interactionCreate', async interaction => {
         cfg.channel = chId;
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
-      }
-
-      // ════ ERLC CHANNEL SELECTS ════
-      if (interaction.customId.startsWith('erlcd_')) {
-        const ec = getErlcLogConfig(guildId);
-        const map = { erlcd_kickbans: 'kickBans', erlcd_joinleave: 'joinLeave', erlcd_cmds: 'cmds', erlcd_modcall: 'modCall', erlcd_kills: 'kills' };
-        const key = map[interaction.customId];
-        if (key) { ec[key] = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral }); }
       }
 
       if (interaction.customId.startsWith('tkt_type_log__')) {
@@ -10814,7 +10485,7 @@ client.on('interactionCreate', async interaction => {
       // Channel selects allowed on non-main, everything else blocked
       const isChannelSelectMenu = [
         'wcd_channel', 'vcd_channel', 'td_transcript', 'td_channel', 'td_category',
-        'sd_channel', 'apd_review_channel', 'apd_log_channel', 'amd_log', 'cntd_category',
+        'apd_review_channel', 'apd_log_channel', 'amd_log', 'cntd_category',
         'cmdlist_channel', 'tr_setup_channel', 'tr_setup_announce_channel',
         'vote_setup_log', 'vote_setup_announce_channel',
       ];
@@ -12674,8 +12345,6 @@ client.on('interactionCreate', async interaction => {
       if (mid === 'modal_t_welcome') { const tc = getTicketConfig(guildId); tc.welcomeText = interaction.fields.getTextInputValue('t_welcome_text').trim(); await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Welcome text saved!', flags: MessageFlags.Ephemeral }); }
       if (mid === 'modal_t_add_type') { const tc = getTicketConfig(guildId); tc.ticketTypes.push({ id: genId(), label: interaction.fields.getTextInputValue('tt_label').trim(), emoji: interaction.fields.getTextInputValue('tt_emoji').trim() || null, color: interaction.fields.getTextInputValue('tt_color').trim() || 'blue', description: interaction.fields.getTextInputValue('tt_description').trim() || null }); await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Ticket type added!`, flags: MessageFlags.Ephemeral }); }
 
-      // ── Session ──
-      if (mid === 'modal_s_joinlink')  { const rawLink = interaction.fields.getTextInputValue('s_link_val').trim(); if (!isValidUrl(rawLink)) return interaction.reply({ content: '❌ Invalid URL.', flags: MessageFlags.Ephemeral }); getSessionConfig(guildId).joinLink = rawLink; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Join link saved!`, flags: MessageFlags.Ephemeral }); }
       if (mid === 'modal_tr_add_type') {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const tc = getTrainingConfig(guildId);
@@ -12740,10 +12409,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.channel.send({ content });
         return interaction.reply({ content: '✅ Message sent!', flags: MessageFlags.Ephemeral });
       }
-
-      if (mid === 'modal_s_desc')      { const sc = getSessionConfig(guildId); const s = interaction.fields.getTextInputValue('s_start_desc').trim(); const v = interaction.fields.getTextInputValue('s_vote_desc').trim(); const sh = interaction.fields.getTextInputValue('s_shutdown_desc').trim(); if (s) sc.startDescription = s; if (v) sc.voteDescription = v; if (sh) sc.shutdownDescription = sh; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Descriptions saved!', flags: MessageFlags.Ephemeral }); }
-      if (mid === 'modal_s_images')    { const sc = getSessionConfig(guildId); const si = interaction.fields.getTextInputValue('s_start_img').trim(); const vi = interaction.fields.getTextInputValue('s_vote_img').trim(); const hi = interaction.fields.getTextInputValue('s_shutdown_img').trim(); if (si) sc.startImage = si; if (vi) sc.voteImage = vi; if (hi) sc.shutdownImage = hi; await saveGuildConfig(guildId); return interaction.reply({ content: '✅ Images saved!', flags: MessageFlags.Ephemeral }); }
-      if (mid === 'modal_s_threshold') { const num = parseInt(interaction.fields.getTextInputValue('s_threshold_val').trim(), 10); if (isNaN(num) || num < 1 || num > 999) return interaction.reply({ content: '❌ Enter a number 1-999.', flags: MessageFlags.Ephemeral }); getSessionConfig(guildId).voteThreshold = num; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Vote threshold: **${num}**.`, flags: MessageFlags.Ephemeral }); }
 
       // ── Announcement ──
       if (mid === 'modal_an_new') {
