@@ -1389,9 +1389,6 @@ async function setDeptValue(guildId, path, value) {
   await saveGuildConfig(guildId);
 }
 
-  }
-}
-
 // ════════════════════════════════════════════
 // COUNTER CONFIG
 // ════════════════════════════════════════════
@@ -2245,20 +2242,11 @@ async function sendPromotionAnnounce(guild, targetUser, roleName, promotedBy, so
   await ch.send({ embeds: [embed] }).catch(() => {});
 }
 
-function canRunSession(member, guildId) {
-  if (hasSetup(member)) return true;
-  if (hasSHR(member)) return true;
-  const sc = getSessionConfig(guildId);
-  if (!sc.allowedRoles?.length) return hasAnyStaff(member);
-  return sc.allowedRoles.some(id => member.roles.cache.has(id));
-}
-
 const openTickets        = new Map();
 const freeEmbedTargets = new Map(); // scope -> { channelId, guildId } (for /embed command)
 const ticketRulesPending = new Map(); // userId → { typeId, guildId, intakeAnswers? }
 const ticketIntakeData   = new Map(); // userId → intakeAnswers[] — bewaard tot ticket aangemaakt is
 const srPendingRoleAdd = new Map();
-const activeVotes      = new Map();
 const pendingCloseReqs = new Map();
 const pendingAnnounceChannel = new Map();
 const pendingSendMsgChannel  = new Map();
@@ -3388,30 +3376,6 @@ function buildTicketSetupPayload(guildId) {
   );
   return { embeds: [embed], components: [r1, r2, r3], flags: MessageFlags.Ephemeral };
 }
-function buildSessionSetupPayload(guildId) {
-  const sc = getSessionConfig(guildId);
-  const embed = new EmbedBuilder().setTitle('🎮 Session System Setup').setColor(0x57F287)
-    .setDescription('**Variables:** `{host}` `{hostMention}` `{time}` `{date}` `{memberCount}` `{server}`')
-    .addFields(
-      { name: '📢 Channel',      value: sc.channel ? `<#${sc.channel}>` : '*Not set*', inline: true },
-      { name: '👥 Ping Roles',   value: sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔑 Allowed',      value: sc.allowedRoles?.length ? sc.allowedRoles.map(id => `<@&${id}>`).join(', ') : '*Not set*', inline: true },
-      { name: '🔗 Join Link',    value: sc.joinLink ?? '*Not set*', inline: false },
-      { name: '🗳️ Vote Threshold', value: `**${sc.voteThreshold ?? 5}** votes needed`, inline: true },
-    );
-  const r1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('s_channel').setLabel('Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-    new ButtonBuilder().setCustomId('s_ping_roles').setLabel('Ping Roles').setStyle(ButtonStyle.Primary).setEmoji('👥'),
-    new ButtonBuilder().setCustomId('s_allowed_roles').setLabel('Allowed Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
-    new ButtonBuilder().setCustomId('s_join_link').setLabel('Join Link').setStyle(ButtonStyle.Primary).setEmoji('🔗'),
-  );
-  const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('s_descriptions').setLabel('Descriptions').setStyle(ButtonStyle.Primary).setEmoji('📝'),
-    new ButtonBuilder().setCustomId('s_images').setLabel('Images').setStyle(ButtonStyle.Primary).setEmoji('🖼️'),
-    new ButtonBuilder().setCustomId('s_vote_threshold').setLabel('Vote Threshold').setStyle(ButtonStyle.Primary).setEmoji('🗳️'),
-  );
-  return { embeds: [embed], components: [r1, r2], flags: MessageFlags.Ephemeral };
-}
 function buildAnnouncementOverview(guildId) {
   const ac = getAnnouncementConfig(guildId);
   const types = Object.entries(ac.types);
@@ -3482,23 +3446,6 @@ async function deploySelfRolePanel(guild, panelId, panel) {
   }
   const msg = await channel.send({ embeds: [embed], components: rows }); panel.messageId = msg.id;
 }
-async function postSessionStart(guild, sc, hostUser, rawLink, vars, voterMentions = null) {
-  const sCh = guild.channels.cache.get(sc.channel);
-  if (!sCh) throw new Error('Session channel not found');
-  const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-  const desc = replaceVars(sc.startDescription ?? '{hostMention} has started a session! Join using the button below.', vars);
-  const embed = new EmbedBuilder().setTitle('🟢 Session Started!').setColor(0x57F287).setDescription(embedSafe.desc(desc)).setTimestamp().setFooter({ text: embedSafe.footer(`By ${userDisplay(hostUser)}`) });
-  if (sc.startImage) embed.setImage(sc.startImage);
-  const comps = [];
-  if (isValidUrl(rawLink)) comps.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('🚀 Join Session').setStyle(ButtonStyle.Link).setURL(rawLink.trim())));
-
-  // Bouw content: ping roles + voters (als ze er zijn)
-  const parts = [];
-  if (ping) parts.push(ping);
-  if (voterMentions) parts.push(`🗳️ **Voters:** ${voterMentions}`);
-  const content = parts.length ? parts.join('\n') : undefined;
-
-  await sCh.send({ content, embeds: [embed], components: comps });
 }
 
 // ════════════════════════════════════════════
