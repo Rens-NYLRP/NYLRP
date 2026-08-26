@@ -1097,19 +1097,6 @@ async function broadcastVoteSuccess(question, voteId) {
   }
 }
 
-function getLOAConfig(guildId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.loa) gc.loa = {
-    approvalRoles: [],
-    loaRole: null,
-    logChannel: null,
-    prefix: '[LOA]',
-    requiredApprovals: 1,
-    active: {},
-  };
-  return gc.loa;
-}
-
 function getBirthdayConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.birthdays) gc.birthdays = {
@@ -1515,11 +1502,6 @@ function buildCommandListEmbed(guildId) {
     section('📋 Applications', [
       '`/setup applications` — Configure applications · **Setup Role**',
     ]),
-    section('🟢 Sessions', [
-      '`/session start` — Start a session · **Staff**',
-      '`/session vote` — Start a vote · **Staff**',
-      '`/session shutdown` — End a session · **Staff**',
-    ]),
     section('🎓 Training', [
       '`/trainrequest` — Request a trainer · **Trial Staff**',
     ]),
@@ -1889,10 +1871,6 @@ function buildDepartmentSetupPayload(guildId) {
       { name: '📋 Transcript',              value: fmtFb(gc.ticket?.transcriptChannel, mc.ticket?.transcriptChannel), inline: true },
       { name: '📁 Category',               value: fmtFb(gc.ticket?.ticketCategory, mc.ticket?.ticketCategory),        inline: true },
       { name: '📢 Ping Roles',             value: fmtRFb(gc.ticket?.pingRoles, mc.ticket?.pingRoles),                 inline: true },
-      { name: '━━━ 🎮 Sessions ━━━',      value: '\u200b', inline: false },
-      { name: '📢 Session Channel',         value: fmtFb(gc.session?.channel, mc.session?.channel),                   inline: true },
-      { name: '👥 Ping Roles',             value: fmtRFb(gc.session?.pingRoles, mc.session?.pingRoles),               inline: true },
-      { name: '🔑 Allowed Roles',          value: fmtRFb(gc.session?.allowedRoles, mc.session?.allowedRoles),         inline: true },
       { name: '━━━ 👋 Welcomer ━━━',      value: '\u200b', inline: false },
       { name: '📢 Welcome Channel',         value: fmtFb(gc.welcomer?.channel, mc.welcomer?.channel),                 inline: true },
       { name: '✅ Enabled',                value: gc.welcomer?.enabled ? 'Ja' : mc.welcomer?.enabled ? 'Ja *(main)*' : 'Nee', inline: true },
@@ -1907,15 +1885,11 @@ function buildDepartmentSetupPayload(guildId) {
       { name: '📣 Announce Channel',        value: fmtFb(gc.training?.announceChannel, mc.training?.announceChannel), inline: true },
       { name: '🔑 Trainer Roles',           value: fmtRFb(gc.training?.trainerRoles, mc.training?.trainerRoles),     inline: true },
       { name: '📋 Request Roles',           value: fmtRFb(gc.training?.requestRoles, mc.training?.requestRoles),      inline: true },
-      { name: '━━━ 🏖️ LOA ━━━',           value: '\u200b', inline: false },
-      { name: '🎭 LOA Role',                value: gc.loa?.loaRole ? `<@&${gc.loa.loaRole}>` : mc.loa?.loaRole ? `<@&${mc.loa.loaRole}> *(main)*` : '*Not configured*', inline: true },
     );
 
   const embed2 = new EmbedBuilder()
     .setColor(0x5865F2)
     .addFields(
-      { name: '🔑 Approval Roles',         value: fmtRFb(gc.loa?.approvalRoles, mc.loa?.approvalRoles),             inline: true },
-      { name: '📋 Log Channel',             value: fmtFb(gc.loa?.logChannel, mc.loa?.logChannel),                    inline: true },
       { name: '━━━ 🎭 Autorole ━━━',      value: '\u200b', inline: false },
       { name: '✅ Enabled',                value: gc.autorole?.enabled ? 'Ja' : mc.autorole?.enabled ? 'Ja *(main)*' : 'Nee', inline: true },
       { name: '🎭 Roles',                  value: fmtRFb(gc.autorole?.roles, mc.autorole?.roles),                    inline: true },
@@ -1947,9 +1921,6 @@ function buildDepartmentSetupPayload(guildId) {
     new ButtonBuilder().setCustomId('dept_setup__training_roles').setLabel('Training Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
   );
   const r4 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dept_setup__loa_role').setLabel('LOA Role').setStyle(ButtonStyle.Secondary).setEmoji('🏖️'),
-    new ButtonBuilder().setCustomId('dept_setup__loa_approval_roles').setLabel('LOA Approvals').setStyle(ButtonStyle.Secondary).setEmoji('🔑'),
-    new ButtonBuilder().setCustomId('dept_setup__loa_log').setLabel('LOA Log').setStyle(ButtonStyle.Secondary).setEmoji('📋'),
     new ButtonBuilder().setCustomId('dept_setup__autorole').setLabel('Autorole').setStyle(ButtonStyle.Secondary).setEmoji('🎭'),
     new ButtonBuilder().setCustomId('dept_setup__perms').setLabel('Permissions').setStyle(ButtonStyle.Secondary).setEmoji('👑'),
   );
@@ -1967,7 +1938,6 @@ function isChannelSelectButton(id) {
   ];
   if (channelBtns.includes(id)) return true;
   if (id.startsWith('hb__set_channel__')) return true;
-  if (id.startsWith('loa__')) return true;
   if (id.startsWith('appe__set_channel__')) return true;
   if (id.startsWith('appe__set_review_channel__')) return true;
   if (id.startsWith('apte__set_review_channel__')) return true;
@@ -2085,24 +2055,6 @@ async function _syncChainPrefixUnsafe(member, guildId) {
     // basis of the nickname. If there is no verification, use the Discord username.
     const vc = getVerificationConfig(guildId);
     const robloxName = vc?.verifiedUsers?.[fresh.user.id]?.robloxUsername ?? fresh.user.username;
-
-    // ── LOA PRIORITY ──
-    // If the member currently has the LOA role, we show: LOA | RANK | RobloxName
-    // (or just LOA | RobloxName if they have no rank prefix)
-    const lc = getLOAConfig(guildId);
-    const isOnLOA = lc.loaRole && fresh.roles.cache.has(lc.loaRole);
-    if (isOnLOA) {
-      const loaPrefix = lc.prefix ?? '[LOA]';
-      const rankPrefix = getExpectedChainPrefix(fresh, cc.chain);
-      const newNick = rankPrefix
-        ? `${loaPrefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
-        : `${loaPrefix} | ${robloxName}`.slice(0, 32);
-      const currentNick = fresh.nickname ?? fresh.user.username;
-      if (newNick !== currentNick) {
-        await fresh.setNickname(newNick, 'LOA prefix sync').catch(() => {});
-      }
-      return; // Don't apply rank prefix without LOA while on LOA
-    }
 
     // Determine which prefix this member should have (highest chain rank)
     const expectedPrefix = getExpectedChainPrefix(fresh, cc.chain);
@@ -3446,7 +3398,6 @@ async function deploySelfRolePanel(guild, panelId, panel) {
   }
   const msg = await channel.send({ embeds: [embed], components: rows }); panel.messageId = msg.id;
 }
-}
 
 // ════════════════════════════════════════════
 // TICKET CREATION HELPER
@@ -3686,43 +3637,6 @@ const commands = [
   { name: 'close', description: 'Close the current ticket (staff only)' },
   { name: 'closerequest', description: 'Request to close this ticket' },
   { name: 'send', description: 'Send a custom message to this channel' },
-  { name: 'session', description: 'Session commands', options: [
-    { name: 'start', type: 1, description: 'Start session', options: [{ name: 'link', type: 3, description: 'Join link override', required: false }] },
-    { name: 'vote', type: 1, description: 'Start vote', options: [{ name: 'votes', type: 4, description: 'Votes needed', required: false }] },
-    { name: 'shutdown', type: 1, description: 'Shutdown session' },
-    { name: 'schedule', type: 1, description: 'Schedule a session for later (everyone sees it in their own timezone)', options: [
-      { name: 'date', type: 3, description: 'Date (DD-MM-YYYY) in your own timezone', required: true },
-      { name: 'time', type: 3, description: 'Time (HH:MM) in your own timezone', required: true },
-      { name: 'timezone', type: 3, description: 'Your timezone', required: true, choices: [
-        { name: 'UTC-12 — Baker Island',                value: '-12' },
-        { name: 'UTC-11 — American Samoa',              value: '-11' },
-        { name: 'UTC-10 — Hawaii',                       value: '-10' },
-        { name: 'UTC-9 — Alaska',                        value: '-9'  },
-        { name: 'UTC-8 — Pacific Time (US/Canada)',      value: '-8'  },
-        { name: 'UTC-7 — Mountain Time (US/Canada)',     value: '-7'  },
-        { name: 'UTC-6 — Central Time (US/Canada)',      value: '-6'  },
-        { name: 'UTC-5 — Eastern Time (US/Canada)',      value: '-5'  },
-        { name: 'UTC-4 — Atlantic Time / Brazil (West)', value: '-4'  },
-        { name: 'UTC-3 — Brazil (Brasília), Argentina',  value: '-3'  },
-        { name: 'UTC-2 — South Georgia',                 value: '-2'  },
-        { name: 'UTC-1 — Azores',                        value: '-1'  },
-        { name: 'UTC+0 — London, Lisbon',                value: '0'   },
-        { name: 'UTC+1 — Amsterdam, Paris, Berlin',      value: '1'   },
-        { name: 'UTC+2 — Athens, Cairo, Johannesburg',   value: '2'   },
-        { name: 'UTC+3 — Moscow, Istanbul, Riyadh',      value: '3'   },
-        { name: 'UTC+4 — Dubai, Baku',                   value: '4'   },
-        { name: 'UTC+5 — Karachi, Tashkent',             value: '5'   },
-        { name: 'UTC+5:30 — India, Sri Lanka',           value: '5.5' },
-        { name: 'UTC+6 — Dhaka, Almaty',                 value: '6'   },
-        { name: 'UTC+7 — Bangkok, Jakarta',              value: '7'   },
-        { name: 'UTC+8 — Beijing, Singapore, Manila',    value: '8'   },
-        { name: 'UTC+9 — Tokyo, Seoul',                  value: '9'   },
-        { name: 'UTC+10 — Sydney, Melbourne',            value: '10'  },
-        { name: 'UTC+12 — Auckland, Fiji',               value: '12'  },
-      ]},
-      { name: 'link', type: 3, description: 'Join link override', required: false },
-    ]},
-  ]},
   { name: 'ban', description: '[SHR] Ban user + delete all messages/threads', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'unban', description: '[SHR] Unban by ID', options: [{ name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
   { name: 'softban', description: '[SHR] Softban user', options: [{ name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false }] },
@@ -3760,11 +3674,6 @@ const commands = [
     { name: 'duration', type: 4, description: 'Duration in minutes (default: 5)', required: false },
   ]},
   
-  { name: 'loa', description: 'Leave of Absence commands', options: [
-    { name: 'request', type: 1, description: 'Submit a LOA request' },
-    { name: 'list', type: 1, description: 'View all active LOAs' },
-    { name: 'end', type: 1, description: '[Staff] End someone\'s LOA early', options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  ]},
   { name: 'birthday', description: 'Birthday system commands', options: [
     { name: 'set',    type: 1, description: 'Set your birthday (SHR: set for someone else)', options: [
       { name: 'month', type: 4, description: 'Birth month', required: true, choices: [
@@ -3848,107 +3757,6 @@ const commands = [
 ];
 // ════════════════════════════════════════════
 // READY
-// ════════════════════════════════════════════
-// ════ LOA EXPIRY CHECK ════
-async function checkLOAExpiry() {
-  if (!dbReady) return;
-  const now = Date.now();
-  for (const [gId, gc] of Object.entries(config)) {
-    const lc = getLOAConfig(gId);
-    if (!lc.active || !Object.keys(lc.active).length) continue;
-    const guild = client.guilds.cache.get(gId);
-    if (!guild) continue;
-    for (const [userId, loa] of Object.entries(lc.active)) {
-      if (userId.startsWith('pending_')) continue; // not approved, scheduler doesn't touch these
-
-      // ── LOA start: apply role/nickname once the start date is reached ──
-      if (!loa.applied && loa.startsAt && now >= loa.startsAt) {
-        try {
-          const member = await guild.members.fetch(userId).catch(() => null);
-          if (member) {
-            if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
-            const prefix = lc.prefix ?? '[LOA]';
-            const vc = getVerificationConfig(gId);
-            const robloxName = vc?.verifiedUsers?.[userId]?.robloxUsername ?? member.user.username;
-            const cc = getChainConfig(gId);
-            const rankPrefix = getExpectedChainPrefix(member, cc.chain);
-            const newNick = rankPrefix
-              ? `${prefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
-              : `${prefix} | ${robloxName}`.slice(0, 32);
-            await member.setNickname(newNick).catch(() => {});
-          }
-          if (lc.logChannel) {
-            const ch = guild.channels.cache.get(lc.logChannel);
-            if (ch) await ch.send({ embeds: [new EmbedBuilder().setTitle('🏖️ LOA Started').setColor(0x5865F2)
-              .addFields({ name: '👤 User', value: `<@${userId}>`, inline: true }, { name: '🔴 Ends', value: `<t:${Math.floor(loa.endsAt/1000)}:R>`, inline: true })
-              .setTimestamp()] }).catch(() => {});
-          }
-          await client.users.fetch(userId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('🏖️ Your LOA has started').setColor(0x5865F2).setDescription(`Your Leave of Absence in **${guild.name}** has started.\n\nEnds: <t:${Math.floor(loa.endsAt/1000)}:R>`).setTimestamp()] })).catch(() => {});
-        } catch {}
-        loa.applied = true;
-      }
-
-      // ── LOA end: restore role/nickname and remove entry ──
-      if (now < loa.endsAt) continue;
-      try {
-        const member = await guild.members.fetch(userId).catch(() => null);
-        if (member) {
-          if (lc.loaRole) await member.roles.remove(lc.loaRole).catch(() => {});
-          // Re-sync rank prefix now that LOA is over (so rank prefix comes back correctly)
-          await syncChainPrefix(member, gId).catch(() => {});
-        }
-        if (lc.logChannel) {
-          const ch = guild.channels.cache.get(lc.logChannel);
-          if (ch) await ch.send({ embeds: [new EmbedBuilder().setTitle('✅ LOA Ended').setColor(0x57F287)
-            .addFields({ name: '👤 User', value: `<@${userId}>`, inline: true }, { name: '📅 Ended', value: new Date().toUTCString(), inline: true })
-            .setTimestamp()] }).catch(() => {});
-        }
-        await client.users.fetch(userId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('✅ Your LOA has ended').setColor(0x57F287).setDescription(`Your Leave of Absence in **${guild.name}** has ended. Welcome back!`).setTimestamp()] })).catch(() => {});
-      } catch {}
-      delete lc.active[userId];
-    }
-    await saveGuildConfig(gId).catch(() => {});
-  }
-}
-
-// ════ SCHEDULED SESSION CHECK ════
-async function checkScheduledSessions() {
-  if (!dbReady) return;
-  const now = Date.now();
-  for (const [gId, gc] of Object.entries(config)) {
-    const sc = gc.session;
-    if (!sc?.scheduled || !Object.keys(sc.scheduled).length) continue;
-    const guild = client.guilds.cache.get(gId);
-    if (!guild) continue;
-
-    for (const [schedId, sched] of Object.entries(sc.scheduled)) {
-      if (sched.fired || now < sched.scheduledAt) continue;
-      try {
-        const ch = guild.channels.cache.get(sched.channelId);
-        const hostUser = await client.users.fetch(sched.hostId).catch(() => ({ tag: 'Unknown', id: sched.hostId, username: 'Unknown' }));
-        const vars = { userMention: `<@${sched.hostId}>`, username: hostUser.username ?? 'Unknown', userTag: userDisplay(hostUser) ?? 'Unknown', memberCount: guild.memberCount.toString(), server: guild.name };
-        const voterMentions = sched.voters.length ? sched.voters.map(id => `<@${id}>`).join(' ') : null;
-
-        await postSessionStart(guild, sc, hostUser, sched.joinLink, vars, voterMentions);
-
-        // Disable the "I'm coming" button on the original message
-        if (ch) {
-          const origMsg = await ch.messages.fetch(sched.messageId).catch(() => null);
-          if (origMsg) {
-            const disabledRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder().setCustomId(`session_sched_vote__${schedId}`).setLabel('Session started!').setStyle(ButtonStyle.Secondary).setDisabled(true),
-            );
-            await origMsg.edit({ components: [disabledRow] }).catch(() => {});
-          }
-        }
-      } catch (e) { console.error('checkScheduledSessions error:', e); }
-      sched.fired = true;
-      delete sc.scheduled[schedId];
-    }
-    await saveGuildConfig(gId).catch(() => {});
-  }
-}
-
 // ════ LOA SETUP PAYLOAD ════
 function buildQOTDSetupPayload(guildId) {
   const qc = getQOTDConfig(guildId);
@@ -4018,30 +3826,6 @@ function buildTicketInactivitySetupPayload(guildId) {
     new ButtonBuilder().setCustomId('tkt_inactivity__dm').setLabel(ic.dmOnClose ? 'Disable DM' : 'Enable DM').setStyle(ic.dmOnClose ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('📩'),
   );
   return { embeds: [embed], components: [r1], flags: MessageFlags.Ephemeral };
-}
-
-function buildLOASetupPayload(guildId) {
-  const lc = getLOAConfig(guildId);
-  const activeList = Object.entries(lc.active).filter(([uid]) => !uid.startsWith('pending_'));
-  const pendingList = Object.entries(lc.active).filter(([uid]) => uid.startsWith('pending_'));
-  const embed = new EmbedBuilder().setTitle('🏖️ Leave of Absence Setup').setColor(0x5865F2)
-    .addFields(
-      { name: '🎭 LOA Role', value: lc.loaRole ? `<@&${lc.loaRole}>` : '*Not set*', inline: true },
-      { name: '🔑 Approval Roles', value: lc.approvalRoles?.length ? lc.approvalRoles.map(r => `<@&${r}>`).join(', ') : '*Not set*', inline: true },
-      { name: '✅ Required Approvals', value: `${lc.requiredApprovals ?? 1}`, inline: true },
-      { name: '📋 Log Channel', value: lc.logChannel ? `<#${lc.logChannel}>` : '*Not set*', inline: true },
-      { name: '🏷️ Prefix', value: `\`${lc.prefix ?? '[LOA]'}\``, inline: true },
-      { name: '📊 Active/Upcoming LOAs', value: activeList.length ? activeList.map(([uid, l]) => `<@${uid}> — 🟢 <t:${Math.floor((l.startsAt ?? 0)/1000)}:D> → 🔴 <t:${Math.floor(l.endsAt/1000)}:D>`).join('\n') : '*None*', inline: false },
-      { name: '⏳ Pending Requests', value: pendingList.length ? `${pendingList.length} awaiting approval` : '*None*', inline: false },
-    );
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('loa__set_role').setLabel('LOA Role').setStyle(ButtonStyle.Primary).setEmoji('🎭'),
-    new ButtonBuilder().setCustomId('loa__set_approval_roles').setLabel('Approval Roles').setStyle(ButtonStyle.Primary).setEmoji('🔑'),
-    new ButtonBuilder().setCustomId('loa__set_approvals').setLabel('Required Approvals').setStyle(ButtonStyle.Primary).setEmoji('✅'),
-    new ButtonBuilder().setCustomId('loa__set_log').setLabel('Log Channel').setStyle(ButtonStyle.Primary).setEmoji('📋'),
-    new ButtonBuilder().setCustomId('loa__set_prefix').setLabel('Prefix').setStyle(ButtonStyle.Primary).setEmoji('🏷️'),
-  );
-  return { embeds: [embed], components: [row], flags: MessageFlags.Ephemeral };
 }
 
 function buildBirthdaySetupPayload(guildId) {
@@ -4162,12 +3946,6 @@ client.once('clientReady', async () => {
   } catch (e) {
     console.error('❌ Failed to restore open tickets:', e.message);
   }
-
-  // ════ LOA EXPIRY CHECK (moved inside clientReady — Part 10c) ════
-  setInterval(() => checkLOAExpiry().catch(console.error), 60_000);
-
-  // ════ SCHEDULED SESSION CHECK ════
-  setInterval(() => checkScheduledSessions().catch(console.error), 30_000);
 
   // ════ STARTUP CLEANUP: oude "On Duty" suffix verwijderen bij iedereen ════
   // This system has been phased out — this scan does a one-time cleanup of leftovers.
@@ -4556,7 +4334,6 @@ client.on('guildCreate', async guild => {
   createDefaultConfig(guild.id);
 
   // Pre-initialize all subsystems so no handler ever hits undefined
-  getSessionConfig(guild.id);
   getTicketConfig(guild.id);
   getAnnouncementConfig(guild.id);
   getSelfRoleConfig(guild.id);
@@ -4573,7 +4350,6 @@ client.on('guildCreate', async guild => {
   getGlobalAnnouncementConfig(guild.id);
   getBotConfig(guild.id);
   getInfractionConfig(guild.id);
-  getLOAConfig(guild.id);
   getQOTDConfig(guild.id);
   getAntipingConfig(guild.id);
   getTicketInactivityConfig(guild.id);
@@ -5942,85 +5718,6 @@ client.on('interactionCreate', async interaction => {
 > **Reason:** ${reason}`, components: [row], flags: MessageFlags.Ephemeral });
         }
       }
-      if (cmd === 'session') {
-        if (!isMainServer(guildId)) return interaction.reply({ content: '❌ Sessions can only be started from the main server.', flags: MessageFlags.Ephemeral });
-        if (!canRunSession(interaction.member, guildId)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
-        const sub = interaction.options.getSubcommand();
-        const sc = getSessionConfig(guildId);
-        if (!sc.channel) return interaction.reply({ content: '❌ Session channel not set.', flags: MessageFlags.Ephemeral });
-        const sCh = interaction.guild.channels.cache.get(sc.channel);
-        if (!sCh) return interaction.reply({ content: '❌ Session channel not found.', flags: MessageFlags.Ephemeral });
-        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const vars = { userMention: `<@${interaction.user.id}>`, username: interaction.user.username, userTag: userDisplay(interaction.user), memberCount: interaction.guild.memberCount.toString(), server: interaction.guild.name };
-        if (sub === 'start') { const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null; try { await postSessionStart(interaction.guild, sc, interaction.user, rawLink, vars); return interaction.editReply({ content: `✅ Session started!` }); } catch (e) { return interaction.editReply({ content: `❌ ${e.message}` }); } }
-        if (sub === 'vote') {
-          const threshold = interaction.options.getInteger('votes') ?? sc.voteThreshold ?? 5;
-          const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-          const embed = new EmbedBuilder().setTitle('🗳️ Session Vote!').setColor(0xFEE75C).setDescription(`${replaceVars(sc.voteDescription ?? '**{host}** wants to host a session!\n\nClick the button below to vote!', vars)}\n\n**Votes: 0/${threshold}**`).setTimestamp().setFooter({ text: `By ${userDisplay(interaction.user)}` });
-          if (sc.voteImage) embed.setImage(sc.voteImage);
-          const voteRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('session__vote').setLabel('Vote ✅').setStyle(ButtonStyle.Success),
-          );
-          const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [voteRow] });
-          activeVotes.set(guildId, { messageId: msg.id, channelId: sCh.id, hostId: interaction.user.id, threshold, joinLink: sc.joinLink ?? null, voters: [] });
-          // Auto-delete vote message after 30 minutes if it didn't pass
-          setTimeout(async () => {
-            if (activeVotes.get(guildId)?.messageId === msg.id) {
-              activeVotes.delete(guildId);
-              await msg.delete().catch(() => {});
-            }
-          }, 30 * 60 * 1000);
-          return interaction.editReply({ content: `✅ Vote posted! Auto-starts at **${threshold}** votes. Deletes in 30 minutes if not reached.` });
-        }
-        if (sub === 'shutdown') {
-          activeVotes.delete(guildId);
-          const embed = new EmbedBuilder().setTitle('🔴 Session Ended!').setColor(0xED4245).setDescription(replaceVars(sc.shutdownDescription ?? 'The session has ended!', vars)).setTimestamp().setFooter({ text: `By ${userDisplay(interaction.user)}` });
-          if (sc.shutdownImage) embed.setImage(sc.shutdownImage);
-          await sCh.send({ embeds: [embed] }); // No ping on shutdown
-          return interaction.editReply({ content: '✅ Shutdown posted!' });
-        }
-        if (sub === 'schedule') {
-          const dateStr = interaction.options.getString('date');
-          const timeStr = interaction.options.getString('time');
-          const tzOffset = parseFloat(interaction.options.getString('timezone'));
-          const rawLink = interaction.options.getString('link') ?? sc.joinLink ?? null;
-
-          const scheduledAt = parseDateTimeUTC(dateStr, timeStr, tzOffset);
-          if (scheduledAt === null) return interaction.editReply({ content: '❌ Invalid date/time. Use `DD-MM-YYYY` and `HH:MM`, e.g. `20-06-2026` and `19:00`.' });
-          if (scheduledAt <= Date.now()) return interaction.editReply({ content: '❌ The scheduled time must be in the future.' });
-
-          const schedId = genId();
-          const ts = Math.floor(scheduledAt / 1000);
-          const ping = sc.pingRoles?.length ? sc.pingRoles.map(id => `<@&${id}>`).join(' ') : null;
-
-          const embed = new EmbedBuilder()
-            .setTitle('🗓️ Session Scheduled!')
-            .setColor(0x5865F2)
-            .setDescription(`${replaceVars(sc.voteDescription ?? '**{host}** has scheduled a session!', vars)}\n\n🕒 **When:** <t:${ts}:F> (<t:${ts}:R>)\n\nClick the button below if you're planning to join — you'll get pinged when the session starts!`)
-            .addFields({ name: `✅ Coming (0)`, value: '*No one yet*', inline: false })
-            .setFooter({ text: `Scheduled by ${userDisplay(interaction.user)}` })
-            .setTimestamp();
-          if (sc.voteImage) embed.setImage(sc.voteImage);
-
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`session_sched_vote__${schedId}`).setLabel("I'm coming ✅").setStyle(ButtonStyle.Success),
-          );
-          const msg = await sCh.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
-
-          sc.scheduled[schedId] = {
-            hostId: interaction.user.id,
-            scheduledAt,
-            joinLink: rawLink,
-            voters: [],
-            messageId: msg.id,
-            channelId: sCh.id,
-            fired: false,
-          };
-          await saveGuildConfig(guildId);
-
-          return interaction.editReply({ content: `✅ Session scheduled for <t:${ts}:F> (<t:${ts}:R>)!` });
-        }
-      }
       if (cmd === 'startvote') {
         const vc = getVoteConfig(guildId);
         if (!vc.mainServer) return interaction.reply({ content: '❌ This server is not configured as a Main Server. Enable it via `/setup votesystem`.', flags: MessageFlags.Ephemeral });
@@ -6402,91 +6099,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ **${userDisplay(targetUser)}** infraction level overridden to **${levelLabel}** (${newLevel}/${maxLevel}).`, flags: MessageFlags.Ephemeral });
       }
 
-      if (cmd === 'loa') {
-        const sub = interaction.options.getSubcommand();
-        const lc = getLOAConfig(guildId);
-
-        if (sub === 'request') {
-          const modal = new ModalBuilder().setCustomId('modal_loa_request').setTitle('Leave of Absence Request');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_reason').setLabel('Reason for LOA').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_start').setLabel('Start date (DD-MM-YYYY)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. 20-06-2026').setRequired(true).setMaxLength(10)),
-            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_end').setLabel('End date (DD-MM-YYYY)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. 27-06-2026').setRequired(true).setMaxLength(10)),
-          );
-          return interaction.showModal(modal);
-        }
-
-        
-          if (sub === 'list') {
-          const active = Object.entries(lc.active).filter(([uid]) => !uid.startsWith('pending_'));
-          if (!active.length) return interaction.reply({ content: '📋 No active or upcoming LOAs.', flags: MessageFlags.Ephemeral });
-
-          // Sorteer op startdatum
-          active.sort((a, b) => (a[1].startsAt ?? 0) - (b[1].startsAt ?? 0));
-
-          const now = Date.now();
-          const oneDay  = 86_400_000;
-          const today   = new Date(); today.setUTCHours(0, 0, 0, 0);
-          const todayTs = today.getTime();
-          // Start of this week (Monday) and next week
-          const dayOfWeek = (today.getUTCDay() + 6) % 7; // 0 = maandag
-          const startOfThisWeek = todayTs - dayOfWeek * oneDay;
-          const startOfNextWeek = startOfThisWeek + 7 * oneDay;
-          const startOfWeekAfter = startOfNextWeek + 7 * oneDay;
-
-          const groups = { ongoing: [], thisWeek: [], nextWeek: [], later: [] };
-          for (const [uid, l] of active) {
-            const starts = l.startsAt ?? 0;
-            if (starts <= now && l.endsAt > now) groups.ongoing.push([uid, l]);
-            else if (starts < startOfNextWeek) groups.thisWeek.push([uid, l]);
-            else if (starts < startOfWeekAfter) groups.nextWeek.push([uid, l]);
-            else groups.later.push([uid, l]);
-          }
-
-          const formatEntry = ([uid, l]) => {
-            const startTs = Math.floor((l.startsAt ?? l.requestedAt ?? now) / 1000);
-            const endTs   = Math.floor(l.endsAt / 1000);
-            return `<@${uid}> — **${l.reason.slice(0, 60)}**\n　🟢 <t:${startTs}:D> → 🔴 <t:${endTs}:D> *(${l.days ?? '?'} day(s))*`;
-          };
-
-          const embed = new EmbedBuilder().setTitle('🏖️ LOA Agenda').setColor(0x5865F2).setTimestamp();
-          const truncField = (entries) => {
-            let value = entries.map(formatEntry).join('\n\n');
-            if (value.length > 1024) value = value.slice(0, 1000) + '\n*…and more*';
-            return value;
-          };
-          if (groups.ongoing.length)  embed.addFields({ name: '🟢 Ongoing',   value: truncField(groups.ongoing),  inline: false });
-          if (groups.thisWeek.length) embed.addFields({ name: '📅 This Week', value: truncField(groups.thisWeek), inline: false });
-          if (groups.nextWeek.length) embed.addFields({ name: '🗓️ Next Week', value: truncField(groups.nextWeek), inline: false });
-          if (groups.later.length)    embed.addFields({ name: '📆 Later',     value: truncField(groups.later),    inline: false });
-
-          return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
-        }
-
-        if (sub === 'end') {
-          if (!hasAnyStaff(interaction.member)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
-          const target = interaction.options.getUser('user');
-          const loaData = lc.active[target.id];
-          if (!loaData) return interaction.reply({ content: `❌ **${userDisplay(target)}** has no active LOA.`, flags: MessageFlags.Ephemeral });
-          const targetMember = interaction.options.getMember('user');
-          if (targetMember) {
-            if (lc.loaRole) await targetMember.roles.remove(lc.loaRole).catch(() => {});
-            // Re-sync rank prefix now that LOA is over
-            await syncChainPrefix(targetMember, guildId).catch(() => {});
-          }
-          delete lc.active[target.id];
-          await saveGuildConfig(guildId);
-          if (lc.logChannel) {
-            const ch = interaction.guild.channels.cache.get(lc.logChannel);
-            if (ch) await ch.send({ embeds: [new EmbedBuilder().setTitle('🛑 LOA Ended Early').setColor(0xED4245)
-              .addFields({ name: '👤 User', value: `<@${target.id}>`, inline: true }, { name: '👮 Ended By', value: userDisplay(interaction.user), inline: true })
-              .setTimestamp()] }).catch(() => {});
-          }
-          await target.send({ embeds: [new EmbedBuilder().setTitle('🛑 LOA Ended Early').setColor(0xED4245).setDescription(`Your LOA in **${interaction.guild.name}** was ended early by **${userDisplay(interaction.user)}**.`).setTimestamp()] }).catch(() => {});
-          return interaction.reply({ content: `✅ LOA for **${userDisplay(target)}** ended.`, flags: MessageFlags.Ephemeral });
-        }
-      }
-
       if (cmd === 'birthday') {
         const sub = interaction.options.getSubcommand();
         const bc = getBirthdayConfig(guildId);
@@ -6617,7 +6229,6 @@ client.on('interactionCreate', async interaction => {
             .setPlaceholder('Select a category to configure... (1/2)')
             .addOptions(
               { label: 'Tickets', value: 'tickets', emoji: '🎫' },
-              { label: 'Sessions', value: 'sessions', emoji: '🎮' },
               { label: 'Staff Review', value: 'staffreview', emoji: '⭐' },
               { label: 'Self Roles', value: 'selfroles', emoji: '🎭' },
               { label: 'Announcements', value: 'announcements', emoji: '📣' },
@@ -6645,7 +6256,6 @@ client.on('interactionCreate', async interaction => {
               { label: 'Bot Config', value: 'botconfig', emoji: '🤖' },
               { label: 'Founder Req', value: 'founderrequest', emoji: '📋' },
               { label: 'Infractions', value: 'infractions', emoji: '⚠️' },
-              { label: 'LOA', value: 'loa', emoji: '🏖️' },
               { label: 'Chain of Command', value: 'chainofcommand', emoji: '⛓️' },
               { label: 'Sticky Messages', value: 'stickymessages', emoji: '📌' },
               { label: 'Ticket Inactivity', value: 'ticketinactivity', emoji: '⏱️' },
@@ -6710,26 +6320,6 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      // ════ LOA SETUP BUTTONS ════
-      if (interaction.customId.startsWith('loa__')) {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
-        const action = interaction.customId.replace('loa__', '');
-        const lc = getLOAConfig(guildId);
-
-        if (action === 'set_role') return interaction.reply({ content: '### 🎭 Select LOA role', components: [roleDropdown('load_role', 'Select role...', 1, 1)], flags: MessageFlags.Ephemeral });
-        if (action === 'set_approval_roles') return interaction.reply({ content: '### 🔑 Select approval roles', components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('load_approval_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
-        if (action === 'set_log') return interaction.reply({ content: '### 📋 Select log channel', components: [channelDropdown('load_log_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
-        if (action === 'set_approvals') {
-          const modal = new ModalBuilder().setCustomId('modal_loa_approvals').setTitle('Required Approvals');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_approvals_count').setLabel('How many approvals required?').setStyle(TextInputStyle.Short).setValue(`${lc.requiredApprovals ?? 1}`).setRequired(true).setMaxLength(2)));
-          return interaction.showModal(modal);
-        }
-        if (action === 'set_prefix') {
-          const modal = new ModalBuilder().setCustomId('modal_loa_prefix').setTitle('LOA Nickname Prefix');
-          modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('loa_prefix_val').setLabel('Prefix (e.g. [LOA])').setStyle(TextInputStyle.Short).setValue(lc.prefix ?? '[LOA]').setRequired(true).setMaxLength(20)));
-          return interaction.showModal(modal);
-        }
-      }
 
       // ════ BIRTHDAY SETUP BUTTONS ════
       if (interaction.customId.startsWith('bday__')) {
@@ -6753,84 +6343,6 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
-      // ════ LOA APPROVE / DENY ════
-      if (interaction.customId.startsWith('loa_approve__') || interaction.customId.startsWith('loa_deny__')) {
-        const parts = interaction.customId.split('__');
-        const action = parts[0] === 'loa_approve' ? 'approve' : 'deny';
-        const targetId = parts[1];
-        const lc = getLOAConfig(guildId);
-        const canVote = lc.approvalRoles?.length
-          ? lc.approvalRoles.some(r => interaction.member.roles.cache.has(r)) || hasSetup(interaction.member)
-          : hasSetup(interaction.member);
-        if (!canVote) return interaction.reply({ content: '❌ You do not have permission to approve or deny LOA requests.', flags: MessageFlags.Ephemeral });
-
-        const embed = interaction.message.embeds[0];
-        const statusField = embed?.fields?.find(f => f.name === '📊 Status');
-        if (statusField?.value !== '⏳ Pending') return interaction.reply({ content: '❌ Already decided.', flags: MessageFlags.Ephemeral });
-
-        const required = lc.requiredApprovals ?? 1;
-        const approvalsField = embed.fields.find(f => f.name?.startsWith('✅ Approvals'));
-        const currentApprovals = approvalsField?.value === '*None yet*' ? [] : (approvalsField?.value?.split('\n') ?? []);
-        if (currentApprovals.some(v => v.includes(interaction.user.id)) && action === 'approve') return interaction.reply({ content: '❌ Already voted.', flags: MessageFlags.Ephemeral });
-
-        if (action === 'approve') currentApprovals.push(`${userDisplay(interaction.user)} (<@${interaction.user.id}>)`);
-        const approved = currentApprovals.length >= required;
-        const newStatus = approved ? '✅ Approved' : action === 'deny' ? '❌ Denied' : '⏳ Pending';
-        const newColor = approved ? 0x57F287 : action === 'deny' ? 0xED4245 : 0x5865F2;
-
-        const updatedEmbed = EmbedBuilder.from(embed)
-          .setColor(newColor)
-          .spliceFields(embed.fields.findIndex(f => f.name?.startsWith('✅ Approvals')), 1, { name: `✅ Approvals (${currentApprovals.length}/${required})`, value: currentApprovals.join('\n') || '*None yet*', inline: false })
-          .spliceFields(embed.fields.findIndex(f => f.name === '📊 Status'), 1, { name: '📊 Status', value: newStatus, inline: false });
-
-        const disabled = approved || action === 'deny';
-        const disabledRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`loa_approve__${targetId}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success).setDisabled(disabled),
-          new ButtonBuilder().setCustomId(`loa_deny__${targetId}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger).setDisabled(disabled),
-        );
-        await interaction.update({ embeds: [updatedEmbed], components: [disabledRow] });
-
-        if (approved) {
-          const loaPending = lc.active[`pending_${targetId}`];
-          if (loaPending) {
-            delete lc.active[`pending_${targetId}`];
-            lc.active[targetId] = loaPending;
-            await saveGuildConfig(guildId);
-
-            const startsNow = (loaPending.startsAt ?? 0) <= Date.now();
-            if (startsNow) {
-              const member = await interaction.guild.members.fetch(targetId).catch(() => null);
-              if (member) {
-                if (lc.loaRole) await member.roles.add(lc.loaRole).catch(() => {});
-                const prefix = lc.prefix ?? '[LOA]';
-                const vc = getVerificationConfig(guildId);
-                const robloxName = vc?.verifiedUsers?.[targetId]?.robloxUsername ?? member.user.username;
-                const cc = getChainConfig(guildId);
-                const rankPrefix = getExpectedChainPrefix(member, cc.chain);
-                const newNick = rankPrefix
-                  ? `${prefix} | ${rankPrefix} | ${robloxName}`.slice(0, 32)
-                  : `${prefix} | ${robloxName}`.slice(0, 32);
-                await member.setNickname(newNick).catch(() => {});
-              }
-              loaPending.applied = true;
-              await saveGuildConfig(guildId);
-            }
-
-            const startLine = startsNow
-              ? `Your LOA in **${interaction.guild.name}** has started and will end <t:${Math.floor(loaPending.endsAt/1000)}:R>.`
-              : `Your LOA in **${interaction.guild.name}** has been **approved**!\n\nStarts: <t:${Math.floor(loaPending.startsAt/1000)}:R>\nEnds: <t:${Math.floor(loaPending.endsAt/1000)}:R>`;
-            await client.users.fetch(targetId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('✅ LOA Approved!').setColor(0x57F287).setDescription(startLine).setTimestamp()] })).catch(() => {});
-          }
-          await interaction.followUp({ content: `✅ LOA approved!` }).catch(() => {});
-        }
-        if (action === 'deny') {
-          delete lc.active[`pending_${targetId}`];
-          await saveGuildConfig(guildId);
-          await client.users.fetch(targetId).then(u => u.send({ embeds: [new EmbedBuilder().setTitle('❌ LOA Denied').setColor(0xED4245).setDescription(`Your LOA request in **${interaction.guild.name}** was denied.`).setTimestamp()] })).catch(() => {});
-          await interaction.followUp({ content: `❌ LOA denied.` }).catch(() => {});
-        }
-        return;
-      }
       const id = interaction.customId;
 
       // Non-main server: block all setup buttons except channel-select buttons
@@ -7006,7 +6518,6 @@ client.on('interactionCreate', async interaction => {
         if (action === 'app_log')               return interaction.reply({ content: '### 📝 App log channel',              components: [channelDropdown('apd_log_channel',           'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'training_channel')      return interaction.reply({ content: '### 🎓 Training request channel',     components: [channelDropdown('tr_setup_channel',          'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'training_announce')     return interaction.reply({ content: '### 📣 Training announce channel',    components: [channelDropdown('tr_setup_announce_channel', 'Select channel...')],                              flags: MessageFlags.Ephemeral });
-        if (action === 'loa_log')               return interaction.reply({ content: '### 📋 LOA log channel',              components: [channelDropdown('load_log_channel',          'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'erlc_kickbans')         return interaction.reply({ content: '### 🔨 ERLC kick/ban channel',        components: [channelDropdown('erlcd_kickbans',            'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'erlc_joinleave')        return interaction.reply({ content: '### 📥 ERLC join/leave channel',      components: [channelDropdown('erlcd_joinleave',           'Select channel...')],                              flags: MessageFlags.Ephemeral });
         if (action === 'erlc_cmds')             return interaction.reply({ content: '### ⌨️ ERLC commands channel',        components: [channelDropdown('erlcd_cmds',                'Select channel...')],                              flags: MessageFlags.Ephemeral });
@@ -7016,8 +6527,6 @@ client.on('interactionCreate', async interaction => {
         // ── Roles ──
         if (action === 'ticket_ping_roles')     return interaction.reply({ content: '### 📢 Ticket ping roles\n*Leave empty to inherit from main server*',     components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('td_ping_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],     flags: MessageFlags.Ephemeral });
         if (action === 'verify_role')           return interaction.reply({ content: '### 🎭 Verified role',                                                      components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('vcd_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],                   flags: MessageFlags.Ephemeral });
-        if (action === 'loa_role')              return interaction.reply({ content: '### 🏖️ LOA role',                                                           components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('load_role').setPlaceholder('Select role...').setMinValues(1).setMaxValues(1))],                    flags: MessageFlags.Ephemeral });
-        if (action === 'loa_approval_roles')    return interaction.reply({ content: '### 🔑 LOA approval roles\n*Leave empty to inherit from main server*',     components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('load_approval_roles').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))], flags: MessageFlags.Ephemeral });
         if (action === 'autorole')              return interaction.reply({ content: '### 🎭 Autoroles\n*Leave empty to inherit from main server*',               components: [new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('ard_add').setPlaceholder('Select roles...').setMinValues(0).setMaxValues(10))],              flags: MessageFlags.Ephemeral });
         if (action === 'training_roles') {
           return interaction.reply({
@@ -7928,7 +7437,6 @@ client.on('interactionCreate', async interaction => {
           staffranks:    () => buildStaffRankSetupPayload(guildId),
           ticketv2types: () => buildTicketV2TypeManagerPayload(guildId),
           tickets:       () => buildTicketSetupPayload(guildId),
-          sessions:      () => buildSessionSetupPayload(guildId),
           selfroles:     () => buildSelfRoleOverview(guildId),
           announcements: () => buildAnnouncementOverview(guildId),
           welcomer:      () => buildWelcomerSetupPayload(guildId),
@@ -7954,7 +7462,6 @@ client.on('interactionCreate', async interaction => {
           dept_overview: () => buildDepartmentSetupPayload(guildId),
           roleping:      () => buildRolePingProtectionSetupPayload(guildId),
           infractions:   () => buildInfractionSetupPayload(guildId),
-          loa:           () => buildLOASetupPayload(guildId),
           qotd:          () => buildQOTDSetupPayload(guildId),
         };
         if (payloadMap[sub]) return interaction.reply(payloadMap[sub]());
@@ -9539,12 +9046,6 @@ client.on('interactionCreate', async interaction => {
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ QOTD ping role set to <@&${interaction.values[0]}>!`, flags: MessageFlags.Ephemeral });
       }
-      if (interaction.customId === 'load_role') {
-        const lc = getLOAConfig(guildId);
-        lc.loaRole = ids[0];
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ LOA role set to <@&${ids[0]}>!`, flags: MessageFlags.Ephemeral });
-      }
       if (interaction.customId === 'bdayd_role') {
         const bc = getBirthdayConfig(guildId);
         bc.pingRole = ids[0] || null;
@@ -9563,12 +9064,6 @@ client.on('interactionCreate', async interaction => {
         lc.levelRoles[lvl] = ids[0];
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Level **${lvl}** role set to <@&${ids[0]}>!`, flags: MessageFlags.Ephemeral });
-      }
-      if (interaction.customId === 'load_approval_roles') {
-        const lc = getLOAConfig(guildId);
-        lc.approvalRoles = ids;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Approval roles set to: ${ids.length ? ids.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
       }
 
       // Infraction level role — allowed everywhere, handle before main server check
@@ -9603,7 +9098,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       // All other role selects: main server only (department servers can still set overrides)
-      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('sd_ping_roles') && !interaction.customId.startsWith('sd_allowed_roles') && !interaction.customId.startsWith('load_role') && !interaction.customId.startsWith('load_approval_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role') && interaction.customId !== 'erlc_inrole_save' && interaction.customId !== 'bdayd_role') {
+      if (!isMainServer(guildId) && !interaction.customId.startsWith('td_ping_roles') && !interaction.customId.startsWith('ard_add') && !interaction.customId.startsWith('tr_setup_trainer_roles') && !interaction.customId.startsWith('vcd_role') && interaction.customId !== 'erlc_inrole_save' && interaction.customId !== 'bdayd_role') {
         return interaction.reply({ content: '❌ Role configuration can only be done on the main server.', flags: MessageFlags.Ephemeral });
       }
 
@@ -9964,13 +9459,6 @@ client.on('interactionCreate', async interaction => {
         hc.panels[panelId].channel = chId;
         await saveGuildConfig(guildId);
         return interaction.reply({ content: `✅ Channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (interaction.customId === 'load_log_channel') {
-        const lc = getLOAConfig(guildId);
-        lc.logChannel = chId;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ LOA log channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral });
       }
 
       if (interaction.customId === 'bdayd_channel') {
@@ -10345,7 +9833,6 @@ client.on('interactionCreate', async interaction => {
         if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
         const payloadMap = {
           tickets:       () => buildTicketSetupPayload(guildId),
-          sessions:      () => buildSessionSetupPayload(guildId),
           selfroles:     () => buildSelfRoleOverview(guildId),
           announcements: () => buildAnnouncementOverview(guildId),
           welcomer:      () => buildWelcomerSetupPayload(guildId),
@@ -10368,7 +9855,6 @@ client.on('interactionCreate', async interaction => {
           departments:   () => buildDepartmentsSetupPayload(guildId),
           votesystem:    () => buildVoteSystemSetupPayload(guildId),
           infractions:   () => buildInfractionSetupPayload(guildId),
-          loa:           () => buildLOASetupPayload(guildId),
           qotd:          () => buildQOTDSetupPayload(guildId),
           roleping:      () => buildRolePingProtectionSetupPayload(guildId),
           botconfig:     () => buildBotConfigSetupPayload(guildId),
@@ -10981,73 +10467,6 @@ client.on('interactionCreate', async interaction => {
         });
       }
 
-      if (mid === 'modal_loa_request') {
-        const lc = getLOAConfig(guildId);
-        const reason = interaction.fields.getTextInputValue('loa_reason').trim();
-        const startRaw = interaction.fields.getTextInputValue('loa_start').trim();
-        const endRaw   = interaction.fields.getTextInputValue('loa_end').trim();
-
-        const startsAt = parseDDMMYYYY(startRaw);
-        const endsAtDay = parseDDMMYYYY(endRaw);
-        if (startsAt === null || endsAtDay === null) return interaction.reply({ content: '❌ Invalid date format. Please use `DD-MM-YYYY`, e.g. `20-06-2026`.', flags: MessageFlags.Ephemeral });
-
-        // End of the end day (23:59:59) so the entire day is included
-        const endsAt = endsAtDay + 86_400_000 - 1;
-
-        const today = new Date(); today.setUTCHours(0, 0, 0, 0);
-        if (startsAt < today.getTime()) return interaction.reply({ content: '❌ Start date cannot be in the past.', flags: MessageFlags.Ephemeral });
-        if (endsAt <= startsAt) return interaction.reply({ content: '❌ End date must be after the start date.', flags: MessageFlags.Ephemeral });
-
-        const totalDays = Math.round((endsAtDay - startsAt) / 86_400_000) + 1;
-        if (totalDays > 60) return interaction.reply({ content: '❌ LOA duration cannot exceed 60 days.', flags: MessageFlags.Ephemeral });
-
-        const reqId = genId();
-        const loaData = { reason, startsAt, endsAt, days: totalDays, originalNickname: interaction.member.nickname ?? null, requestedAt: Date.now(), applied: false };
-        lc.active[`pending_${interaction.user.id}`] = loaData;
-        await saveGuildConfig(guildId);
-        const required = lc.requiredApprovals ?? 1;
-        const embed = new EmbedBuilder()
-          .setTitle('🏖️ LOA Request')
-          .setColor(0x5865F2)
-          .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
-          .addFields(
-            { name: '👤 Requester', value: `${userDisplay(interaction.user)} (<@${interaction.user.id}>)`, inline: true },
-            { name: '📅 Duration', value: `**${totalDays}** day(s)`, inline: true },
-            { name: '🟢 Starts', value: `<t:${Math.floor(startsAt/1000)}:D> (<t:${Math.floor(startsAt/1000)}:R>)`, inline: true },
-            { name: '🔴 Ends', value: `<t:${Math.floor(endsAt/1000)}:D> (<t:${Math.floor(endsAt/1000)}:R>)`, inline: true },
-            { name: '📝 Reason', value: reason, inline: false },
-            { name: `✅ Approvals (0/${required})`, value: '*None yet*', inline: false },
-            { name: '📊 Status', value: '⏳ Pending', inline: false },
-          )
-          .setFooter({ text: `Request ID: ${reqId}` })
-          .setTimestamp();
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`loa_approve__${interaction.user.id}`).setLabel('✅ Approve').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`loa_deny__${interaction.user.id}`).setLabel('❌ Deny').setStyle(ButtonStyle.Danger),
-        );
-        if (lc.logChannel) {
-          const ch = interaction.guild.channels.cache.get(lc.logChannel);
-          const ping = lc.approvalRoles?.length ? lc.approvalRoles.map(r => `<@&${r}>`).join(' ') : null;
-          if (ch) await ch.send({ content: ping ?? undefined, embeds: [embed], components: [row] });
-        }
-        return interaction.reply({ content: `✅ Your LOA request has been submitted! You will be notified when it is reviewed.`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (mid === 'modal_loa_approvals') {
-        const lc = getLOAConfig(guildId);
-        const count = parseInt(interaction.fields.getTextInputValue('loa_approvals_count'), 10);
-        if (isNaN(count) || count < 1 || count > 10) return interaction.reply({ content: '❌ Enter a number between 1 and 10.', flags: MessageFlags.Ephemeral });
-        lc.requiredApprovals = count;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Required approvals set to **${count}**.`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (mid === 'modal_loa_prefix') {
-        const lc = getLOAConfig(guildId);
-        lc.prefix = interaction.fields.getTextInputValue('loa_prefix_val').trim();
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ LOA prefix set to \`${lc.prefix}\`.`, flags: MessageFlags.Ephemeral });
-      }
 
       if (mid === 'modal_bday_message') {
         const bc = getBirthdayConfig(guildId);
