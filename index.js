@@ -655,75 +655,6 @@ function getTicketConfig(guildId) {
   }
   return gc.ticket;
 }
-function getQOTDConfig(guildId) {
-  const gc = getGuildConfig(guildId);
-  if (!gc.qotd) gc.qotd = {};
-  const q = gc.qotd;
-
-  // Core settings
-  if (typeof q.enabled      !== 'boolean') q.enabled      = false;
-  if (!q.channel)                          q.channel      = null;
-  if (!q.time)                             q.time         = '09:00';
-  if (!q.timezone)                         q.timezone     = 'UTC';
-  if (!q.pingRole)                         q.pingRole     = null;
-  if (typeof q.autoGenerate !== 'boolean') q.autoGenerate = false;
-  if (!q.lastPosted)                       q.lastPosted   = null;
-  if (!q.lastQuestion)                     q.lastQuestion = null;
-
-  // Question library — each entry: { id, text, used, createdAt, lastUsedAt, usageCount }
-  if (!Array.isArray(q.library))   q.library   = [];
-  // Shuffle queue — array of ids in randomized order, popped from front
-  if (!Array.isArray(q.queue))     q.queue     = [];
-  // Behavior when all questions used: 'reshuffle' | 'stop'
-  if (!q.onExhaust)                q.onExhaust = 'reshuffle';
-
-  return q;
-}
-
-// Fisher-Yates shuffle
-function shuffleArray(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function buildQOTDQueue(qc) {
-  // Build queue from unused questions, shuffled
-  const unused = qc.library.filter(q => !q.used).map(q => q.id);
-  if (!unused.length) return [];
-  const shuffled = shuffleArray(unused);
-  // Prevent immediate repeat — if last question is first in new queue, move it
-  if (qc.lastQuestion && shuffled[0] === qc.lastQuestion && shuffled.length > 1) {
-    const last = shuffled.shift();
-    shuffled.push(last);
-  }
-  return shuffled;
-}
-
-function getNextQOTDQuestion(qc) {
-  // Ensure queue is populated
-  if (!qc.queue.length) {
-    if (qc.onExhaust === 'stop') return null;
-    // Mark all as unused and rebuild
-    for (const q of qc.library) {
-      q.used = false;
-    }
-    qc.queue = buildQOTDQueue(qc);
-    if (!qc.queue.length) return null;
-  }
-  const id = qc.queue.shift();
-  const question = qc.library.find(q => q.id === id);
-  if (!question) return getNextQOTDQuestion(qc); // skip deleted
-  // Mark as used
-  question.used      = true;
-  question.lastUsedAt = new Date().toISOString();
-  question.usageCount = (question.usageCount ?? 0) + 1;
-  return question;
-}
-
 function getTicketInactivityConfig(guildId) {
   const gc = getGuildConfig(guildId);
   if (!gc.ticketInactivity) gc.ticketInactivity = {
@@ -999,80 +930,6 @@ async function logTicketAction(guild, guildId, action, data = {}) {
     if (data.extra)     embed.addFields({ name: 'ℹ️ Info',       value: embedSafe.fieldVal(data.extra),     inline: false });
     await ch.send({ embeds: [embed] }).catch(() => {});
   } catch {}
-}
-
-async function postQOTD(guild, guildId, force = false) {
-  const qc = getQOTDConfig(guildId);
-  if (!qc.enabled && !force) return;
-  if (!qc.channel) throw new Error('No QOTD channel set.');
-
-  const ch = guild.channels.cache.get(qc.channel);
-  if (!ch) throw new Error('QOTD channel not found.');
-
-  const today = new Date().toISOString().slice(0, 10);
-  if (!force && qc.lastPosted === today) return;
-
-  let questionText = null;
-
-  if (qc.autoGenerate) {
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 150,
-          messages: [{
-            role: 'user',
-            content: `Generate ONE fun, engaging "Question of the Day" for a Discord community server called "${guild.name}". Make it conversational, interesting and suitable for all ages. Return ONLY the question itself, nothing else.`,
-          }],
-        }),
-      });
-      if (!res.ok) {
-        console.error('QOTD AI generation HTTP error:', res.status, await res.text().catch(() => ''));
-      } else {
-        const data = await res.json();
-        questionText = data.content?.[0]?.text?.trim() ?? null;
-      }
-    } catch (e) {
-      console.error('QOTD AI generation error:', e);
-    }
-  }
-
-  // Use library queue if no AI question
-  if (!questionText) {
-    const entry = getNextQOTDQuestion(qc);
-    if (!entry) throw new Error(qc.onExhaust === 'stop' ? 'All questions have been used. Reset usage to continue.' : 'No questions available.');
-    questionText      = entry.text;
-    qc.lastQuestion   = entry.id;
-  }
-
-  const unusedCount = qc.library.filter(q => !q.used).length;
-  const totalCount  = qc.library.length;
-
-  const embed = new EmbedBuilder()
-    .setTitle('❓ Question of the Day')
-    .setDescription(embedSafe.desc(`**${questionText}**`))
-    .setColor(0xEB459E)
-    .setFooter({ text: `${new Date().toDateString()} • ${unusedCount} questions remaining` })
-    .setTimestamp();
-
-  const ping = qc.pingRole ? `<@&${qc.pingRole}>` : null;
-  const msg = await ch.send({ content: ping ?? undefined, embeds: [embed] });
-
-  try {
-    await msg.startThread({
-      name: `QOTD ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
-      autoArchiveDuration: 1440,
-    });
-  } catch {}
-
-  qc.lastPosted   = today;
-  await saveGuildConfig(guildId);
 }
 
 async function broadcastVoteSuccess(question, voteId) {
@@ -3758,54 +3615,6 @@ const commands = [
 // ════════════════════════════════════════════
 // READY
 // ════ LOA SETUP PAYLOAD ════
-function buildQOTDSetupPayload(guildId) {
-  const qc = getQOTDConfig(guildId);
-  const total    = qc.library.length;
-  const used     = qc.library.filter(q => q.used).length;
-  const unused   = total - used;
-  const inQueue  = qc.queue.length;
-
-  const embed = new EmbedBuilder()
-    .setTitle('❓ Question of the Day Setup')
-    .setColor(0xEB459E)
-    .setDescription('Post a daily question automatically at a set time.\n\n**Library Stats:**')
-    .addFields(
-      { name: '✅ Enabled',        value: qc.enabled ? 'Yes' : 'No',                                  inline: true },
-      { name: '📢 Channel',        value: qc.channel ? `<#${qc.channel}>` : '*Not set*',               inline: true },
-      { name: '⏰ Time (UTC)',     value: `\`${qc.time ?? '09:00'}\``,                                  inline: true },
-      { name: '🔔 Ping Role',      value: qc.pingRole ? `<@&${qc.pingRole}>` : '*None*',                inline: true },
-      { name: '🤖 Auto-Generate',  value: qc.autoGenerate ? '✅ AI' : '❌ Manual',                     inline: true },
-      { name: '🔁 On Exhaust',     value: qc.onExhaust === 'stop' ? '🛑 Stop' : '🔄 Reshuffle',       inline: true },
-      { name: '📚 Total',          value: `${total}`,                                                    inline: true },
-      { name: '✅ Unused',         value: `${unused}`,                                                   inline: true },
-      { name: '📋 Queue',          value: `${inQueue} in queue`,                                         inline: true },
-      { name: '📅 Last Posted',    value: qc.lastPosted ?? '*Never*',                                    inline: true },
-      { name: '💬 Last Question',  value: qc.lastQuestion ? qc.library.find(q => q.id === qc.lastQuestion)?.text?.slice(0, 50) ?? '*Unknown*' : '*None*', inline: false },
-    );
-
-  const r1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('qotd__toggle').setLabel(qc.enabled ? 'Disable' : 'Enable').setStyle(qc.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji(qc.enabled ? '🔴' : '🟢'),
-    new ButtonBuilder().setCustomId('qotd__channel').setLabel('Channel').setStyle(ButtonStyle.Primary).setEmoji('📢'),
-    new ButtonBuilder().setCustomId('qotd__time').setLabel('Time').setStyle(ButtonStyle.Primary).setEmoji('⏰'),
-    new ButtonBuilder().setCustomId('qotd__pingrole').setLabel('Ping Role').setStyle(ButtonStyle.Primary).setEmoji('🔔'),
-    new ButtonBuilder().setCustomId('qotd__exhaust').setLabel(qc.onExhaust === 'stop' ? 'Set: Reshuffle' : 'Set: Stop').setStyle(ButtonStyle.Secondary).setEmoji('🔁'),
-  );
-  const r2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('qotd__add_question').setLabel('Add One').setStyle(ButtonStyle.Success).setEmoji('➕'),
-    new ButtonBuilder().setCustomId('qotd__bulk_import').setLabel('Bulk Import').setStyle(ButtonStyle.Success).setEmoji('📥'),
-    new ButtonBuilder().setCustomId('qotd__shuffle').setLabel('Shuffle Queue').setStyle(ButtonStyle.Primary).setEmoji('🔀'),
-    new ButtonBuilder().setCustomId('qotd__reset_usage').setLabel('Reset Usage').setStyle(ButtonStyle.Secondary).setEmoji('🔄'),
-    new ButtonBuilder().setCustomId('qotd__post_now').setLabel('Post Now').setStyle(ButtonStyle.Success).setEmoji('🚀'),
-  );
-  const r3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('qotd__view_questions').setLabel('View Questions').setStyle(ButtonStyle.Primary).setEmoji('📋'),
-    new ButtonBuilder().setCustomId('qotd__remove_dupes').setLabel('Remove Duplicates').setStyle(ButtonStyle.Secondary).setEmoji('🧹'),
-    new ButtonBuilder().setCustomId('qotd__export').setLabel('Export').setStyle(ButtonStyle.Secondary).setEmoji('📤'),
-    new ButtonBuilder().setCustomId('qotd__clear_questions').setLabel('Delete All').setStyle(ButtonStyle.Danger).setEmoji('🗑️'),
-    new ButtonBuilder().setCustomId('qotd__autogenerate').setLabel(qc.autoGenerate ? 'Disable AI' : 'Enable AI').setStyle(qc.autoGenerate ? ButtonStyle.Danger : ButtonStyle.Secondary).setEmoji('🤖'),
-  );
-  return { embeds: [embed], components: [r1, r2, r3], flags: MessageFlags.Ephemeral };
-}
 
 function buildTicketInactivitySetupPayload(guildId) {
   const ic = getTicketInactivityConfig(guildId);
@@ -4076,25 +3885,6 @@ client.once('clientReady', async () => {
   setTimeout(runInGameRoleSweep, 20_000); // 20s delay, na de chain prefix sweep
   setInterval(runInGameRoleSweep, 5 * 60_000); // then every 5 minutes as a safety net
 
-  // ════ QOTD DAILY SCHEDULER ════
-  // Check every minute if it's time to post QOTD
-  setInterval(async () => {
-    if (!dbReady) return;
-    const now = new Date();
-    const currentTime = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
-    const today = now.toISOString().slice(0, 10);
-
-    for (const guild of client.guilds.cache.values()) {
-      try {
-        const qc = getQOTDConfig(guild.id);
-        if (!qc.enabled) continue;
-        if (qc.lastPosted === today) continue;
-        if (currentTime !== qc.time) continue;
-        await postQOTD(guild, guild.id).catch(e => console.error(`QOTD error [${guild.name}]:`, e));
-      } catch { /* skip guild */ }
-    }
-  }, 60_000);
-
   // ════ BIRTHDAY DAILY SCHEDULER ════
   // Check every minute (at a fixed time of 09:00 UTC) for birthdays today
   setInterval(async () => {
@@ -4350,7 +4140,6 @@ client.on('guildCreate', async guild => {
   getGlobalAnnouncementConfig(guild.id);
   getBotConfig(guild.id);
   getInfractionConfig(guild.id);
-  getQOTDConfig(guild.id);
   getAntipingConfig(guild.id);
   getTicketInactivityConfig(guild.id);
   getTicketV2Config(guild.id);
@@ -6984,133 +6773,6 @@ client.on('interactionCreate', async interaction => {
         }
       }
 
-      // ════ QOTD SETUP BUTTONS ════
-      if (id.startsWith('qotd__')) {
-        if (!hasSetup(interaction.member)) return interaction.reply({ content: '❌ No permission.', flags: MessageFlags.Ephemeral });
-        const qc = getQOTDConfig(guildId);
-        const action = id.replace('qotd__', '');
-
-        if (action === 'toggle') {
-          qc.enabled = !qc.enabled;
-          await saveGuildConfig(guildId);
-          return interaction.update(buildQOTDSetupPayload(guildId));
-        }
-        if (action === 'channel') {
-          return interaction.reply({ content: '### 📢 Select QOTD channel', components: [channelDropdown('qotd_channel', 'Select channel...')], flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'pingrole') {
-          return interaction.reply({ content: '### 🔔 Select ping role for QOTD', components: [roleDropdown('qotd_pingrole', 'Select role...', 1, 1)], flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'autogenerate') {
-          qc.autoGenerate = !qc.autoGenerate;
-          await saveGuildConfig(guildId);
-          return interaction.update(buildQOTDSetupPayload(guildId));
-        }
-        if (action === 'exhaust') {
-          qc.onExhaust = qc.onExhaust === 'stop' ? 'reshuffle' : 'stop';
-          await saveGuildConfig(guildId);
-          return interaction.update(buildQOTDSetupPayload(guildId));
-        }
-        if (action === 'shuffle') {
-          qc.queue = buildQOTDQueue(qc);
-          await saveGuildConfig(guildId);
-          return interaction.reply({ content: `✅ Queue shuffled! **${qc.queue.length}** questions in queue.`, flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'reset_usage') {
-          for (const q of qc.library) q.used = false;
-          qc.queue = buildQOTDQueue(qc);
-          await saveGuildConfig(guildId);
-          return interaction.reply({ content: `✅ Usage reset! All **${qc.library.length}** questions marked as unused and queue rebuilt.`, flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'remove_dupes') {
-          const seen = new Set();
-          const before = qc.library.length;
-          qc.library = qc.library.filter(q => {
-            const key = q.text.toLowerCase().trim();
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-          const removed = before - qc.library.length;
-          qc.queue = buildQOTDQueue(qc);
-          await saveGuildConfig(guildId);
-          return interaction.reply({ content: `✅ Removed **${removed}** duplicate(s). Library now has **${qc.library.length}** questions.`, flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'export') {
-          if (!qc.library.length) return interaction.reply({ content: '❌ No questions to export.', flags: MessageFlags.Ephemeral });
-          const text = qc.library.map(q => q.text).join('\n');
-          // Send as file attachment
-          const buffer = Buffer.from(text, 'utf8');
-          const file = new AttachmentBuilder(buffer, { name: `qotd-${guildId}-${Date.now()}.txt` });
-          return interaction.reply({ content: `✅ Exported **${qc.library.length}** questions.`, files: [file], flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'time') {
-          const modal = new ModalBuilder().setCustomId('modal_qotd_time').setTitle('Set QOTD Time');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder().setCustomId('qotd_time').setLabel('Time in UTC (HH:MM, e.g. 09:00)').setStyle(TextInputStyle.Short).setValue(qc.time ?? '09:00').setRequired(true).setMaxLength(5)
-            )
-          );
-          return interaction.showModal(modal);
-        }
-        if (action === 'add_question') {
-          const modal = new ModalBuilder().setCustomId('modal_qotd_add').setTitle('Add Question');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder().setCustomId('qotd_question').setLabel('Question').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500).setPlaceholder('What is your favorite memory in this server?')
-            )
-          );
-          return interaction.showModal(modal);
-        }
-        if (action === 'bulk_import') {
-          const modal = new ModalBuilder()
-            .setCustomId('modal_qotd_bulk')
-            .setTitle('Bulk Import');
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId('qotd_bulk')
-                .setLabel('Questions — one per line')
-                .setStyle(TextInputStyle.Paragraph)
-                .setRequired(true)
-                .setMaxLength(4000)
-                .setPlaceholder('What is your favorite game?\nIf you could have any superpower?')
-            ),
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId('qotd_dedup')
-                .setLabel('Remove duplicates? (yes / no)')
-                .setStyle(TextInputStyle.Short)
-                .setRequired(true)
-                .setMaxLength(3)
-                .setValue('yes')
-            ),
-          );
-          return interaction.showModal(modal);
-        }
-        if (action === 'view_questions') {
-          if (!qc.library.length) return interaction.reply({ content: '❌ No questions in library.', flags: MessageFlags.Ephemeral });
-          const page1 = qc.library.slice(0, 25);
-          const list  = page1.map((q, i) => `**${i+1}.** ${q.used ? '~~' : ''}${q.text.slice(0, 70)}${q.used ? '~~' : ''}`).join('\n');
-          const more  = qc.library.length > 25 ? `\n\n*...and ${qc.library.length - 25} more*` : '';
-          return interaction.reply({ content: `### 📋 QOTD Library (${qc.library.length} total, ${qc.library.filter(q=>!q.used).length} unused)\n${list}${more}`, flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'clear_questions') {
-          qc.library = [];
-          qc.queue   = [];
-          await saveGuildConfig(guildId);
-          return interaction.reply({ content: '✅ All questions deleted.', flags: MessageFlags.Ephemeral });
-        }
-        if (action === 'post_now') {
-          await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-          try {
-            await postQOTD(interaction.guild, guildId, true);
-            return interaction.editReply({ content: '✅ QOTD posted!' });
-          } catch (e) {
-            return interaction.editReply({ content: `❌ ${e.message}` });
-          }
-        }
-      }
 
       // ════ TICKET INACTIVITY BUTTONS ════
       if (id.startsWith('tkt_inactivity__')) {
@@ -7462,7 +7124,6 @@ client.on('interactionCreate', async interaction => {
           dept_overview: () => buildDepartmentSetupPayload(guildId),
           roleping:      () => buildRolePingProtectionSetupPayload(guildId),
           infractions:   () => buildInfractionSetupPayload(guildId),
-          qotd:          () => buildQOTDSetupPayload(guildId),
         };
         if (payloadMap[sub]) return interaction.reply(payloadMap[sub]());
       }
@@ -9040,12 +8701,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: `✅ Foundership roles set: ${interaction.values.length ? interaction.values.map(r => `<@&${r}>`).join(', ') : '*None*'}`, flags: MessageFlags.Ephemeral });
       }
 
-      if (interaction.customId === 'qotd_pingrole') {
-        const qc = getQOTDConfig(guildId);
-        qc.pingRole = interaction.values[0] ?? null;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ QOTD ping role set to <@&${interaction.values[0]}>!`, flags: MessageFlags.Ephemeral });
-      }
       if (interaction.customId === 'bdayd_role') {
         const bc = getBirthdayConfig(guildId);
         bc.pingRole = ids[0] || null;
@@ -9393,7 +9048,6 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'vcd_channel')         { getVerificationConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Verification channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_transcript')       { getTicketConfig(guildId).transcriptChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Transcript: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_rating_channel')  { getTicketRatingConfig(guildId).logChannel    = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Staff rating log channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
-      if (interaction.customId === 'qotd_channel')       { getQOTDConfig(guildId).channel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ QOTD channel set to <#${chId}>!`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_rating_public')   { getTicketRatingConfig(guildId).publicChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Public reviews channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_channel')          { getTicketConfig(guildId).ticketChannel = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Panel channel: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
       if (interaction.customId === 'td_category')         { getTicketConfig(guildId).ticketCategory = chId; await saveGuildConfig(guildId); return interaction.reply({ content: `✅ Category: <#${chId}>`, flags: MessageFlags.Ephemeral }); }
@@ -9855,7 +9509,6 @@ client.on('interactionCreate', async interaction => {
           departments:   () => buildDepartmentsSetupPayload(guildId),
           votesystem:    () => buildVoteSystemSetupPayload(guildId),
           infractions:   () => buildInfractionSetupPayload(guildId),
-          qotd:          () => buildQOTDSetupPayload(guildId),
           roleping:      () => buildRolePingProtectionSetupPayload(guildId),
           botconfig:     () => buildBotConfigSetupPayload(guildId),
           chainofcommand:() => buildChainSetupPayload(guildId),
@@ -11465,101 +11118,6 @@ client.on('interactionCreate', async interaction => {
         return;
       }
 
-      if (mid === 'modal_qotd_time') {
-        const qc = getQOTDConfig(guildId);
-        const time = interaction.fields.getTextInputValue('qotd_time').trim();
-        if (!/^\d{2}:\d{2}$/.test(time)) return interaction.reply({ content: '❌ Invalid format. Use HH:MM (e.g. 09:00).', flags: MessageFlags.Ephemeral });
-        const [h, m] = time.split(':').map(Number);
-        if (h > 23 || m > 59) return interaction.reply({ content: '❌ Invalid time.', flags: MessageFlags.Ephemeral });
-        qc.time = time;
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ QOTD time set to **${time} UTC**.`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (mid === 'modal_qotd_add') {
-        const qc   = getQOTDConfig(guildId);
-        const text = interaction.fields.getTextInputValue('qotd_question').trim();
-        if (!text) return interaction.reply({ content: '❌ Question cannot be empty.', flags: MessageFlags.Ephemeral });
-        const entry = { id: genId(), text, used: false, createdAt: new Date().toISOString(), lastUsedAt: null, usageCount: 0 };
-        qc.library.push(entry);
-        qc.queue.push(entry.id);
-        await saveGuildConfig(guildId);
-        return interaction.reply({ content: `✅ Question added! Library now has **${qc.library.length}** question(s).`, flags: MessageFlags.Ephemeral });
-      }
-
-      if (mid === 'modal_qotd_bulk') {
-        const resolvedGuildId = guildId ?? interaction.guildId;
-        if (!resolvedGuildId) return interaction.reply({ content: '❌ Could not determine server.', flags: MessageFlags.Ephemeral });
-        const qc = getQOTDConfig(resolvedGuildId);
-
-        let raw = '';
-        let dedupRaw = 'yes';
-        try { raw = interaction.fields.getTextInputValue('qotd_bulk') ?? ''; } catch {}
-        try { dedupRaw = interaction.fields.getTextInputValue('qotd_dedup')?.trim().toLowerCase() ?? 'yes'; } catch {}
-
-        const dedup = dedupRaw !== 'no';
-
-        const lines = raw.split('\n')
-          .map(l => l.trim())
-          .filter(l => l.length > 0 && l.length <= 500);
-
-        if (!lines.length) {
-          return interaction.reply({ content: '❌ No valid questions found. Make sure each question is on its own line.', flags: MessageFlags.Ephemeral });
-        }
-
-        const existingTexts = new Set(qc.library.map(q => q.text.toLowerCase().trim()));
-        let duplicatesInImport = 0;
-        let duplicatesAgainstLibrary = 0;
-        const seen = new Set();
-        const toAdd = [];
-
-        for (const line of lines) {
-          const key = line.toLowerCase();
-          if (dedup && seen.has(key)) { duplicatesInImport++; continue; }
-          seen.add(key);
-          if (dedup && existingTexts.has(key)) { duplicatesAgainstLibrary++; continue; }
-          toAdd.push(line);
-        }
-
-        if (!toAdd.length) {
-          return interaction.reply({
-            content: [
-              `❌ No new questions to add.`,
-              `**Detected:** ${lines.length}`,
-              duplicatesInImport       ? `**Duplicates in import:** ${duplicatesInImport}` : '',
-              duplicatesAgainstLibrary ? `**Already in library:** ${duplicatesAgainstLibrary}` : '',
-            ].filter(Boolean).join('\n'),
-            flags: MessageFlags.Ephemeral,
-          });
-        }
-
-        const now = new Date().toISOString();
-        const newEntries = toAdd.map(text => ({
-          id: genId(), text, used: false, createdAt: now, lastUsedAt: null, usageCount: 0,
-        }));
-        qc.library.push(...newEntries);
-
-        const newIds      = shuffleArray(newEntries.map(e => e.id));
-        const insertPoint = Math.floor(Math.random() * (qc.queue.length + 1));
-        qc.queue.splice(insertPoint, 0, ...newIds);
-
-        await saveGuildConfig(resolvedGuildId);
-
-        return interaction.reply({
-          content: [
-            `✅ **Bulk import complete!**`,
-            ``,
-            `📥 **Detected:** ${lines.length}`,
-            `✅ **Added:** ${toAdd.length}`,
-            duplicatesInImport       ? `🔁 **Duplicates in import:** ${duplicatesInImport}` : '',
-            duplicatesAgainstLibrary ? `📚 **Already in library:** ${duplicatesAgainstLibrary}` : '',
-            ``,
-            `📚 **Total:** ${qc.library.length} | **Queue:** ${qc.queue.length} | **Unused:** ${qc.library.filter(q => !q.used).length}`,
-          ].filter(Boolean).join('\n'),
-          flags: MessageFlags.Ephemeral,
-        });
-      }
-
       if (mid === 'modal_tkt_inactivity') {
         const ic = getTicketInactivityConfig(guildId);
         const warnRaw  = parseInt(interaction.fields.getTextInputValue('warn_minutes').trim(), 10);
@@ -11938,9 +11496,6 @@ app.listen(PORT, '0.0.0.0', () => {
   if (!process.env.TOKEN) {
     console.error('❌ FATAL: TOKEN environment variable is not set.');
     process.exit(1);
-  }
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn('⚠️ ANTHROPIC_API_KEY not set — QOTD AI generation will fall back to the question library.');
   }
   await connectDB();
   await client.login(process.env.TOKEN);
