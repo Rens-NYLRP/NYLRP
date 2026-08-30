@@ -36,9 +36,11 @@ const guildConfigSchema = new mongoose.Schema({
     panelTitle:        { type: String, default: '🎫 Support Tickets' },
     panelDescription:  { type: String, default: 'Need help? Click the button below (or pick a category) to open a ticket.' },
     panelColor:        { type: String, default: '#5865F2' },
+    panelImage:        { type: String, default: null },
+    panelThumbnail:    { type: String, default: null },
     types: {
-      type: [{ id: String, label: String, emoji: String, description: String }],
-      default: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help' }],
+      type: [{ id: String, label: String, emoji: String, description: String, image: String, thumbnail: String }],
+      default: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null }],
     },
     nextNumber: { type: Number, default: 1 },
   },
@@ -130,7 +132,9 @@ function defaultConfig(guildId) {
       panelTitle: '🎫 Support Tickets',
       panelDescription: 'Need help? Click the button below (or pick a category) to open a ticket.',
       panelColor: '#5865F2',
-      types: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help' }],
+      panelImage: null,
+      panelThumbnail: null,
+      types: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null }],
       nextNumber: 1,
     },
     moderation: { modRoleIds: [], modLogChannelId: null },
@@ -165,6 +169,16 @@ function hexToInt(hex) {
   const cleaned = String(hex).trim().replace(/^#/, '');
   const n = parseInt(cleaned, 16);
   return Number.isNaN(n) ? 0x5865F2 : n;
+}
+
+function isValidUrl(str) {
+  if (!str) return false;
+  try {
+    const u = new URL(str);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 function isAdmin(member) {
@@ -266,6 +280,8 @@ async function sendOrUpdatePanel(interaction, channel, cfg, guildId) {
     .setTitle(cfg.tickets.panelTitle)
     .setDescription(cfg.tickets.panelDescription)
     .setColor(hexToInt(cfg.tickets.panelColor));
+  if (isValidUrl(cfg.tickets.panelImage)) embed.setImage(cfg.tickets.panelImage);
+  if (isValidUrl(cfg.tickets.panelThumbnail)) embed.setThumbnail(cfg.tickets.panelThumbnail);
   const payload = { embeds: [embed], components: buildPanelComponents(cfg) };
   const msg = await channel.send(payload);
   cfg.tickets.panelChannelId = channel.id;
@@ -323,6 +339,8 @@ async function createTicketChannel(interaction, typeId, cfg) {
     .setColor(hexToInt(cfg.tickets.panelColor))
     .setTimestamp()
     .setFooter({ text: `Opened by ${userDisplay(user)}` });
+  if (isValidUrl(type.image)) welcomeEmbed.setImage(type.image);
+  if (isValidUrl(type.thumbnail)) welcomeEmbed.setThumbnail(type.thumbnail);
 
   const pingContent = cfg.tickets.supportRoleIds.length
     ? `<@${user.id}>${cfg.tickets.supportRoleIds.map(id => ` <@&${id}>`).join('')}`
@@ -414,6 +432,8 @@ const commands = [
       { name: 'label',       type: 3, description: 'Type label (e.g. "Billing Support")', required: true },
       { name: 'emoji',       type: 3, description: 'Emoji for the button/select option', required: false },
       { name: 'description', type: 3, description: 'Short description', required: false },
+      { name: 'image',       type: 3, description: 'Image URL shown in this type\'s ticket welcome embed', required: false },
+      { name: 'thumbnail',   type: 3, description: 'Thumbnail URL shown in this type\'s ticket welcome embed', required: false },
     ]},
     { name: 'removetype',  type: 1, description: 'Remove a ticket type by label', options: [
       { name: 'label', type: 3, description: 'Type label to remove', required: true },
@@ -424,6 +444,8 @@ const commands = [
       { name: 'title',       type: 3, description: 'Panel title', required: false },
       { name: 'description', type: 3, description: 'Panel description', required: false },
       { name: 'color',       type: 3, description: 'Hex color, e.g. #5865F2', required: false },
+      { name: 'image',       type: 3, description: 'Image URL for the panel embed', required: false },
+      { name: 'thumbnail',   type: 3, description: 'Thumbnail URL for the panel embed', required: false },
     ]},
   ]},
 
@@ -637,10 +659,14 @@ client.on('interactionCreate', async (interaction) => {
         const label = interaction.options.getString('label');
         const emoji = interaction.options.getString('emoji') || '🎫';
         const description = interaction.options.getString('description') || '';
+        const image = interaction.options.getString('image') || null;
+        const thumbnail = interaction.options.getString('thumbnail') || null;
+        if (image && !isValidUrl(image)) return interaction.reply({ content: '❌ Invalid image URL. Must start with `https://`.', flags: MessageFlags.Ephemeral });
+        if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ Invalid thumbnail URL. Must start with `https://`.', flags: MessageFlags.Ephemeral });
         const id = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || `type${Date.now()}`;
-        cfg.tickets.types.push({ id, label, emoji, description });
+        cfg.tickets.types.push({ id, label, emoji, description, image, thumbnail });
         await saveConfig(guildId);
-        return interaction.reply({ content: `✅ Ticket type **${label}** added.`, flags: MessageFlags.Ephemeral });
+        return interaction.reply({ content: `✅ Ticket type **${label}** added${image ? ' (with image)' : ''}.`, flags: MessageFlags.Ephemeral });
       }
       if (sub === 'removetype') {
         const label = interaction.options.getString('label').toLowerCase();
@@ -651,14 +677,20 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `✅ Ticket type removed.`, flags: MessageFlags.Ephemeral });
       }
       if (sub === 'listtypes') {
-        const list = cfg.tickets.types.map(t => `${t.emoji || '🎫'} **${t.label}** — ${t.description || '*no description*'}`).join('\n') || '*No types configured.*';
+        const list = cfg.tickets.types.map(t => `${t.emoji || '🎫'} **${t.label}** — ${t.description || '*no description*'}${t.image ? ' 🖼️' : ''}`).join('\n') || '*No types configured.*';
         return interaction.reply({ content: list, flags: MessageFlags.Ephemeral });
       }
       if (sub === 'panel') {
         const channel = interaction.options.getChannel('channel');
+        const image = interaction.options.getString('image');
+        const thumbnail = interaction.options.getString('thumbnail');
+        if (image && !isValidUrl(image)) return interaction.reply({ content: '❌ Invalid image URL. Must start with `https://`.', flags: MessageFlags.Ephemeral });
+        if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ Invalid thumbnail URL. Must start with `https://`.', flags: MessageFlags.Ephemeral });
         if (interaction.options.getString('title')) cfg.tickets.panelTitle = interaction.options.getString('title');
         if (interaction.options.getString('description')) cfg.tickets.panelDescription = interaction.options.getString('description');
         if (interaction.options.getString('color')) cfg.tickets.panelColor = interaction.options.getString('color');
+        if (image) cfg.tickets.panelImage = image;
+        if (thumbnail) cfg.tickets.panelThumbnail = thumbnail;
         await saveConfig(guildId);
         await sendOrUpdatePanel(interaction, channel, cfg, guildId);
         return interaction.reply({ content: `✅ Ticket panel sent to <#${channel.id}>.`, flags: MessageFlags.Ephemeral });
