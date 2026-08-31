@@ -6,7 +6,7 @@ const {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
   ChannelType, PermissionFlagsBits, StringSelectMenuBuilder,
   AttachmentBuilder, MessageFlags, ModalBuilder, TextInputBuilder,
-  TextInputStyle, RoleSelectMenuBuilder,
+  TextInputStyle, RoleSelectMenuBuilder, ChannelSelectMenuBuilder,
 } = require('discord.js');
 
 // ════════════════════════════════════════════
@@ -40,8 +40,12 @@ const guildConfigSchema = new mongoose.Schema({
     panelImage:        { type: String, default: null },
     panelThumbnail:    { type: String, default: null },
     types: {
-      type: [{ id: String, label: String, emoji: String, description: String, image: String, thumbnail: String }],
-      default: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null }],
+      type: [{
+        id: String, label: String, emoji: String, description: String, image: String, thumbnail: String,
+        supportRoleIds: { type: [String], default: [] },
+        requireReason: { type: Boolean, default: false },
+      }],
+      default: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null, supportRoleIds: [], requireReason: false }],
     },
     nextNumber: { type: Number, default: 1 },
   },
@@ -75,6 +79,9 @@ const ticketSchema = new mongoose.Schema({
   staffMembers: { type: [String], default: [] },
   priority:     { type: String, enum: ['low', 'normal', 'high', 'urgent'], default: 'normal' },
   notes:        { type: [{ authorId: String, text: String, createdAt: Date }], default: [] },
+  reason:       { type: String, default: null },
+  rating:       { type: Number, default: null },
+  ratingFeedback: { type: String, default: null },
   createdAt:    { type: Date, default: Date.now },
   closedAt:     { type: Date, default: null },
   archivedAt:   { type: Date, default: null },
@@ -166,7 +173,7 @@ function defaultConfig(guildId) {
       panelColor: '#5865F2',
       panelImage: null,
       panelThumbnail: null,
-      types: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null }],
+      types: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null, supportRoleIds: [], requireReason: false }],
       nextNumber: 1,
     },
     moderation: { modRoleIds: [], modLogChannelId: null },
@@ -223,9 +230,19 @@ function isAdmin(member) {
   return member.permissions.has(PermissionFlagsBits.Administrator) || member.permissions.has(PermissionFlagsBits.ManageGuild);
 }
 
-function isTicketStaff(member, cfg) {
+function isTicketStaff(member, cfg, ticket = null) {
   if (isAdmin(member)) return true;
-  return cfg.tickets.supportRoleIds.some(rid => member.roles.cache.has(rid));
+  if (cfg.tickets.supportRoleIds.some(rid => member.roles.cache.has(rid))) return true;
+  if (ticket) {
+    const type = cfg.tickets.types.find(t => t.id === ticket.typeId);
+    if (type?.supportRoleIds?.length && type.supportRoleIds.some(rid => member.roles.cache.has(rid))) return true;
+  }
+  return false;
+}
+
+// Resolve which support roles apply for a given ticket type (type-specific overrides, falling back to global)
+function resolveSupportRoleIds(cfg, type) {
+  return (type?.supportRoleIds && type.supportRoleIds.length) ? type.supportRoleIds : cfg.tickets.supportRoleIds;
 }
 
 function isModerator(member, cfg) {
@@ -340,10 +357,10 @@ async function sendOrUpdatePanel(interaction, channel, cfg, guildId) {
   return msg;
 }
 
-async function createTicketChannel(interaction, typeId, cfg) {
+async function createTicketChannel(interaction, typeId, cfg, reason = null) {
   const guild = interaction.guild;
   const user = interaction.user;
-  const type = cfg.tickets.types.find(t => t.id === typeId) ?? { id: typeId, label: 'Support', emoji: '🎫' };
+  const type = cfg.tickets.types.find(t => t.id === typeId) ?? { id: typeId, label: 'Support', emoji: '🎫', supportRoleIds: [] };
 
   // Prevent duplicate open tickets of the same type for this user
   const existing = await TicketModel.findOne({ guildId: guild.id, creatorId: user.id, status: 'open' });
@@ -353,11 +370,12 @@ async function createTicketChannel(interaction, typeId, cfg) {
   }
 
   const category = cfg.tickets.categoryId ? guild.channels.cache.get(cfg.tickets.categoryId) : null;
+  const roleIdsForType = resolveSupportRoleIds(cfg, type);
   const perms = [
     { id: guild.roles.everyone, deny: [PermissionFlagsBits.ViewChannel] },
     { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
   ];
-  for (const rid of cfg.tickets.supportRoleIds) {
+  for (const rid of roleIdsForType) {
     perms.push({ id: rid, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageMessages] });
   }
 
@@ -381,6 +399,7 @@ async function createTicketChannel(interaction, typeId, cfg) {
     typeId: type.id,
     typeLabel: type.label,
     staffMembers: [],
+    reason: reason || null,
   }).catch(() => {});
 
   const welcomeEmbed = new EmbedBuilder()
@@ -389,11 +408,12 @@ async function createTicketChannel(interaction, typeId, cfg) {
     .setColor(hexToInt(cfg.tickets.panelColor))
     .setTimestamp()
     .setFooter({ text: `Opened by ${userDisplay(user)}` });
+  if (reason) welcomeEmbed.addFields({ name: '📝 Reason', value: reason.slice(0, 1024) });
   if (isValidUrl(type.image)) welcomeEmbed.setImage(type.image);
   if (isValidUrl(type.thumbnail)) welcomeEmbed.setThumbnail(type.thumbnail);
 
-  const pingContent = cfg.tickets.supportRoleIds.length
-    ? `<@${user.id}>${cfg.tickets.supportRoleIds.map(id => ` <@&${id}>`).join('')}`
+  const pingContent = roleIdsForType.length
+    ? `<@${user.id}>${roleIdsForType.map(id => ` <@&${id}>`).join('')}`
     : `<@${user.id}>`;
 
   await ticketCh.send({ content: pingContent, embeds: [welcomeEmbed], components: [buildTicketControlRow(false)] });
@@ -452,9 +472,13 @@ async function closeTicket(interaction, ticket, cfg, reason) {
 
   const creator = await guild.members.fetch(ticket.creatorId).catch(() => null);
   if (creator) {
+    const ratingRow = new ActionRowBuilder().addComponents(
+      [1, 2, 3, 4, 5].map(n => new ButtonBuilder().setCustomId(`tkt__rate__${ticket._id}__${n}`).setLabel('⭐'.repeat(n)).setStyle(ButtonStyle.Secondary)),
+    );
     await safeDM(creator.user, {
-      content: `Your ticket in **${guild.name}** was closed.`,
+      content: `Your ticket in **${guild.name}** was closed.\n\n**How would you rate the support you received?**`,
       files: [attachment],
+      components: [ratingRow],
     }).catch(() => {});
   }
 }
@@ -510,11 +534,429 @@ function buildTrainingButtons(requesterId, typeId, disabled = false) {
 }
 
 // ════════════════════════════════════════════
+// GUI /setup MENU — views & dispatcher
+// ════════════════════════════════════════════
+function buildSetupHomeEmbed() {
+  return new EmbedBuilder()
+    .setTitle('⚙️ Server Setup')
+    .setColor(0x5865F2)
+    .setDescription('Pick a category below to configure. Every selection saves instantly.');
+}
+function buildSetupHomeComponents() {
+  return [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
+  )];
+}
+
+function buildTicketsSetupView(cfg) {
+  const t = cfg.tickets;
+  const embed = new EmbedBuilder()
+    .setTitle('🎫 Ticket Setup')
+    .setColor(hexToInt(t.panelColor))
+    .setDescription('Use the menus below to configure the ticket system.')
+    .addFields(
+      { name: 'Category', value: t.categoryId ? `<#${t.categoryId}>` : '*not set*', inline: true },
+      { name: 'Log Channel', value: t.logChannelId ? `<#${t.logChannelId}>` : '*not set*', inline: true },
+      { name: 'Global Support Roles', value: t.supportRoleIds.length ? t.supportRoleIds.map(r => `<@&${r}>`).join(' ') : '*none*', inline: false },
+      { name: 'Panel', value: `**${t.panelTitle}**\n${t.panelDescription}`, inline: false },
+      { name: 'Types', value: t.types.length ? t.types.map(x => `${x.emoji || '🎫'} ${x.label}`).join(', ') : '*none*', inline: false },
+    );
+  const rowCategory = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('setup__tk_category').setPlaceholder('📁 Select the ticket category').addChannelTypes(ChannelType.GuildCategory),
+  );
+  const rowLog = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('setup__tk_logchannel').setPlaceholder('📜 Select the log channel').addChannelTypes(ChannelType.GuildText),
+  );
+  const rowRoles = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId('setup__tk_supportroles').setPlaceholder('🛡️ Select global support roles').setMinValues(0).setMaxValues(25),
+  );
+  const rowSendPanel = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('setup__tk_sendpanel').setPlaceholder('📤 Select a channel to send/update the panel').addChannelTypes(ChannelType.GuildText),
+  );
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__tk_panelmodal').setLabel('Panel Text/Color').setEmoji('🎨').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__tk_types').setLabel('Manage Types').setEmoji('📋').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowCategory, rowLog, rowRoles, rowSendPanel, rowButtons] };
+}
+
+function buildTicketTypesView(cfg) {
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Ticket Types')
+    .setColor(0x5865F2)
+    .setDescription(cfg.tickets.types.length
+      ? cfg.tickets.types.map(t => `${t.emoji || '🎫'} **${t.label}**${t.requireReason ? ' 📝' : ''} — ${t.description || '*no description*'}${t.supportRoleIds?.length ? `\nRoles: ${t.supportRoleIds.map(r => `<@&${r}>`).join(' ')}` : ''}`).join('\n\n')
+      : '*No types configured yet.*');
+  const components = [];
+  if (cfg.tickets.types.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('setup__tk_type_select').setPlaceholder('Select a type to edit...')
+        .addOptions(cfg.tickets.types.slice(0, 25).map(t => ({ label: t.label.slice(0, 100), value: t.id, emoji: t.emoji || undefined }))),
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__tk_type_add').setLabel('Add Type').setEmoji('➕').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  ));
+  return { embeds: [embed], components };
+}
+
+function buildTicketTypeDetailView(cfg, typeId) {
+  const t = cfg.tickets.types.find(x => x.id === typeId);
+  if (!t) return null;
+  const embed = new EmbedBuilder()
+    .setTitle(`${t.emoji || '🎫'} ${t.label}`)
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'Description', value: t.description || '*none*' },
+      { name: 'Support Roles', value: t.supportRoleIds?.length ? t.supportRoleIds.map(r => `<@&${r}>`).join(' ') : '*uses global roles*' },
+      { name: 'Require Reason on Open', value: t.requireReason ? '✅ Yes' : '❌ No' },
+    );
+  const rowRoles = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId(`setup__tk_type_roles__${typeId}`).setPlaceholder('🛡️ Type-specific support roles (optional)').setMinValues(0).setMaxValues(25),
+  );
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`setup__tk_type_editmodal__${typeId}`).setLabel('Edit Details').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`setup__tk_type_togglereason__${typeId}`).setLabel(t.requireReason ? 'Disable Reason' : 'Require Reason').setEmoji('📝').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`setup__tk_type_remove__${typeId}`).setLabel('Remove').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('setup__tk_types').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowRoles, rowButtons] };
+}
+
+function buildModerationSetupView(cfg) {
+  const embed = new EmbedBuilder()
+    .setTitle('🛡️ Moderation Setup')
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'Moderator Roles', value: cfg.moderation.modRoleIds.length ? cfg.moderation.modRoleIds.map(r => `<@&${r}>`).join(' ') : '*none (admins only)*' },
+      { name: 'Mod Log Channel', value: cfg.moderation.modLogChannelId ? `<#${cfg.moderation.modLogChannelId}>` : '*not set*' },
+    );
+  const rowRoles = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId('setup__mod_roles').setPlaceholder('🛡️ Select moderator roles').setMinValues(0).setMaxValues(25),
+  );
+  const rowLog = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('setup__mod_logchannel').setPlaceholder('📜 Select mod-log channel').addChannelTypes(ChannelType.GuildText),
+  );
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowRoles, rowLog, rowButtons] };
+}
+
+function buildTrainingSetupView(cfg) {
+  const t = cfg.training;
+  const embed = new EmbedBuilder()
+    .setTitle('🎓 Training Setup')
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'Request Channel', value: t.channel ? `<#${t.channel}>` : '*not set*', inline: true },
+      { name: 'Announce Channel', value: t.announceChannel ? `<#${t.announceChannel}>` : '*not set*', inline: true },
+      { name: 'Trainer Roles', value: t.trainerRoles.length ? t.trainerRoles.map(r => `<@&${r}>`).join(' ') : '*admins only*' },
+      { name: 'Request Roles', value: t.requestRoles.length ? t.requestRoles.map(r => `<@&${r}>`).join(' ') : '*everyone*' },
+      { name: 'Ping Roles', value: t.pingRoles.length ? t.pingRoles.map(r => `<@&${r}>`).join(' ') : '*none*' },
+      { name: 'Types', value: t.types.length ? t.types.map(x => x.name).join(', ') : '*none (general requests only)*' },
+    );
+  const rowChannel = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__tr_channel').setPlaceholder('📥 Select request channel').addChannelTypes(ChannelType.GuildText));
+  const rowAnnounce = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__tr_announce').setPlaceholder('📢 Select announce channel').addChannelTypes(ChannelType.GuildText));
+  const rowTrainer = new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__tr_trainerroles').setPlaceholder('🎓 Select trainer roles').setMinValues(0).setMaxValues(25));
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__tr_pingroles_open').setLabel('Ping Roles').setEmoji('📌').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__tr_requestroles_open').setLabel('Request Roles').setEmoji('🙋').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__tr_types').setLabel('Manage Types').setEmoji('📋').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowChannel, rowAnnounce, rowTrainer, rowButtons] };
+}
+
+function buildTrainingRolesSubView(cfg, kind) {
+  const isPing = kind === 'ping';
+  const embed = new EmbedBuilder()
+    .setTitle(isPing ? '📌 Ping Roles' : '🙋 Request Roles')
+    .setColor(0x5865F2)
+    .setDescription(isPing ? 'Roles pinged when a new training request is posted.' : 'Roles allowed to use `/trainrequest`. Leave empty to allow everyone.');
+  const row = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId(isPing ? 'setup__tr_pingroles' : 'setup__tr_requestroles').setMinValues(0).setMaxValues(25).setPlaceholder('Select roles'),
+  );
+  const rowButtons = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__training').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary));
+  return { embeds: [embed], components: [row, rowButtons] };
+}
+
+function buildTrainingTypesView(cfg) {
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Training Types')
+    .setColor(0x5865F2)
+    .setDescription(cfg.training.types.length
+      ? cfg.training.types.map(t => `🎓 **${t.name}**${t.roleIds.length ? ` — grants ${t.roleIds.map(r => `<@&${r}>`).join(' ')}` : ''}`).join('\n')
+      : '*No types configured — general requests only.*');
+  const components = [];
+  if (cfg.training.types.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('setup__tr_type_select').setPlaceholder('Select a type to edit...')
+        .addOptions(cfg.training.types.slice(0, 25).map(t => ({ label: t.name.slice(0, 100), value: t.id }))),
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__tr_type_add').setLabel('Add Type').setEmoji('➕').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__home__training').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  ));
+  return { embeds: [embed], components };
+}
+
+function buildTrainingTypeDetailView(cfg, typeId) {
+  const t = cfg.training.types.find(x => x.id === typeId);
+  if (!t) return null;
+  const embed = new EmbedBuilder()
+    .setTitle(`🎓 ${t.name}`)
+    .setColor(0x5865F2)
+    .addFields({ name: 'Granted Roles on Pass', value: t.roleIds.length ? t.roleIds.map(r => `<@&${r}>`).join(' ') : '*none*' });
+  const rowRoles = new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__tr_type_roles__${typeId}`).setPlaceholder('🎁 Select granted roles').setMinValues(0).setMaxValues(25));
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`setup__tr_type_rename__${typeId}`).setLabel('Rename').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`setup__tr_type_remove__${typeId}`).setLabel('Remove').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('setup__tr_types').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowRoles, rowButtons] };
+}
+
+async function handleSetupInteraction(interaction, cfg, guildId) {
+  const id = interaction.customId;
+
+  // ── Home / section landing pages ──
+  if (interaction.isButton() && id === 'setup__home') return interaction.update({ embeds: [buildSetupHomeEmbed()], components: buildSetupHomeComponents() });
+  if (interaction.isButton() && id === 'setup__home__tickets') return interaction.update(buildTicketsSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__moderation') return interaction.update(buildModerationSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__training') return interaction.update(buildTrainingSetupView(cfg));
+
+  // ── Tickets: channel/role selects ──
+  if (interaction.isChannelSelectMenu() && id === 'setup__tk_category') {
+    cfg.tickets.categoryId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildTicketsSetupView(cfg));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__tk_logchannel') {
+    cfg.tickets.logChannelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildTicketsSetupView(cfg));
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__tk_supportroles') {
+    cfg.tickets.supportRoleIds = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildTicketsSetupView(cfg));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__tk_sendpanel') {
+    const channel = interaction.guild.channels.cache.get(interaction.values[0]);
+    await interaction.deferUpdate().catch(() => {});
+    if (channel) await sendOrUpdatePanel(interaction, channel, cfg, guildId).catch(() => {});
+    return interaction.editReply(buildTicketsSetupView(cfg)).catch(() => {});
+  }
+  if (interaction.isButton() && id === 'setup__tk_panelmodal') {
+    const modal = new ModalBuilder().setCustomId('setup__tk_panelmodal_submit').setTitle('Ticket Panel Settings');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('Panel Title').setStyle(TextInputStyle.Short).setValue(cfg.tickets.panelTitle).setRequired(true).setMaxLength(256)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Panel Description').setStyle(TextInputStyle.Paragraph).setValue(cfg.tickets.panelDescription).setRequired(true).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('color').setLabel('Hex Color (e.g. #5865F2)').setStyle(TextInputStyle.Short).setValue(cfg.tickets.panelColor).setRequired(false).setMaxLength(7)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(cfg.tickets.panelImage || '').setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumbnail').setLabel('Thumbnail URL (optional)').setStyle(TextInputStyle.Short).setValue(cfg.tickets.panelThumbnail || '').setRequired(false)),
+    );
+    return interaction.showModal(modal);
+  }
+
+  // ── Tickets: type management ──
+  if (interaction.isButton() && id === 'setup__tk_types') return interaction.update(buildTicketTypesView(cfg));
+  if (interaction.isStringSelectMenu() && id === 'setup__tk_type_select') {
+    return interaction.update(buildTicketTypeDetailView(cfg, interaction.values[0]) || buildTicketTypesView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__tk_type_add') {
+    const modal = new ModalBuilder().setCustomId('setup__tk_type_add_submit').setTitle('Add Ticket Type');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('label').setLabel('Label (e.g. Billing Support)').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(10)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(200)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumbnail').setLabel('Thumbnail URL (optional)').setStyle(TextInputStyle.Short).setRequired(false)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (interaction.isButton() && id.startsWith('setup__tk_type_editmodal__')) {
+    const typeId = id.replace('setup__tk_type_editmodal__', '');
+    const t = cfg.tickets.types.find(x => x.id === typeId);
+    if (!t) return interaction.update(buildTicketTypesView(cfg));
+    const modal = new ModalBuilder().setCustomId(`setup__tk_type_edit_submit__${typeId}`).setTitle('Edit Ticket Type');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('label').setLabel('Label').setStyle(TextInputStyle.Short).setValue(t.label).setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('emoji').setLabel('Emoji (optional)').setStyle(TextInputStyle.Short).setValue(t.emoji || '').setRequired(false).setMaxLength(10)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Description (optional)').setStyle(TextInputStyle.Paragraph).setValue(t.description || '').setRequired(false).setMaxLength(200)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(t.image || '').setRequired(false)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumbnail').setLabel('Thumbnail URL (optional)').setStyle(TextInputStyle.Short).setValue(t.thumbnail || '').setRequired(false)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__tk_type_roles__')) {
+    const typeId = id.replace('setup__tk_type_roles__', '');
+    const t = cfg.tickets.types.find(x => x.id === typeId);
+    if (t) { t.supportRoleIds = interaction.values; await saveConfig(guildId); }
+    return interaction.update(buildTicketTypeDetailView(cfg, typeId) || buildTicketTypesView(cfg));
+  }
+  if (interaction.isButton() && id.startsWith('setup__tk_type_togglereason__')) {
+    const typeId = id.replace('setup__tk_type_togglereason__', '');
+    const t = cfg.tickets.types.find(x => x.id === typeId);
+    if (t) { t.requireReason = !t.requireReason; await saveConfig(guildId); }
+    return interaction.update(buildTicketTypeDetailView(cfg, typeId) || buildTicketTypesView(cfg));
+  }
+  if (interaction.isButton() && id.startsWith('setup__tk_type_remove__')) {
+    const typeId = id.replace('setup__tk_type_remove__', '');
+    cfg.tickets.types = cfg.tickets.types.filter(x => x.id !== typeId);
+    await saveConfig(guildId);
+    return interaction.update(buildTicketTypesView(cfg));
+  }
+
+  // ── Moderation ──
+  if (interaction.isRoleSelectMenu() && id === 'setup__mod_roles') {
+    cfg.moderation.modRoleIds = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildModerationSetupView(cfg));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__mod_logchannel') {
+    cfg.moderation.modLogChannelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildModerationSetupView(cfg));
+  }
+
+  // ── Training ──
+  if (interaction.isChannelSelectMenu() && id === 'setup__tr_channel') {
+    cfg.training.channel = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingSetupView(cfg));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__tr_announce') {
+    cfg.training.announceChannel = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingSetupView(cfg));
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__tr_trainerroles') {
+    cfg.training.trainerRoles = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingSetupView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__tr_pingroles_open') return interaction.update(buildTrainingRolesSubView(cfg, 'ping'));
+  if (interaction.isButton() && id === 'setup__tr_requestroles_open') return interaction.update(buildTrainingRolesSubView(cfg, 'request'));
+  if (interaction.isRoleSelectMenu() && id === 'setup__tr_pingroles') {
+    cfg.training.pingRoles = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingRolesSubView(cfg, 'ping'));
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__tr_requestroles') {
+    cfg.training.requestRoles = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingRolesSubView(cfg, 'request'));
+  }
+  if (interaction.isButton() && id === 'setup__tr_types') return interaction.update(buildTrainingTypesView(cfg));
+  if (interaction.isStringSelectMenu() && id === 'setup__tr_type_select') {
+    return interaction.update(buildTrainingTypeDetailView(cfg, interaction.values[0]) || buildTrainingTypesView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__tr_type_add') {
+    const modal = new ModalBuilder().setCustomId('setup__tr_type_add_submit').setTitle('Add Training Type');
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Type Name').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)));
+    return interaction.showModal(modal);
+  }
+  if (interaction.isButton() && id.startsWith('setup__tr_type_rename__')) {
+    const typeId = id.replace('setup__tr_type_rename__', '');
+    const t = cfg.training.types.find(x => x.id === typeId);
+    if (!t) return interaction.update(buildTrainingTypesView(cfg));
+    const modal = new ModalBuilder().setCustomId(`setup__tr_type_rename_submit__${typeId}`).setTitle('Rename Training Type');
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('Type Name').setStyle(TextInputStyle.Short).setValue(t.name).setRequired(true).setMaxLength(100)));
+    return interaction.showModal(modal);
+  }
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__tr_type_roles__')) {
+    const typeId = id.replace('setup__tr_type_roles__', '');
+    const t = cfg.training.types.find(x => x.id === typeId);
+    if (t) { t.roleIds = interaction.values; await saveConfig(guildId); }
+    return interaction.update(buildTrainingTypeDetailView(cfg, typeId) || buildTrainingTypesView(cfg));
+  }
+  if (interaction.isButton() && id.startsWith('setup__tr_type_remove__')) {
+    const typeId = id.replace('setup__tr_type_remove__', '');
+    cfg.training.types = cfg.training.types.filter(x => x.id !== typeId);
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingTypesView(cfg));
+  }
+
+  // ── Modal submits ──
+  if (interaction.isModalSubmit() && id === 'setup__tk_panelmodal_submit') {
+    const title = interaction.fields.getTextInputValue('title');
+    const description = interaction.fields.getTextInputValue('description');
+    const color = interaction.fields.getTextInputValue('color')?.trim();
+    const image = interaction.fields.getTextInputValue('image')?.trim();
+    const thumbnail = interaction.fields.getTextInputValue('thumbnail')?.trim();
+    if (color && !/^#?[0-9a-fA-F]{6}$/.test(color)) return interaction.reply({ content: '❌ Invalid hex color.', flags: MessageFlags.Ephemeral });
+    if (image && !isValidUrl(image)) return interaction.reply({ content: '❌ Invalid image URL.', flags: MessageFlags.Ephemeral });
+    if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ Invalid thumbnail URL.', flags: MessageFlags.Ephemeral });
+    cfg.tickets.panelTitle = title;
+    cfg.tickets.panelDescription = description;
+    if (color) cfg.tickets.panelColor = color.startsWith('#') ? color : `#${color}`;
+    cfg.tickets.panelImage = image || null;
+    cfg.tickets.panelThumbnail = thumbnail || null;
+    await saveConfig(guildId);
+    return interaction.update(buildTicketsSetupView(cfg));
+  }
+  if (interaction.isModalSubmit() && id === 'setup__tk_type_add_submit') {
+    const label = interaction.fields.getTextInputValue('label');
+    const emoji = interaction.fields.getTextInputValue('emoji')?.trim() || '🎫';
+    const description = interaction.fields.getTextInputValue('description')?.trim() || '';
+    const image = interaction.fields.getTextInputValue('image')?.trim() || null;
+    const thumbnail = interaction.fields.getTextInputValue('thumbnail')?.trim() || null;
+    if (image && !isValidUrl(image)) return interaction.reply({ content: '❌ Invalid image URL.', flags: MessageFlags.Ephemeral });
+    if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ Invalid thumbnail URL.', flags: MessageFlags.Ephemeral });
+    const typeId = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || `type${Date.now()}`;
+    cfg.tickets.types.push({ id: typeId, label, emoji, description, image, thumbnail, supportRoleIds: [], requireReason: false });
+    await saveConfig(guildId);
+    return interaction.update(buildTicketTypesView(cfg));
+  }
+  if (interaction.isModalSubmit() && id.startsWith('setup__tk_type_edit_submit__')) {
+    const typeId = id.replace('setup__tk_type_edit_submit__', '');
+    const t = cfg.tickets.types.find(x => x.id === typeId);
+    if (!t) return interaction.update(buildTicketTypesView(cfg));
+    const image = interaction.fields.getTextInputValue('image')?.trim() || null;
+    const thumbnail = interaction.fields.getTextInputValue('thumbnail')?.trim() || null;
+    if (image && !isValidUrl(image)) return interaction.reply({ content: '❌ Invalid image URL.', flags: MessageFlags.Ephemeral });
+    if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ Invalid thumbnail URL.', flags: MessageFlags.Ephemeral });
+    t.label = interaction.fields.getTextInputValue('label');
+    t.emoji = interaction.fields.getTextInputValue('emoji')?.trim() || '🎫';
+    t.description = interaction.fields.getTextInputValue('description')?.trim() || '';
+    t.image = image;
+    t.thumbnail = thumbnail;
+    await saveConfig(guildId);
+    return interaction.update(buildTicketTypeDetailView(cfg, typeId) || buildTicketTypesView(cfg));
+  }
+  if (interaction.isModalSubmit() && id === 'setup__tr_type_add_submit') {
+    const name = interaction.fields.getTextInputValue('name');
+    const typeId = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || `type${Date.now()}`;
+    cfg.training.types.push({ id: typeId, name, roleIds: [] });
+    await saveConfig(guildId);
+    return interaction.update(buildTrainingTypesView(cfg));
+  }
+  if (interaction.isModalSubmit() && id.startsWith('setup__tr_type_rename_submit__')) {
+    const typeId = id.replace('setup__tr_type_rename_submit__', '');
+    const t = cfg.training.types.find(x => x.id === typeId);
+    if (t) { t.name = interaction.fields.getTextInputValue('name'); await saveConfig(guildId); }
+    return interaction.update(buildTrainingTypeDetailView(cfg, typeId) || buildTrainingTypesView(cfg));
+  }
+
+  return interaction.deferUpdate().catch(() => {});
+}
+
+// ════════════════════════════════════════════
 // SLASH COMMANDS
 // ════════════════════════════════════════════
 const P = PermissionFlagsBits;
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
+
+  // ── GUI setup menu (admin) ──
+  { name: 'setup', description: '[Admin] Open the interactive server setup menu', default_member_permissions: P.ManageGuild.toString() },
 
   // ── Ticket setup (admin) ──
   { name: 'ticketsetup', description: '[Admin] Configure the ticket system', default_member_permissions: P.ManageGuild.toString(), options: [
@@ -698,6 +1140,51 @@ client.once('ready', async () => {
 // ════════════════════════════════════════════
 client.on('interactionCreate', async (interaction) => {
   try {
+    const cid = interaction.customId;
+
+    // ───────── TICKET RATING (can happen in DMs — handle before the guild check) ─────────
+    if (interaction.isButton() && cid?.startsWith('tkt__rate__')) {
+      const [, , ticketId, starsStr] = cid.split('__');
+      const stars = parseInt(starsStr, 10);
+      const ticket = await TicketModel.findById(ticketId).catch(() => null);
+      if (!ticket) return interaction.reply({ content: '❌ This ticket could not be found anymore.', flags: MessageFlags.Ephemeral });
+      if (ticket.rating != null) return interaction.reply({ content: '✅ You already rated this ticket. Thanks!', flags: MessageFlags.Ephemeral });
+      const modal = new ModalBuilder().setCustomId(`tkt__ratefb__${ticketId}__${stars}`).setTitle(`Rate: ${'⭐'.repeat(stars)}`);
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId('feedback').setLabel('Any additional feedback? (optional)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(500),
+      ));
+      return interaction.showModal(modal);
+    }
+    if (interaction.isModalSubmit() && cid?.startsWith('tkt__ratefb__')) {
+      const [, , ticketId, starsStr] = cid.split('__');
+      const stars = parseInt(starsStr, 10);
+      const feedback = interaction.fields.getTextInputValue('feedback')?.trim() || null;
+      const ticket = await TicketModel.findById(ticketId).catch(() => null);
+      if (!ticket) return interaction.reply({ content: '❌ This ticket could not be found anymore.', flags: MessageFlags.Ephemeral });
+      if (ticket.rating == null) {
+        ticket.rating = stars;
+        ticket.ratingFeedback = feedback;
+        await ticket.save().catch(() => {});
+        const ratedGuild = await client.guilds.fetch(ticket.guildId).catch(() => null);
+        if (ratedGuild) {
+          const gcfg = await getConfig(ratedGuild.id);
+          await logTicketEvent(ratedGuild, gcfg, new EmbedBuilder()
+            .setColor(0xFEE75C)
+            .setTitle('⭐ Ticket Rated')
+            .addFields(
+              { name: 'Ticket', value: `#${ticket.number}`, inline: true },
+              { name: 'Rating', value: '⭐'.repeat(stars), inline: true },
+              { name: 'Feedback', value: feedback || '*none*' },
+            ).setTimestamp());
+        }
+      }
+      try {
+        return await interaction.update({ content: `✅ Thanks for your rating: ${'⭐'.repeat(stars)}`, components: [] });
+      } catch {
+        return interaction.reply({ content: '✅ Thanks for your feedback!', flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+    }
+
     if (!interaction.guild) {
       if (interaction.isRepliable()) await interaction.reply({ content: '❌ This bot only works in servers.', flags: MessageFlags.Ephemeral }).catch(() => {});
       return;
@@ -705,12 +1192,26 @@ client.on('interactionCreate', async (interaction) => {
     const guildId = interaction.guild.id;
     const cfg = await getConfig(guildId);
 
+    // ───────── GUI /setup MENU (buttons, selects, modals) ─────────
+    if (typeof cid === 'string' && cid.startsWith('setup__')) {
+      if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral }).catch(() => {});
+      return handleSetupInteraction(interaction, cfg, guildId);
+    }
+
     // ───────── BUTTONS ─────────
     if (interaction.isButton()) {
       const id = interaction.customId;
 
       if (id.startsWith('tkt__open__')) {
         const typeId = id.replace('tkt__open__', '');
+        const type = cfg.tickets.types.find(t => t.id === typeId);
+        if (type?.requireReason) {
+          const modal = new ModalBuilder().setCustomId(`tkt__reasonmodal__${typeId}`).setTitle('Open a Ticket');
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('reason').setLabel('Please describe your issue').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500),
+          ));
+          return interaction.showModal(modal);
+        }
         await createTicketChannel(interaction, typeId, cfg);
         return;
       }
@@ -718,7 +1219,7 @@ client.on('interactionCreate', async (interaction) => {
       if (id === 'tkt__claim') {
         const ticket = await TicketModel.findOne({ channelId: interaction.channel.id });
         if (!ticket) return interaction.reply({ content: '❌ Not a ticket channel.', flags: MessageFlags.Ephemeral });
-        if (!isTicketStaff(interaction.member, cfg)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
+        if (!isTicketStaff(interaction.member, cfg, ticket)) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         if (ticket.claimedBy) return interaction.reply({ content: `❌ Already claimed by <@${ticket.claimedBy}>.`, flags: MessageFlags.Ephemeral });
         ticket.claimedBy = interaction.user.id;
         if (!ticket.staffMembers.includes(interaction.user.id)) ticket.staffMembers.push(interaction.user.id);
@@ -731,7 +1232,7 @@ client.on('interactionCreate', async (interaction) => {
       if (id === 'tkt__close') {
         const ticket = await TicketModel.findOne({ channelId: interaction.channel.id });
         if (!ticket) return interaction.reply({ content: '❌ Not a ticket channel.', flags: MessageFlags.Ephemeral });
-        if (!isTicketStaff(interaction.member, cfg) && interaction.user.id !== ticket.creatorId) {
+        if (!isTicketStaff(interaction.member, cfg, ticket) && interaction.user.id !== ticket.creatorId) {
           return interaction.reply({ content: '❌ Staff or the ticket owner only.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferUpdate().catch(() => {});
@@ -814,6 +1315,14 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === 'tkt__opensel') {
         const typeId = interaction.values[0];
+        const type = cfg.tickets.types.find(t => t.id === typeId);
+        if (type?.requireReason) {
+          const modal = new ModalBuilder().setCustomId(`tkt__reasonmodal__${typeId}`).setTitle('Open a Ticket');
+          modal.addComponents(new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId('reason').setLabel('Please describe your issue').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(500),
+          ));
+          return interaction.showModal(modal);
+        }
         await createTicketChannel(interaction, typeId, cfg);
         return;
       }
@@ -833,6 +1342,12 @@ client.on('interactionCreate', async (interaction) => {
 
     // ───────── MODAL SUBMIT ─────────
     if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('tkt__reasonmodal__')) {
+        const typeId = interaction.customId.replace('tkt__reasonmodal__', '');
+        const reason = interaction.fields.getTextInputValue('reason');
+        await createTicketChannel(interaction, typeId, cfg, reason);
+        return;
+      }
       if (interaction.customId.startsWith('modal_trainrequest__')) {
         const typeId = interaction.customId.replace('modal_trainrequest__', '');
         const type = typeId !== 'none' ? cfg.training.types.find(t => t.id === typeId) : null;
@@ -865,6 +1380,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (cmd === 'ping') {
       return interaction.reply({ content: `🏓 Pong! ${client.ws.ping}ms` });
+    }
+
+    if (cmd === 'setup') {
+      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+      return interaction.reply({ embeds: [buildSetupHomeEmbed()], components: buildSetupHomeComponents(), flags: MessageFlags.Ephemeral });
     }
 
     // ── Ticket setup ──
@@ -1019,7 +1539,7 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd.startsWith('ticket-')) {
       const ticket = await requireTicketChannel(interaction);
       if (!ticket) return;
-      const staff = isTicketStaff(member, cfg);
+      const staff = isTicketStaff(member, cfg, ticket);
 
       if (cmd === 'ticket-close') {
         if (!staff && interaction.user.id !== ticket.creatorId) return interaction.reply({ content: '❌ Staff or the ticket owner only.', flags: MessageFlags.Ephemeral });
@@ -1130,8 +1650,12 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Claimed by', value: ticket.claimedBy ? `<@${ticket.claimedBy}>` : '*unclaimed*', inline: true },
             { name: 'Staff added', value: ticket.staffMembers.length ? ticket.staffMembers.map(id => `<@${id}>`).join(', ') : '*none*', inline: true },
             { name: 'Created', value: `<t:${Math.floor(new Date(ticket.createdAt).getTime() / 1000)}:R>`, inline: true },
+            { name: 'Reason', value: ticket.reason || '*none given*', inline: false },
             { name: 'Notes', value: ticket.notes.length ? ticket.notes.map(n => `• ${n.text} — <@${n.authorId}>`).join('\n').slice(0, 1024) : '*none*', inline: false },
           );
+        if (ticket.rating != null) {
+          embed.addFields({ name: 'Rating', value: `${'⭐'.repeat(ticket.rating)}${ticket.ratingFeedback ? `\n${ticket.ratingFeedback}` : ''}`, inline: false });
+        }
         return interaction.reply({ embeds: [embed] });
       }
       return;
