@@ -52,6 +52,8 @@ const guildConfigSchema = new mongoose.Schema({
   moderation: {
     modRoleIds:      { type: [String], default: [] },
     modLogChannelId: { type: String, default: null },
+    level2RoleIds:   { type: [String], default: [] },
+    level3RoleIds:   { type: [String], default: [] },
   },
   training: {
     channel:         { type: String, default: null },
@@ -63,6 +65,10 @@ const guildConfigSchema = new mongoose.Schema({
       type: [{ id: String, name: String, roleIds: { type: [String], default: [] } }],
       default: [],
     },
+  },
+  nicknamePrefixes: {
+    type: [{ roleId: String, prefix: String }],
+    default: [],
   },
 }, { strict: false, timestamps: true });
 const GuildConfigModel = mongoose.model('GuildConfig', guildConfigSchema);
@@ -176,8 +182,9 @@ function defaultConfig(guildId) {
       types: [{ id: 'general', label: 'General Support', emoji: '🎫', description: 'General questions or help', image: null, thumbnail: null, supportRoleIds: [], requireReason: false }],
       nextNumber: 1,
     },
-    moderation: { modRoleIds: [], modLogChannelId: null },
+    moderation: { modRoleIds: [], modLogChannelId: null, level2RoleIds: [], level3RoleIds: [] },
     training: { channel: null, announceChannel: null, trainerRoles: [], requestRoles: [], pingRoles: [], types: [] },
+    nicknamePrefixes: [],
   };
 }
 
@@ -190,6 +197,7 @@ async function getConfig(guildId) {
         tickets: { ...defaultConfig(guildId).tickets, ...(doc.tickets || {}) },
         moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) },
         training: { ...defaultConfig(guildId).training, ...(doc.training || {}) },
+        nicknamePrefixes: doc.nicknamePrefixes || [],
       }
                   : defaultConfig(guildId);
   configCache.set(guildId, cfg);
@@ -198,10 +206,42 @@ async function getConfig(guildId) {
 
 async function saveConfig(guildId) {
   const cfg = configCache.get(guildId);
-  if (!cfg || !dbReady) return;
-  try {
-    await GuildConfigModel.findByIdAndUpdate(guildId, { $set: { tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training } }, { upsert: true });
-  } catch (e) { console.error('saveConfig error:', e.message); }
+  if (!cfg) return false;
+  if (!dbReady) {
+    console.error(`❌ saveConfig(${guildId}): MongoDB not connected — change kept in memory only, will NOT survive a restart.`);
+    return false;
+  }
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await GuildConfigModel.findByIdAndUpdate(guildId, { $set: { tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training, nicknamePrefixes: cfg.nicknamePrefixes } }, { upsert: true });
+      return true;
+    } catch (e) {
+      console.error(`❌ saveConfig(${guildId}) attempt ${attempt}/2 failed:`, e.message);
+      if (attempt === 2) return false;
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  return false;
+}
+
+// Generic helper: retries a mongoose write once before giving up, logging clearly either way.
+async function safeSave(fn, label) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      return { ok: true, result: await fn() };
+    } catch (e) {
+      console.error(`❌ DB write failed (${label}), attempt ${attempt}/2:`, e.message);
+      if (attempt === 2) return { ok: false, result: null };
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+  return { ok: false, result: null };
+}
+
+// Same as safeSave, named for readability at Model.create(...) call sites.
+async function safeCreate(Model, data, label) {
+  const { ok, result } = await safeSave(() => Model.create(data), label);
+  return ok ? result : null;
 }
 
 // ════════════════════════════════════════════
@@ -248,6 +288,68 @@ function resolveSupportRoleIds(cfg, type) {
 function isModerator(member, cfg) {
   if (isAdmin(member)) return true;
   return cfg.moderation.modRoleIds.some(rid => member.roles.cache.has(rid));
+}
+
+// ── Staff hierarchy: prevents lower-ranked moderators from using the most powerful commands ──
+// Level 1 = base staff (anyone in modRoleIds). Level 2/3 require the extra rank roles configured
+// via /setup → Moderation. Levels are opt-in: if an admin never configures level2/3RoleIds, every
+// staff member in modRoleIds keeps the old (unrestricted) behavior.
+const COMMAND_LEVELS = {
+  warn: 1, warnings: 1, note: 1, notes: 1, clear: 1, slowmode: 1, lock: 1, unlock: 1,
+  mute: 2, unmute: 2, kick: 2, nickname: 2, clearwarnings: 2,
+  ban: 3, unban: 3, softban: 3, tempban: 3, removerole: 3, giveroles: 3,
+};
+
+function getStaffLevel(member, cfg) {
+  if (isAdmin(member)) return 3;
+  if (!isModerator(member, cfg)) return 0;
+  let level = 1;
+  if (cfg.moderation.level2RoleIds?.length && cfg.moderation.level2RoleIds.some(rid => member.roles.cache.has(rid))) level = 2;
+  if (cfg.moderation.level3RoleIds?.length && cfg.moderation.level3RoleIds.some(rid => member.roles.cache.has(rid))) level = 3;
+  return level;
+}
+
+function hasCommandClearance(member, cfg, cmd) {
+  const required = COMMAND_LEVELS[cmd] || 1;
+  if (isAdmin(member)) return true;
+  if (!isModerator(member, cfg)) return false;
+  if (required <= 1) return true;
+  const roles = required === 2 ? cfg.moderation.level2RoleIds : cfg.moderation.level3RoleIds;
+  // Not configured yet ⇒ don't restrict (keeps existing setups working until an admin opts in).
+  if (!roles || !roles.length) return true;
+  return roles.some(rid => member.roles.cache.has(rid));
+}
+
+// ── Role-based nickname prefixes (e.g. role "Rang I" → nickname "Rang I Username") ──
+function stripKnownPrefixes(currentName, cfg) {
+  for (const p of cfg.nicknamePrefixes || []) {
+    if (p.prefix && currentName.startsWith(`${p.prefix} `)) {
+      return currentName.slice(p.prefix.length + 1);
+    }
+  }
+  return currentName;
+}
+
+async function applyNicknamePrefix(member, cfg) {
+  if (!cfg.nicknamePrefixes?.length) return;
+  if (member.user.bot) return;
+  if (!member.manageable) return; // bot's role isn't high enough, or target is the owner
+
+  const applicable = cfg.nicknamePrefixes
+    .filter(p => p.prefix && member.roles.cache.has(p.roleId))
+    .map(p => ({ ...p, position: member.guild.roles.cache.get(p.roleId)?.position ?? -1 }))
+    .sort((a, b) => b.position - a.position);
+
+  const currentName = member.nickname || member.user.username;
+  const baseName = stripKnownPrefixes(currentName, cfg);
+  const desiredName = applicable.length ? `${applicable[0].prefix} ${baseName}` : baseName;
+
+  if (desiredName === currentName) return;
+  if (desiredName.length > 32) {
+    console.error(`❌ Nickname prefix skipped for ${member.id}: "${desiredName}" exceeds Discord's 32-character limit.`);
+    return;
+  }
+  await member.setNickname(desiredName, 'Automatic role-based nickname prefix').catch(e => console.error(`❌ Failed to set nickname prefix for ${member.id}:`, e.message));
 }
 
 function isTrainer(member, cfg) {
@@ -365,8 +467,15 @@ async function createTicketChannel(interaction, typeId, cfg, reason = null) {
   // Prevent duplicate open tickets of the same type for this user
   const existing = await TicketModel.findOne({ guildId: guild.id, creatorId: user.id, status: 'open' });
   if (existing) {
-    const payload = { content: `❌ You already have an open ticket: <#${existing.channelId}>`, flags: MessageFlags.Ephemeral };
-    return interaction.replied || interaction.deferred ? interaction.followUp(payload) : interaction.reply(payload);
+    const existingChannel = await guild.channels.fetch(existing.channelId).catch(() => null);
+    if (existingChannel) {
+      const payload = { content: `❌ You already have an open ticket: <#${existing.channelId}>`, flags: MessageFlags.Ephemeral };
+      return interaction.replied || interaction.deferred ? interaction.followUp(payload) : interaction.reply(payload);
+    }
+    // The channel no longer exists (deleted outside the bot) — the record is orphaned. Clean it up and allow a fresh ticket.
+    existing.status = 'archived';
+    existing.archivedAt = new Date();
+    await safeSave(() => existing.save(), 'orphaned ticket cleanup');
   }
 
   const category = cfg.tickets.categoryId ? guild.channels.cache.get(cfg.tickets.categoryId) : null;
@@ -391,7 +500,7 @@ async function createTicketChannel(interaction, typeId, cfg, reason = null) {
     topic: `Ticket #${number} by ${userDisplay(user)} | ${type.label}`,
   });
 
-  await TicketModel.create({
+  const ticketDoc = await safeCreate(TicketModel, {
     guildId: guild.id,
     channelId: ticketCh.id,
     number,
@@ -400,7 +509,10 @@ async function createTicketChannel(interaction, typeId, cfg, reason = null) {
     typeLabel: type.label,
     staffMembers: [],
     reason: reason || null,
-  }).catch(() => {});
+  }, `ticket create #${number}`);
+  if (!ticketDoc) {
+    await ticketCh.send('⚠️ This ticket channel was created, but the database record failed to save. A staff member may need to recreate it if issues occur.').catch(() => {});
+  }
 
   const welcomeEmbed = new EmbedBuilder()
     .setTitle(`${type.emoji || '🎫'} Ticket #${number} — ${type.label}`)
@@ -442,7 +554,7 @@ async function closeTicket(interaction, ticket, cfg, reason) {
 
   ticket.status = 'closed';
   ticket.closedAt = new Date();
-  await ticket.save().catch(() => {});
+  await safeSave(() => ticket.save(), 'ticket save');
 
   await channel.permissionOverwrites.edit(ticket.creatorId, { SendMessages: false }).catch(() => {});
 
@@ -547,6 +659,7 @@ function buildSetupHomeComponents() {
     new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
   )];
 }
 
@@ -628,15 +741,25 @@ function buildTicketTypeDetailView(cfg, typeId) {
 }
 
 function buildModerationSetupView(cfg) {
+  const m = cfg.moderation;
   const embed = new EmbedBuilder()
     .setTitle('🛡️ Moderation Setup')
     .setColor(0x5865F2)
+    .setDescription('Staff hierarchy: level 1 = base moderator commands (warn, notes, clear, lock...). Level 2 adds kick/mute/nickname. Level 3 adds ban/tempban/roles.\nLeaving a level\'s roles empty means every moderator keeps access to it (unrestricted).')
     .addFields(
-      { name: 'Moderator Roles', value: cfg.moderation.modRoleIds.length ? cfg.moderation.modRoleIds.map(r => `<@&${r}>`).join(' ') : '*none (admins only)*' },
-      { name: 'Mod Log Channel', value: cfg.moderation.modLogChannelId ? `<#${cfg.moderation.modLogChannelId}>` : '*not set*' },
+      { name: 'Moderator Roles (Level 1 — base access)', value: m.modRoleIds.length ? m.modRoleIds.map(r => `<@&${r}>`).join(' ') : '*none (admins only)*' },
+      { name: 'Level 2 Roles (kick / mute / nickname)', value: m.level2RoleIds?.length ? m.level2RoleIds.map(r => `<@&${r}>`).join(' ') : '*unrestricted — all mods*' },
+      { name: 'Level 3 Roles (ban / tempban / role edits)', value: m.level3RoleIds?.length ? m.level3RoleIds.map(r => `<@&${r}>`).join(' ') : '*unrestricted — all mods*' },
+      { name: 'Mod Log Channel', value: m.modLogChannelId ? `<#${m.modLogChannelId}>` : '*not set*' },
     );
   const rowRoles = new ActionRowBuilder().addComponents(
-    new RoleSelectMenuBuilder().setCustomId('setup__mod_roles').setPlaceholder('🛡️ Select moderator roles').setMinValues(0).setMaxValues(25),
+    new RoleSelectMenuBuilder().setCustomId('setup__mod_roles').setPlaceholder('🛡️ Level 1: base moderator roles').setMinValues(0).setMaxValues(25),
+  );
+  const rowLevel2 = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId('setup__mod_level2roles').setPlaceholder('⚔️ Level 2: kick/mute/nickname roles').setMinValues(0).setMaxValues(25),
+  );
+  const rowLevel3 = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder().setCustomId('setup__mod_level3roles').setPlaceholder('🔥 Level 3: ban/tempban/role-edit roles').setMinValues(0).setMaxValues(25),
   );
   const rowLog = new ActionRowBuilder().addComponents(
     new ChannelSelectMenuBuilder().setCustomId('setup__mod_logchannel').setPlaceholder('📜 Select mod-log channel').addChannelTypes(ChannelType.GuildText),
@@ -644,7 +767,7 @@ function buildModerationSetupView(cfg) {
   const rowButtons = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
   );
-  return { embeds: [embed], components: [rowRoles, rowLog, rowButtons] };
+  return { embeds: [embed], components: [rowRoles, rowLevel2, rowLevel3, rowLog, rowButtons] };
 }
 
 function buildTrainingSetupView(cfg) {
@@ -722,6 +845,47 @@ function buildTrainingTypeDetailView(cfg, typeId) {
   return { embeds: [embed], components: [rowRoles, rowButtons] };
 }
 
+function buildPrefixesView(cfg) {
+  const embed = new EmbedBuilder()
+    .setTitle('🏷️ Nickname Prefixes')
+    .setColor(0x5865F2)
+    .setDescription('Give a role a prefix and members with that role are automatically renamed, e.g. role **Rang I** → nickname **Rang I Username**. Applied automatically whenever roles change. If a member has multiple prefixed roles, the highest role wins.');
+  if (cfg.nicknamePrefixes.length) {
+    embed.addFields({
+      name: 'Configured',
+      value: cfg.nicknamePrefixes.map(p => `<@&${p.roleId}> → \`${p.prefix}\``).join('\n').slice(0, 1024),
+    });
+  }
+  const components = [];
+  if (cfg.nicknamePrefixes.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder().setCustomId('setup__np_select').setPlaceholder('Select a role to edit or remove its prefix').setMinValues(1).setMaxValues(1),
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__np_add').setLabel('Add / Edit Prefix').setEmoji('➕').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  ));
+  return { embeds: [embed], components };
+}
+
+function buildPrefixDetailView(cfg, roleId) {
+  const p = cfg.nicknamePrefixes.find(x => x.roleId === roleId);
+  const embed = new EmbedBuilder()
+    .setTitle('🏷️ Role Prefix')
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'Role', value: `<@&${roleId}>` },
+      { name: 'Prefix', value: p ? `\`${p.prefix}\`` : '*not set yet*' },
+    );
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`setup__np_editmodal__${roleId}`).setLabel(p ? 'Edit Prefix' : 'Set Prefix').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+    ...(p ? [new ButtonBuilder().setCustomId(`setup__np_remove__${roleId}`).setLabel('Remove').setEmoji('🗑️').setStyle(ButtonStyle.Danger)] : []),
+    new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowButtons] };
+}
+
 async function handleSetupInteraction(interaction, cfg, guildId) {
   const id = interaction.customId;
 
@@ -730,6 +894,7 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__tickets') return interaction.update(buildTicketsSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__moderation') return interaction.update(buildModerationSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__training') return interaction.update(buildTrainingSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__prefixes') return interaction.update(buildPrefixesView(cfg));
 
   // ── Tickets: channel/role selects ──
   if (interaction.isChannelSelectMenu() && id === 'setup__tk_category') {
@@ -820,6 +985,16 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     await saveConfig(guildId);
     return interaction.update(buildModerationSetupView(cfg));
   }
+  if (interaction.isRoleSelectMenu() && id === 'setup__mod_level2roles') {
+    cfg.moderation.level2RoleIds = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildModerationSetupView(cfg));
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__mod_level3roles') {
+    cfg.moderation.level3RoleIds = interaction.values;
+    await saveConfig(guildId);
+    return interaction.update(buildModerationSetupView(cfg));
+  }
   if (interaction.isChannelSelectMenu() && id === 'setup__mod_logchannel') {
     cfg.moderation.modLogChannelId = interaction.values[0] || null;
     await saveConfig(guildId);
@@ -884,7 +1059,63 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     return interaction.update(buildTrainingTypesView(cfg));
   }
 
+  // ── Nickname Prefixes ──
+  if (interaction.isRoleSelectMenu() && id === 'setup__np_select') {
+    return interaction.update(buildPrefixDetailView(cfg, interaction.values[0]));
+  }
+  if (interaction.isButton() && id === 'setup__np_add') {
+    const row = new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder().setCustomId('setup__np_addrole').setPlaceholder('Select the role to prefix').setMinValues(1).setMaxValues(1),
+    );
+    const rowBack = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary));
+    return interaction.update({
+      embeds: [new EmbedBuilder().setTitle('🏷️ Add / Edit Prefix').setColor(0x5865F2).setDescription('Pick the role that should get a nickname prefix.')],
+      components: [row, rowBack],
+    });
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__np_addrole') {
+    return interaction.update(buildPrefixDetailView(cfg, interaction.values[0]));
+  }
+  if (interaction.isButton() && id.startsWith('setup__np_editmodal__')) {
+    const roleId = id.replace('setup__np_editmodal__', '');
+    const existing = cfg.nicknamePrefixes.find(p => p.roleId === roleId);
+    const modal = new ModalBuilder().setCustomId(`setup__np_prefixmodal_submit__${roleId}`).setTitle('Set Nickname Prefix');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('prefix').setLabel('Prefix text (e.g. "Rang I")').setStyle(TextInputStyle.Short).setValue(existing?.prefix || '').setRequired(true).setMaxLength(20),
+    ));
+    return interaction.showModal(modal);
+  }
+  if (interaction.isButton() && id.startsWith('setup__np_remove__')) {
+    const roleId = id.replace('setup__np_remove__', '');
+    cfg.nicknamePrefixes = cfg.nicknamePrefixes.filter(p => p.roleId !== roleId);
+    await saveConfig(guildId);
+    return interaction.update(buildPrefixesView(cfg));
+  }
+
+
   // ── Modal submits ──
+  if (interaction.isModalSubmit() && id.startsWith('setup__np_prefixmodal_submit__')) {
+    const roleId = id.replace('setup__np_prefixmodal_submit__', '');
+    const prefix = interaction.fields.getTextInputValue('prefix').trim();
+    if (!prefix) return interaction.reply({ content: '❌ Prefix cannot be empty.', flags: MessageFlags.Ephemeral });
+    const existing = cfg.nicknamePrefixes.find(p => p.roleId === roleId);
+    if (existing) existing.prefix = prefix;
+    else cfg.nicknamePrefixes.push({ roleId, prefix });
+    await saveConfig(guildId);
+    await interaction.update(buildPrefixDetailView(cfg, roleId));
+
+    // Retroactively apply to current holders of the role (capped + throttled to avoid rate-limit spikes).
+    const role = interaction.guild.roles.cache.get(roleId);
+    if (role) {
+      const members = [...role.members.values()].slice(0, 200);
+      for (const m of members) {
+        await applyNicknamePrefix(m, cfg);
+        await new Promise(r => setTimeout(r, 250));
+      }
+      await interaction.followUp({ content: `✅ Prefix set. Synced nicknames for ${members.length} current member(s) with <@&${roleId}>.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    return;
+  }
   if (interaction.isModalSubmit() && id === 'setup__tk_panelmodal_submit') {
     const title = interaction.fields.getTextInputValue('title');
     const description = interaction.fields.getTextInputValue('description');
@@ -1009,6 +1240,11 @@ const commands = [
   { name: 'ticket-info',         description: 'View info about this ticket' },
 
   // ── Moderation ──
+  { name: 'staffrank', description: 'Check a staff member\'s rank clearance level', default_member_permissions: P.ModerateMembers.toString(), options: [
+    { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
+  ]},
+  { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
+  { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
   { name: 'warn', description: 'Warn a user', default_member_permissions: P.ModerateMembers.toString(), options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
@@ -1112,7 +1348,7 @@ async function sweepExpiredTempBans() {
     } catch (e) {
       console.error(`Tempban sweep unban failed for ${rec.userId}:`, e.message);
     } finally {
-      await TempBanModel.deleteOne({ _id: rec._id }).catch(() => {});
+      await safeSave(() => TempBanModel.deleteOne({ _id: rec._id }), 'tempban cleanup');
     }
   }
 }
@@ -1133,6 +1369,28 @@ client.once('ready', async () => {
   // Catch up on any temp-bans that expired while the bot was offline, then poll every minute.
   await sweepExpiredTempBans();
   setInterval(() => sweepExpiredTempBans().catch(e => console.error('Tempban sweep error:', e)), 60000);
+});
+
+// ════════════════════════════════════════════
+// ROLE-BASED NICKNAME PREFIXES
+// ════════════════════════════════════════════
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    if (oldMember.roles.cache.equals(newMember.roles.cache)) return; // only react to role changes
+    const cfg = await getConfig(newMember.guild.id);
+    await applyNicknamePrefix(newMember, cfg);
+  } catch (e) {
+    console.error('guildMemberUpdate (nickname prefix) error:', e.message);
+  }
+});
+
+client.on('guildMemberAdd', async (member) => {
+  try {
+    const cfg = await getConfig(member.guild.id);
+    await applyNicknamePrefix(member, cfg);
+  } catch (e) {
+    console.error('guildMemberAdd (nickname prefix) error:', e.message);
+  }
 });
 
 // ════════════════════════════════════════════
@@ -1164,7 +1422,7 @@ client.on('interactionCreate', async (interaction) => {
       if (ticket.rating == null) {
         ticket.rating = stars;
         ticket.ratingFeedback = feedback;
-        await ticket.save().catch(() => {});
+        await safeSave(() => ticket.save(), 'ticket save');
         const ratedGuild = await client.guilds.fetch(ticket.guildId).catch(() => null);
         if (ratedGuild) {
           const gcfg = await getConfig(ratedGuild.id);
@@ -1223,7 +1481,7 @@ client.on('interactionCreate', async (interaction) => {
         if (ticket.claimedBy) return interaction.reply({ content: `❌ Already claimed by <@${ticket.claimedBy}>.`, flags: MessageFlags.Ephemeral });
         ticket.claimedBy = interaction.user.id;
         if (!ticket.staffMembers.includes(interaction.user.id)) ticket.staffMembers.push(interaction.user.id);
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         await interaction.update({ components: [buildTicketControlRow(true)] }).catch(() => {});
         await interaction.followUp({ content: `🙋 Ticket claimed by ${userDisplay(interaction.user)}.` }).catch(() => {});
         return;
@@ -1254,7 +1512,7 @@ client.on('interactionCreate', async (interaction) => {
         if (action === 'claim') {
           if (req.claimedBy.includes(interaction.user.id)) return interaction.reply({ content: '❌ You already claimed this request.', flags: MessageFlags.Ephemeral });
           req.claimedBy.push(interaction.user.id);
-          await req.save();
+          await safeSave(() => req.save(), 'training request save');
           const embed = buildTrainingRequestEmbed({ user: requester, typeName: req.typeName, times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value, notes: interaction.message.embeds[0].fields.find(f => f.name === '📝 Notes')?.value, claimed: req.claimedBy });
           await interaction.update({ embeds: [embed], components: [buildTrainingButtons(requesterId, typeId)] });
           return;
@@ -1263,7 +1521,7 @@ client.on('interactionCreate', async (interaction) => {
         if (action === 'unclaim') {
           if (!req.claimedBy.includes(interaction.user.id)) return interaction.reply({ content: '❌ You have not claimed this request.', flags: MessageFlags.Ephemeral });
           req.claimedBy = req.claimedBy.filter(id2 => id2 !== interaction.user.id);
-          await req.save();
+          await safeSave(() => req.save(), 'training request save');
           const embed = buildTrainingRequestEmbed({ user: requester, typeName: req.typeName, times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value, notes: interaction.message.embeds[0].fields.find(f => f.name === '📝 Notes')?.value, claimed: req.claimedBy });
           await interaction.update({ embeds: [embed], components: [buildTrainingButtons(requesterId, typeId)] });
           return;
@@ -1273,7 +1531,7 @@ client.on('interactionCreate', async (interaction) => {
           const passed = action === 'pass';
           req.status = passed ? 'passed' : 'failed';
           req.resolvedBy = interaction.user.id;
-          await req.save();
+          await safeSave(() => req.save(), 'training request save');
           const embed = buildTrainingRequestEmbed({
             user: requester, typeName: req.typeName,
             times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value,
@@ -1362,11 +1620,14 @@ client.on('interactionCreate', async (interaction) => {
         const ping = cfg.training.pingRoles.length ? cfg.training.pingRoles.map(r => `<@&${r}>`).join(' ') : undefined;
         const msg = await ch.send({ content: ping, embeds: [embed], components: [row] });
 
-        await TrainingRequestModel.create({
+        const created = await safeCreate(TrainingRequestModel, {
           guildId, requesterId: interaction.user.id, channelId: ch.id, messageId: msg.id,
           typeId: type ? type.id : null, typeName: type ? type.name : null,
-        });
+        }, 'training request create');
         await setTrainCooldown(guildId, interaction.user.id);
+        if (!created) {
+          await ch.send('⚠️ This request was posted, but saving it to the database failed — claim/complete tracking may not work for it.').catch(() => {});
+        }
 
         return interaction.reply({ content: '✅ Your training request has been posted! A trainer will claim it soon.', flags: MessageFlags.Ephemeral });
       }
@@ -1385,6 +1646,25 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'setup') {
       if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
       return interaction.reply({ embeds: [buildSetupHomeEmbed()], components: buildSetupHomeComponents(), flags: MessageFlags.Ephemeral });
+    }
+
+    if (cmd === 'syncprefixes') {
+      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+      if (!cfg.nicknamePrefixes.length) return interaction.reply({ content: 'No nickname prefixes are configured yet. Set them up via **/setup → Nickname Prefixes**.', flags: MessageFlags.Ephemeral });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const guildMembers = await interaction.guild.members.fetch().catch(() => new Map());
+      let synced = 0;
+      for (const m of guildMembers.values()) {
+        if (m.user.bot) continue;
+        const hasAnyPrefixRole = cfg.nicknamePrefixes.some(p => m.roles.cache.has(p.roleId));
+        const currentName = m.nickname || m.user.username;
+        const wouldStrip = stripKnownPrefixes(currentName, cfg) !== currentName;
+        if (!hasAnyPrefixRole && !wouldStrip) continue;
+        await applyNicknamePrefix(m, cfg);
+        synced++;
+        await new Promise(r => setTimeout(r, 250));
+      }
+      return interaction.editReply({ content: `✅ Synced nicknames for ${synced} member(s).` });
     }
 
     // ── Ticket setup ──
@@ -1560,14 +1840,14 @@ client.on('interactionCreate', async (interaction) => {
         if (ticket.claimedBy) return interaction.reply({ content: `❌ Already claimed by <@${ticket.claimedBy}>.`, flags: MessageFlags.Ephemeral });
         ticket.claimedBy = interaction.user.id;
         if (!ticket.staffMembers.includes(interaction.user.id)) ticket.staffMembers.push(interaction.user.id);
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         return interaction.reply({ content: `🙋 Ticket claimed by ${userDisplay(interaction.user)}.` });
       }
       if (cmd === 'ticket-add') {
         if (!staff) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user');
         await interaction.channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
-        if (!ticket.staffMembers.includes(user.id)) { ticket.staffMembers.push(user.id); await ticket.save(); }
+        if (!ticket.staffMembers.includes(user.id)) { ticket.staffMembers.push(user.id); await safeSave(() => ticket.save(), 'ticket save'); }
         return interaction.reply({ content: `✅ Added ${userDisplay(user)} to this ticket.` });
       }
       if (cmd === 'ticket-remove') {
@@ -1575,7 +1855,7 @@ client.on('interactionCreate', async (interaction) => {
         const user = interaction.options.getUser('user');
         await interaction.channel.permissionOverwrites.delete(user.id).catch(() => {});
         ticket.staffMembers = ticket.staffMembers.filter(id => id !== user.id);
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         return interaction.reply({ content: `✅ Removed ${userDisplay(user)} from this ticket.` });
       }
       if (cmd === 'ticket-rename') {
@@ -1587,14 +1867,14 @@ client.on('interactionCreate', async (interaction) => {
       if (cmd === 'ticket-priority') {
         if (!staff) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         ticket.priority = interaction.options.getString('level');
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         return interaction.reply({ content: `✅ Priority set to **${ticket.priority}**.` });
       }
       if (cmd === 'ticket-note') {
         if (!staff) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         const text = interaction.options.getString('text');
         ticket.notes.push({ authorId: interaction.user.id, text, createdAt: new Date() });
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         return interaction.reply({ content: '📝 Note added (staff only visibility is not enforced by channel perms — keep sensitive notes elsewhere).', flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'ticket-transfer') {
@@ -1602,7 +1882,7 @@ client.on('interactionCreate', async (interaction) => {
         const user = interaction.options.getUser('user');
         await interaction.channel.permissionOverwrites.edit(user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
         ticket.creatorId = user.id;
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         return interaction.reply({ content: `✅ Ticket ownership transferred to ${userDisplay(user)}.` });
       }
       if (cmd === 'ticket-reopen') {
@@ -1610,7 +1890,7 @@ client.on('interactionCreate', async (interaction) => {
         ticket.status = 'open';
         ticket.closedAt = null;
         ticket.archivedAt = null;
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         await interaction.channel.permissionOverwrites.edit(ticket.creatorId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }).catch(() => {});
         return interaction.reply({ content: '🔓 Ticket reopened.' });
       }
@@ -1618,7 +1898,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!staff) return interaction.reply({ content: '❌ Staff only.', flags: MessageFlags.Ephemeral });
         ticket.status = 'archived';
         ticket.archivedAt = new Date();
-        await ticket.save();
+        await safeSave(() => ticket.save(), 'ticket save');
         await interaction.channel.permissionOverwrites.edit(ticket.creatorId, { SendMessages: false }).catch(() => {});
         for (const rid of cfg.tickets.supportRoleIds) {
           await interaction.channel.permissionOverwrites.edit(rid, { SendMessages: false }).catch(() => {});
@@ -1634,7 +1914,7 @@ client.on('interactionCreate', async (interaction) => {
           const logCh = interaction.guild.channels.cache.get(cfg.tickets.logChannelId);
           if (logCh) await logCh.send({ content: `🗑️ Ticket #${ticket.number} deleted by ${userDisplay(interaction.user)}.`, files: [attachment] }).catch(() => {});
         }
-        await TicketModel.deleteOne({ _id: ticket._id }).catch(() => {});
+        await safeSave(() => TicketModel.deleteOne({ _id: ticket._id }), 'ticket delete');
         setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
         return;
       }
@@ -1661,21 +1941,59 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    if (cmd === 'staffrank') {
+      const target = interaction.options.getUser('user') || interaction.user;
+      const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
+      const level = getStaffLevel(targetMember, cfg);
+      const levelNames = { 0: '❌ Not staff', 1: '🟢 Level 1 — Base staff', 2: '🟡 Level 2 — Senior staff', 3: '🔴 Level 3 — Full clearance (or admin)' };
+      const allowed = Object.entries(COMMAND_LEVELS).filter(([, lvl]) => lvl <= level).map(([c]) => `\`/${c}\``);
+      const embed = new EmbedBuilder()
+        .setTitle(`🎖️ Staff Rank — ${userDisplay(target)}`)
+        .setColor(0x5865F2)
+        .addFields(
+          { name: 'Clearance', value: levelNames[level] || levelNames[0] },
+          { name: 'Commands Available', value: allowed.length ? allowed.join(', ') : '*none*' },
+        );
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+
+    if (cmd === 'staff') {
+      if (!isModerator(member, cfg)) return interaction.reply({ content: '❌ You do not have permission to use this command.', flags: MessageFlags.Ephemeral });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const guildMembers = await interaction.guild.members.fetch().catch(() => new Map());
+      const staffList = [...guildMembers.values()]
+        .map(m => ({ member: m, level: getStaffLevel(m, cfg) }))
+        .filter(x => x.level > 0)
+        .sort((a, b) => b.level - a.level);
+      if (!staffList.length) return interaction.editReply({ content: 'No staff roles are configured yet. Set them up via **/setup → Moderation**.' });
+      const emoji = { 1: '🟢', 2: '🟡', 3: '🔴' };
+      const embed = new EmbedBuilder()
+        .setTitle('🛡️ Staff Hierarchy')
+        .setColor(0x5865F2)
+        .setDescription(staffList.map(x => `${emoji[x.level] || '⚪'} **Level ${x.level}** — ${userDisplay(x.member.user)}`).join('\n').slice(0, 4000));
+      return interaction.editReply({ embeds: [embed] });
+    }
+
     // ── Moderation commands ──
     if (['warn', 'warnings', 'clearwarnings', 'note', 'notes', 'mute', 'unmute', 'kick', 'ban', 'unban', 'softban', 'tempban', 'clear', 'slowmode', 'lock', 'unlock', 'nickname', 'removerole', 'giveroles'].includes(cmd)) {
       if (!isModerator(member, cfg)) {
         return interaction.reply({ content: '❌ You do not have permission to use moderation commands.', flags: MessageFlags.Ephemeral });
       }
+      if (!hasCommandClearance(member, cfg, cmd)) {
+        const required = COMMAND_LEVELS[cmd] || 1;
+        return interaction.reply({ content: `❌ Your staff rank doesn't have clearance for \`/${cmd}\` (requires level ${required}). Ask an admin to grant your role via **/setup → Moderation**.`, flags: MessageFlags.Ephemeral });
+      }
 
       if (cmd === 'warn') {
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason');
-        await WarningModel.create({ guildId, userId: user.id, moderatorId: interaction.user.id, reason });
+        const created = await safeCreate(WarningModel, { guildId, userId: user.id, moderatorId: interaction.user.id, reason }, 'warning create');
         await safeDM(user, { content: `⚠️ You were warned in **${interaction.guild.name}**: ${reason}` });
         await logModAction(interaction.guild, cfg, new EmbedBuilder().setColor(0xFEE75C).setTitle('⚠️ Warning').addFields(
           { name: 'User', value: userDisplay(user), inline: true }, { name: 'Moderator', value: userDisplay(interaction.user), inline: true }, { name: 'Reason', value: reason },
         ).setTimestamp());
-        return interaction.reply({ content: `⚠️ **${userDisplay(user)}** warned.` });
+        return interaction.reply({ content: `⚠️ **${userDisplay(user)}** warned.${created ? '' : ' (⚠️ not saved to database — will not show in /warnings)'}` });
       }
       if (cmd === 'warnings') {
         const user = interaction.options.getUser('user');
@@ -1687,14 +2005,15 @@ client.on('interactionCreate', async (interaction) => {
       }
       if (cmd === 'clearwarnings') {
         const user = interaction.options.getUser('user');
-        const { deletedCount } = await WarningModel.deleteMany({ guildId, userId: user.id });
-        return interaction.reply({ content: `✅ Cleared ${deletedCount} warning(s) for ${userDisplay(user)}.` });
+        const { ok, result } = await safeSave(() => WarningModel.deleteMany({ guildId, userId: user.id }), 'clearwarnings');
+        const deletedCount = ok ? result.deletedCount : 0;
+        return interaction.reply({ content: ok ? `✅ Cleared ${deletedCount} warning(s) for ${userDisplay(user)}.` : '❌ Failed to clear warnings — database unavailable, try again shortly.' });
       }
       if (cmd === 'note') {
         const user = interaction.options.getUser('user');
         const text = interaction.options.getString('text');
-        await ModNoteModel.create({ guildId, userId: user.id, authorId: interaction.user.id, text });
-        return interaction.reply({ content: `📝 Note added for ${userDisplay(user)}.`, flags: MessageFlags.Ephemeral });
+        const created = await safeCreate(ModNoteModel, { guildId, userId: user.id, authorId: interaction.user.id, text }, 'mod note create');
+        return interaction.reply({ content: `📝 Note added for ${userDisplay(user)}.${created ? '' : ' (⚠️ not saved to database)'}`, flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'notes') {
         const user = interaction.options.getUser('user');
@@ -1778,15 +2097,15 @@ client.on('interactionCreate', async (interaction) => {
         const unbanAt = new Date(Date.now() + hours * 3600000);
         await safeDM(user, { content: `🔨 You were temporarily banned from **${interaction.guild.name}** for ${hours}h: ${reason}` });
         await interaction.guild.members.ban(user.id, { reason });
-        await TempBanModel.findOneAndUpdate(
+        const { ok } = await safeSave(() => TempBanModel.findOneAndUpdate(
           { guildId, userId: user.id },
           { guildId, userId: user.id, moderatorId: interaction.user.id, reason, unbanAt },
           { upsert: true },
-        );
+        ), 'tempban record');
         await logModAction(interaction.guild, cfg, new EmbedBuilder().setColor(0xED4245).setTitle('🔨 Temp-banned').addFields(
           { name: 'User', value: userDisplay(user), inline: true }, { name: 'Duration', value: `${hours}h`, inline: true }, { name: 'Reason', value: reason },
         ).setTimestamp());
-        return interaction.reply({ content: `🔨 **${userDisplay(user)}** temp-banned for ${hours} hour(s). The unban is stored in MongoDB, so it will still fire even if the bot restarts.` });
+        return interaction.reply({ content: `🔨 **${userDisplay(user)}** temp-banned for ${hours} hour(s).${ok ? ' The unban is stored in MongoDB, so it will still fire even if the bot restarts.' : ' ⚠️ Could not save the auto-unban record — you will need to /unban them manually.'}` });
       }
       if (cmd === 'clear') {
         const amount = interaction.options.getInteger('amount');
