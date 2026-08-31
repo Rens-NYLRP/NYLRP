@@ -164,6 +164,9 @@ mongoose.connection.on('reconnected', () => { console.log('✅ MongoDB reconnect
 // GUILD CONFIG CACHE
 // ════════════════════════════════════════════
 const configCache = new Map();
+// Bridges the two-step "select roles, then set a prefix" flow (a modal can't carry an arbitrary list
+// of role IDs in its customId due to Discord's 100-char limit), keyed by the staff member's user ID.
+const pendingPrefixRoleSelections = new Map();
 
 function defaultConfig(guildId) {
   return {
@@ -849,7 +852,7 @@ function buildPrefixesView(cfg) {
   const embed = new EmbedBuilder()
     .setTitle('🏷️ Nickname Prefixes')
     .setColor(0x5865F2)
-    .setDescription('Give a role a prefix and members with that role are automatically renamed, e.g. role **Rang I** → nickname **Rang I Username**. Applied automatically whenever roles change. If a member has multiple prefixed roles, the highest role wins.');
+    .setDescription('Give roles a shared prefix and members automatically get renamed, e.g. role **Rang I** → nickname **Rang I Username**. Click **Add Prefix** to pick roles first, then type the prefix once — it\'s applied to all of them. Applied automatically whenever roles change, and if a member has multiple prefixed roles the highest one wins.');
   if (cfg.nicknamePrefixes.length) {
     embed.addFields({
       name: 'Configured',
@@ -859,11 +862,11 @@ function buildPrefixesView(cfg) {
   const components = [];
   if (cfg.nicknamePrefixes.length) {
     components.push(new ActionRowBuilder().addComponents(
-      new RoleSelectMenuBuilder().setCustomId('setup__np_select').setPlaceholder('Select a role to edit or remove its prefix').setMinValues(1).setMaxValues(1),
+      new RoleSelectMenuBuilder().setCustomId('setup__np_select').setPlaceholder('Select a configured role to edit or remove').setMinValues(1).setMaxValues(1),
     ));
   }
   components.push(new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup__np_add').setLabel('Add / Edit Prefix').setEmoji('➕').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__np_add').setLabel('Add Prefix').setEmoji('➕').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
   ));
   return { embeds: [embed], components };
@@ -1065,16 +1068,22 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   }
   if (interaction.isButton() && id === 'setup__np_add') {
     const row = new ActionRowBuilder().addComponents(
-      new RoleSelectMenuBuilder().setCustomId('setup__np_addrole').setPlaceholder('Select the role to prefix').setMinValues(1).setMaxValues(1),
+      new RoleSelectMenuBuilder().setCustomId('setup__np_addroles').setPlaceholder('Select one or more roles').setMinValues(1).setMaxValues(25),
     );
     const rowBack = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary));
     return interaction.update({
-      embeds: [new EmbedBuilder().setTitle('🏷️ Add / Edit Prefix').setColor(0x5865F2).setDescription('Pick the role that should get a nickname prefix.')],
+      embeds: [new EmbedBuilder().setTitle('🏷️ Add Prefix — Step 1: Roles').setColor(0x5865F2).setDescription('Select every role that should share the same prefix. You\'ll be asked for the prefix text next.')],
       components: [row, rowBack],
     });
   }
-  if (interaction.isRoleSelectMenu() && id === 'setup__np_addrole') {
-    return interaction.update(buildPrefixDetailView(cfg, interaction.values[0]));
+  if (interaction.isRoleSelectMenu() && id === 'setup__np_addroles') {
+    pendingPrefixRoleSelections.set(interaction.user.id, interaction.values);
+    setTimeout(() => pendingPrefixRoleSelections.delete(interaction.user.id), 5 * 60 * 1000); // expire after 5 min if abandoned
+    const modal = new ModalBuilder().setCustomId('setup__np_addprefix_submit').setTitle('Add Prefix — Step 2: Text');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('prefix').setLabel('Prefix text (e.g. "Rang I")').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(20),
+    ));
+    return interaction.showModal(modal);
   }
   if (interaction.isButton() && id.startsWith('setup__np_editmodal__')) {
     const roleId = id.replace('setup__np_editmodal__', '');
@@ -1094,6 +1103,38 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
 
 
   // ── Modal submits ──
+  if (interaction.isModalSubmit() && id === 'setup__np_addprefix_submit') {
+    const roleIds = pendingPrefixRoleSelections.get(interaction.user.id);
+    pendingPrefixRoleSelections.delete(interaction.user.id);
+    if (!roleIds || !roleIds.length) {
+      return interaction.reply({ content: '❌ Your role selection expired — please pick the roles again.', flags: MessageFlags.Ephemeral });
+    }
+    const prefix = interaction.fields.getTextInputValue('prefix').trim();
+    if (!prefix) return interaction.reply({ content: '❌ Prefix cannot be empty.', flags: MessageFlags.Ephemeral });
+
+    for (const roleId of roleIds) {
+      const existing = cfg.nicknamePrefixes.find(p => p.roleId === roleId);
+      if (existing) existing.prefix = prefix;
+      else cfg.nicknamePrefixes.push({ roleId, prefix });
+    }
+    await saveConfig(guildId);
+    await interaction.update(buildPrefixesView(cfg));
+
+    // Retroactively apply to every current holder of any selected role (deduped, capped + throttled).
+    const affectedMembers = new Map();
+    for (const roleId of roleIds) {
+      const role = interaction.guild.roles.cache.get(roleId);
+      if (!role) continue;
+      for (const m of role.members.values()) affectedMembers.set(m.id, m);
+    }
+    const members = [...affectedMembers.values()].slice(0, 200);
+    for (const m of members) {
+      await applyNicknamePrefix(m, cfg);
+      await new Promise(r => setTimeout(r, 250));
+    }
+    await interaction.followUp({ content: `✅ Prefix \`${prefix}\` set for ${roleIds.length} role(s). Synced nicknames for ${members.length} current member(s).`, flags: MessageFlags.Ephemeral }).catch(() => {});
+    return;
+  }
   if (interaction.isModalSubmit() && id.startsWith('setup__np_prefixmodal_submit__')) {
     const roleId = id.replace('setup__np_prefixmodal_submit__', '');
     const prefix = interaction.fields.getTextInputValue('prefix').trim();
