@@ -5,7 +5,8 @@ const {
   Client, GatewayIntentBits, Partials, REST, Routes,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder,
   ChannelType, PermissionFlagsBits, StringSelectMenuBuilder,
-  AttachmentBuilder, MessageFlags,
+  AttachmentBuilder, MessageFlags, ModalBuilder, TextInputBuilder,
+  TextInputStyle, RoleSelectMenuBuilder,
 } = require('discord.js');
 
 // ════════════════════════════════════════════
@@ -47,6 +48,17 @@ const guildConfigSchema = new mongoose.Schema({
   moderation: {
     modRoleIds:      { type: [String], default: [] },
     modLogChannelId: { type: String, default: null },
+  },
+  training: {
+    channel:         { type: String, default: null },
+    announceChannel: { type: String, default: null },
+    trainerRoles:    { type: [String], default: [] },
+    requestRoles:    { type: [String], default: [] },
+    pingRoles:       { type: [String], default: [] },
+    types: {
+      type: [{ id: String, name: String, roleIds: { type: [String], default: [] } }],
+      default: [],
+    },
   },
 }, { strict: false, timestamps: true });
 const GuildConfigModel = mongoose.model('GuildConfig', guildConfigSchema);
@@ -97,6 +109,26 @@ const tempBanSchema = new mongoose.Schema({
 });
 const TempBanModel = mongoose.model('TempBan', tempBanSchema);
 
+const trainingRequestSchema = new mongoose.Schema({
+  guildId:      { type: String, required: true, index: true },
+  requesterId:  { type: String, required: true, index: true },
+  channelId:    { type: String, required: true },
+  messageId:    { type: String, required: true },
+  typeId:       { type: String, default: null },
+  typeName:     { type: String, default: null },
+  status:       { type: String, enum: ['open', 'passed', 'failed'], default: 'open' },
+  claimedBy:    { type: [String], default: [] },
+  resolvedBy:   { type: String, default: null },
+  createdAt:    { type: Date, default: Date.now },
+});
+const TrainingRequestModel = mongoose.model('TrainingRequest', trainingRequestSchema);
+
+const trainCooldownSchema = new mongoose.Schema({
+  _id:      { type: String, required: true }, // `${guildId}:${userId}`
+  lastUsed: { type: Date, required: true },
+});
+const TrainCooldownModel = mongoose.model('TrainCooldown', trainCooldownSchema);
+
 let dbReady = false;
 async function connectDB() {
   if (!process.env.MONGODB_URI) {
@@ -138,6 +170,7 @@ function defaultConfig(guildId) {
       nextNumber: 1,
     },
     moderation: { modRoleIds: [], modLogChannelId: null },
+    training: { channel: null, announceChannel: null, trainerRoles: [], requestRoles: [], pingRoles: [], types: [] },
   };
 }
 
@@ -145,7 +178,12 @@ async function getConfig(guildId) {
   if (configCache.has(guildId)) return configCache.get(guildId);
   let doc = null;
   try { doc = await GuildConfigModel.findById(guildId).lean(); } catch (e) { console.error('getConfig error:', e.message); }
-  const cfg = doc ? { ...defaultConfig(guildId), ...doc, tickets: { ...defaultConfig(guildId).tickets, ...(doc.tickets || {}) }, moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) } }
+  const cfg = doc ? {
+        ...defaultConfig(guildId), ...doc,
+        tickets: { ...defaultConfig(guildId).tickets, ...(doc.tickets || {}) },
+        moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) },
+        training: { ...defaultConfig(guildId).training, ...(doc.training || {}) },
+      }
                   : defaultConfig(guildId);
   configCache.set(guildId, cfg);
   return cfg;
@@ -155,7 +193,7 @@ async function saveConfig(guildId) {
   const cfg = configCache.get(guildId);
   if (!cfg || !dbReady) return;
   try {
-    await GuildConfigModel.findByIdAndUpdate(guildId, { $set: { tickets: cfg.tickets, moderation: cfg.moderation } }, { upsert: true });
+    await GuildConfigModel.findByIdAndUpdate(guildId, { $set: { tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training } }, { upsert: true });
   } catch (e) { console.error('saveConfig error:', e.message); }
 }
 
@@ -193,6 +231,18 @@ function isTicketStaff(member, cfg) {
 function isModerator(member, cfg) {
   if (isAdmin(member)) return true;
   return cfg.moderation.modRoleIds.some(rid => member.roles.cache.has(rid));
+}
+
+function isTrainer(member, cfg) {
+  if (isAdmin(member)) return true;
+  if (!cfg.training.trainerRoles.length) return false;
+  return cfg.training.trainerRoles.some(rid => member.roles.cache.has(rid));
+}
+
+function canRequestTraining(member, cfg) {
+  if (isAdmin(member)) return true;
+  if (!cfg.training.requestRoles.length) return true; // no restriction configured
+  return cfg.training.requestRoles.some(rid => member.roles.cache.has(rid));
 }
 
 async function safeDM(user, payload) {
@@ -410,6 +460,56 @@ async function closeTicket(interaction, ticket, cfg, reason) {
 }
 
 // ════════════════════════════════════════════
+// TRAINING HELPERS
+// ════════════════════════════════════════════
+const TRAIN_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
+function genId() {
+  return Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
+}
+
+async function getTrainCooldownRemaining(guildId, userId) {
+  const rec = await TrainCooldownModel.findById(`${guildId}:${userId}`).lean().catch(() => null);
+  if (!rec) return 0;
+  const remaining = TRAIN_COOLDOWN_MS - (Date.now() - new Date(rec.lastUsed).getTime());
+  return remaining > 0 ? remaining : 0;
+}
+
+async function setTrainCooldown(guildId, userId) {
+  await TrainCooldownModel.findByIdAndUpdate(`${guildId}:${userId}`, { lastUsed: new Date() }, { upsert: true }).catch(() => {});
+}
+
+function buildTrainingRequestEmbed({ user, typeName, times, notes, claimed = [], status = 'open', resolvedBy = null }) {
+  const embed = new EmbedBuilder()
+    .setTitle('📋 Training Request')
+    .setColor(status === 'passed' ? 0x57F287 : status === 'failed' ? 0xED4245 : 0x5865F2)
+    .setThumbnail(user.displayAvatarURL({ dynamic: true }) ?? null)
+    .addFields(
+      { name: '👤 Requester', value: `${userDisplay(user)} (<@${user.id}>)`, inline: true },
+      { name: '🆔 User ID', value: user.id, inline: true },
+      { name: '🎓 Training Type', value: typeName || '*General*', inline: true },
+      { name: '🕐 Available Times', value: times, inline: false },
+      { name: '📝 Notes', value: notes || '*None*', inline: false },
+      { name: '✅ Claimed By', value: claimed.length ? claimed.map(id => `<@${id}>`).join('\n') : '*No one yet*', inline: false },
+    )
+    .setTimestamp();
+  if (status !== 'open') {
+    embed.addFields({ name: '📊 Status', value: status === 'passed' ? '✅ Passed' : '❌ Failed', inline: false });
+    if (resolvedBy) embed.addFields({ name: status === 'passed' ? '🎓 Passed By' : '❌ Failed By', value: `<@${resolvedBy}>`, inline: true });
+  }
+  return embed;
+}
+
+function buildTrainingButtons(requesterId, typeId, disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`tr__claim__${requesterId}__${typeId}`).setLabel('🙋 Claim Training').setStyle(ButtonStyle.Primary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`tr__unclaim__${requesterId}__${typeId}`).setLabel('↩️ Unclaim').setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`tr__pass__${requesterId}__${typeId}`).setLabel('✅ Pass').setStyle(ButtonStyle.Success).setDisabled(disabled),
+    new ButtonBuilder().setCustomId(`tr__fail__${requesterId}__${typeId}`).setLabel('❌ Fail').setStyle(ButtonStyle.Danger).setDisabled(disabled),
+  );
+}
+
+// ════════════════════════════════════════════
 // SLASH COMMANDS
 // ════════════════════════════════════════════
 const P = PermissionFlagsBits;
@@ -518,6 +618,37 @@ const commands = [
     { name: 'user',  type: 6, description: 'Who?', required: true },
     { name: 'roles', type: 3, description: 'Role IDs or mentions, space separated', required: true },
   ]},
+
+  // ── Training ──
+  { name: 'trainingsetup', description: '[Admin] Configure the training request system', default_member_permissions: P.ManageGuild.toString(), options: [
+    { name: 'channel',         type: 1, description: 'Set the channel training requests are posted to', options: [
+      { name: 'channel', type: 7, description: 'Channel', required: true },
+    ]},
+    { name: 'announcechannel', type: 1, description: 'Set the channel to announce passed trainings in', options: [
+      { name: 'channel', type: 7, description: 'Channel', required: true },
+    ]},
+    { name: 'trainerrole',     type: 1, description: 'Add or remove a trainer role', options: [
+      { name: 'action', type: 3, description: 'Add or remove', required: true, choices: [{ name: 'Add', value: 'add' }, { name: 'Remove', value: 'remove' }] },
+      { name: 'role',   type: 8, description: 'Role', required: true },
+    ]},
+    { name: 'requestrole',     type: 1, description: 'Add or remove a role allowed to request training (none = everyone)', options: [
+      { name: 'action', type: 3, description: 'Add or remove', required: true, choices: [{ name: 'Add', value: 'add' }, { name: 'Remove', value: 'remove' }] },
+      { name: 'role',   type: 8, description: 'Role', required: true },
+    ]},
+    { name: 'pingrole',        type: 1, description: 'Add or remove a role pinged on new training requests', options: [
+      { name: 'action', type: 3, description: 'Add or remove', required: true, choices: [{ name: 'Add', value: 'add' }, { name: 'Remove', value: 'remove' }] },
+      { name: 'role',   type: 8, description: 'Role', required: true },
+    ]},
+    { name: 'addtype',         type: 1, description: 'Add a training type', options: [
+      { name: 'name',  type: 3, description: 'Type name (e.g. "Patrol Training")', required: true },
+      { name: 'roles', type: 3, description: 'Role IDs/mentions to grant on pass, space separated', required: false },
+    ]},
+    { name: 'removetype',      type: 1, description: 'Remove a training type by name', options: [
+      { name: 'name', type: 3, description: 'Type name to remove', required: true },
+    ]},
+    { name: 'listtypes',       type: 1, description: 'List all configured training types' },
+  ]},
+  { name: 'trainrequest', description: 'Request a trainer' },
 ];
 
 // ════════════════════════════════════════════
@@ -607,6 +738,75 @@ client.on('interactionCreate', async (interaction) => {
         await closeTicket(interaction, ticket, cfg, 'Closed via button');
         return;
       }
+
+      if (id.startsWith('tr__')) {
+        const [, action, requesterId, typeId] = id.split('__');
+        if (!isTrainer(interaction.member, cfg)) return interaction.reply({ content: '❌ Only trainers can interact with training requests.', flags: MessageFlags.Ephemeral });
+
+        const req = await TrainingRequestModel.findOne({ guildId, messageId: interaction.message.id });
+        if (!req) return interaction.reply({ content: '❌ Could not find this training request in the database.', flags: MessageFlags.Ephemeral });
+        if (req.status !== 'open') return interaction.reply({ content: '❌ This training request has already been completed.', flags: MessageFlags.Ephemeral });
+
+        const requester = await client.users.fetch(requesterId).catch(() => null);
+        if (!requester) return interaction.reply({ content: '❌ Could not fetch the requester.', flags: MessageFlags.Ephemeral });
+
+        if (action === 'claim') {
+          if (req.claimedBy.includes(interaction.user.id)) return interaction.reply({ content: '❌ You already claimed this request.', flags: MessageFlags.Ephemeral });
+          req.claimedBy.push(interaction.user.id);
+          await req.save();
+          const embed = buildTrainingRequestEmbed({ user: requester, typeName: req.typeName, times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value, notes: interaction.message.embeds[0].fields.find(f => f.name === '📝 Notes')?.value, claimed: req.claimedBy });
+          await interaction.update({ embeds: [embed], components: [buildTrainingButtons(requesterId, typeId)] });
+          return;
+        }
+
+        if (action === 'unclaim') {
+          if (!req.claimedBy.includes(interaction.user.id)) return interaction.reply({ content: '❌ You have not claimed this request.', flags: MessageFlags.Ephemeral });
+          req.claimedBy = req.claimedBy.filter(id2 => id2 !== interaction.user.id);
+          await req.save();
+          const embed = buildTrainingRequestEmbed({ user: requester, typeName: req.typeName, times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value, notes: interaction.message.embeds[0].fields.find(f => f.name === '📝 Notes')?.value, claimed: req.claimedBy });
+          await interaction.update({ embeds: [embed], components: [buildTrainingButtons(requesterId, typeId)] });
+          return;
+        }
+
+        if (action === 'pass' || action === 'fail') {
+          const passed = action === 'pass';
+          req.status = passed ? 'passed' : 'failed';
+          req.resolvedBy = interaction.user.id;
+          await req.save();
+          const embed = buildTrainingRequestEmbed({
+            user: requester, typeName: req.typeName,
+            times: interaction.message.embeds[0].fields.find(f => f.name === '🕐 Available Times')?.value,
+            notes: interaction.message.embeds[0].fields.find(f => f.name === '📝 Notes')?.value,
+            claimed: req.claimedBy, status: req.status, resolvedBy: interaction.user.id,
+          });
+          await interaction.update({ embeds: [embed], components: [buildTrainingButtons(requesterId, typeId, true)] });
+
+          if (passed) {
+            const type = cfg.training.types.find(t => t.id === req.typeId);
+            const targetMember = await interaction.guild.members.fetch(requesterId).catch(() => null);
+            if (type?.roleIds?.length && targetMember) {
+              const roleNames = [];
+              for (const rid of type.roleIds) {
+                await targetMember.roles.add(rid).catch(() => {});
+                const r = interaction.guild.roles.cache.get(rid);
+                if (r) roleNames.push(r.name);
+              }
+              await interaction.followUp({ content: `✅ Gave ${type.roleIds.map(r => `<@&${r}>`).join(', ')} to <@${requesterId}> for passing **${type.name}**.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+            }
+            if (cfg.training.announceChannel) {
+              const announceCh = interaction.guild.channels.cache.get(cfg.training.announceChannel);
+              if (announceCh) {
+                await announceCh.send({ content: `🎉 Congratulations <@${requesterId}>! You have **passed your training**${req.typeName ? ` (${req.typeName})` : ''}! Well done!` }).catch(() => {});
+              }
+            }
+            await safeDM(requester, { content: `🎉 You passed your training in **${interaction.guild.name}**${req.typeName ? ` (${req.typeName})` : ''}!` });
+          } else {
+            await safeDM(requester, { content: `❌ Your training request in **${interaction.guild.name}** was marked as failed. You may request again.` });
+          }
+          return;
+        }
+        return;
+      }
       return;
     }
 
@@ -616,6 +816,44 @@ client.on('interactionCreate', async (interaction) => {
         const typeId = interaction.values[0];
         await createTicketChannel(interaction, typeId, cfg);
         return;
+      }
+      if (interaction.customId === 'tr_select_type') {
+        const typeId = interaction.values[0];
+        const type = cfg.training.types.find(t => t.id === typeId);
+        const modal = new ModalBuilder().setCustomId(`modal_trainrequest__${typeId}`).setTitle(`Training Request${type ? ` — ${type.name}`.slice(0, 25) : ''}`.slice(0, 45));
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_times').setLabel('When are you available? (times/timezone)').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. Monday 5-8PM EST, Wednesday 6-9PM EST').setRequired(true).setMaxLength(500)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_notes').setLabel('Anything else the trainer should know?').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. I have done 2 ride-alongs already').setRequired(false).setMaxLength(500)),
+        );
+        await interaction.showModal(modal);
+        return;
+      }
+      return;
+    }
+
+    // ───────── MODAL SUBMIT ─────────
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('modal_trainrequest__')) {
+        const typeId = interaction.customId.replace('modal_trainrequest__', '');
+        const type = typeId !== 'none' ? cfg.training.types.find(t => t.id === typeId) : null;
+        const ch = cfg.training.channel ? interaction.guild.channels.cache.get(cfg.training.channel) : null;
+        if (!ch) return interaction.reply({ content: '❌ Training request channel not found. Contact an admin.', flags: MessageFlags.Ephemeral });
+
+        const times = interaction.fields.getTextInputValue('tr_times');
+        const notes = interaction.fields.getTextInputValue('tr_notes')?.trim() || '';
+
+        const embed = buildTrainingRequestEmbed({ user: interaction.user, typeName: type ? type.name : null, times, notes, claimed: [] });
+        const row = buildTrainingButtons(interaction.user.id, typeId);
+        const ping = cfg.training.pingRoles.length ? cfg.training.pingRoles.map(r => `<@&${r}>`).join(' ') : undefined;
+        const msg = await ch.send({ content: ping, embeds: [embed], components: [row] });
+
+        await TrainingRequestModel.create({
+          guildId, requesterId: interaction.user.id, channelId: ch.id, messageId: msg.id,
+          typeId: type ? type.id : null, typeName: type ? type.name : null,
+        });
+        await setTrainCooldown(guildId, interaction.user.id);
+
+        return interaction.reply({ content: '✅ Your training request has been posted! A trainer will claim it soon.', flags: MessageFlags.Ephemeral });
       }
       return;
     }
@@ -695,6 +933,86 @@ client.on('interactionCreate', async (interaction) => {
         await sendOrUpdatePanel(interaction, channel, cfg, guildId);
         return interaction.reply({ content: `✅ Ticket panel sent to <#${channel.id}>.`, flags: MessageFlags.Ephemeral });
       }
+    }
+
+    // ── Training setup (admin) ──
+    if (cmd === 'trainingsetup') {
+      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === 'channel') {
+        cfg.training.channel = interaction.options.getChannel('channel').id;
+        await saveConfig(guildId);
+        return interaction.reply({ content: `✅ Training request channel set to <#${cfg.training.channel}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (sub === 'announcechannel') {
+        cfg.training.announceChannel = interaction.options.getChannel('channel').id;
+        await saveConfig(guildId);
+        return interaction.reply({ content: `✅ Training announce channel set to <#${cfg.training.announceChannel}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (sub === 'trainerrole' || sub === 'requestrole' || sub === 'pingrole') {
+        const action = interaction.options.getString('action');
+        const role = interaction.options.getRole('role');
+        const key = sub === 'trainerrole' ? 'trainerRoles' : sub === 'requestrole' ? 'requestRoles' : 'pingRoles';
+        if (action === 'add') {
+          if (!cfg.training[key].includes(role.id)) cfg.training[key].push(role.id);
+        } else {
+          cfg.training[key] = cfg.training[key].filter(r => r !== role.id);
+        }
+        await saveConfig(guildId);
+        return interaction.reply({ content: `✅ ${sub} ${action === 'add' ? 'added' : 'removed'}: <@&${role.id}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (sub === 'addtype') {
+        const name = interaction.options.getString('name');
+        const rolesStr = interaction.options.getString('roles');
+        const roleIds = rolesStr ? parseRoleOrUserIds(rolesStr).filter(id => interaction.guild.roles.cache.has(id)) : [];
+        const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || `type${Date.now()}`;
+        cfg.training.types.push({ id, name, roleIds });
+        await saveConfig(guildId);
+        return interaction.reply({ content: `✅ Training type **${name}** added${roleIds.length ? ` (grants ${roleIds.map(r => `<@&${r}>`).join(', ')} on pass)` : ''}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (sub === 'removetype') {
+        const name = interaction.options.getString('name').toLowerCase();
+        const before = cfg.training.types.length;
+        cfg.training.types = cfg.training.types.filter(t => t.name.toLowerCase() !== name);
+        if (cfg.training.types.length === before) return interaction.reply({ content: '❌ No training type found with that name.', flags: MessageFlags.Ephemeral });
+        await saveConfig(guildId);
+        return interaction.reply({ content: '✅ Training type removed.', flags: MessageFlags.Ephemeral });
+      }
+      if (sub === 'listtypes') {
+        const list = cfg.training.types.map(t => `🎓 **${t.name}**${t.roleIds.length ? ` — grants ${t.roleIds.map(r => `<@&${r}>`).join(', ')}` : ''}`).join('\n') || '*No training types configured — `/trainrequest` will use a general request instead.*';
+        return interaction.reply({ content: list, flags: MessageFlags.Ephemeral });
+      }
+    }
+
+    // ── Training request ──
+    if (cmd === 'trainrequest') {
+      if (!canRequestTraining(member, cfg)) return interaction.reply({ content: '❌ You do not have permission to request a trainer.', flags: MessageFlags.Ephemeral });
+      const remaining = await getTrainCooldownRemaining(guildId, interaction.user.id);
+      if (remaining > 0) {
+        const mins = Math.ceil(remaining / 60000);
+        return interaction.reply({ content: `⏳ You can request a trainer again in **${mins} minute${mins !== 1 ? 's' : ''}**.`, flags: MessageFlags.Ephemeral });
+      }
+      if (!cfg.training.channel) return interaction.reply({ content: '❌ Training request channel not set up. Ask an admin to run `/trainingsetup channel`.', flags: MessageFlags.Ephemeral });
+
+      if (cfg.training.types.length > 0) {
+        const typeSelect = new StringSelectMenuBuilder()
+          .setCustomId('tr_select_type')
+          .setPlaceholder('Select the training type...')
+          .addOptions(cfg.training.types.slice(0, 25).map(t => ({ label: t.name.slice(0, 100), value: t.id, description: t.roleIds.length ? 'Role(s) will be assigned on pass' : 'No role assigned' })));
+        return interaction.reply({
+          content: '### 🎓 Select the type of training you are requesting:',
+          components: [new ActionRowBuilder().addComponents(typeSelect)],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const modal = new ModalBuilder().setCustomId('modal_trainrequest__none').setTitle('Training Request');
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_times').setLabel('When are you available? (times/timezone)').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. Monday 5-8PM EST, Wednesday 6-9PM EST').setRequired(true).setMaxLength(500)),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('tr_notes').setLabel('Anything else the trainer should know?').setStyle(TextInputStyle.Paragraph).setPlaceholder('e.g. I have done 2 ride-alongs already').setRequired(false).setMaxLength(500)),
+      );
+      return interaction.showModal(modal);
     }
 
     // ── Ticket management commands ──
