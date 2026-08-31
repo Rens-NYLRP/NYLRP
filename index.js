@@ -56,14 +56,13 @@ const guildConfigSchema = new mongoose.Schema({
     commandRoles: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
   roblox: {
-    groupId:        { type: String, default: null },
     bloxlinkApiKey: { type: String, default: null }, // guild-specific Server API key, from the Bloxlink dashboard
     enabled:        { type: Boolean, default: false },
     ranks: {
-      // Threshold-based: a member's actual group rank (0-255) is compared
-      // against each configured entry; the highest entry they meet or
-      // exceed wins ("de hoogste telt").
-      type: [{ rank: Number, prefix: String }],
+      // Manually configured: a Discord role mapped directly to a prefix.
+      // If a member has multiple configured roles, the one highest in the
+      // server's role hierarchy wins ("de hoogste telt").
+      type: [{ roleId: String, prefix: String }],
       default: [],
     },
   },
@@ -199,7 +198,7 @@ function defaultConfig(guildId) {
     },
     moderation: { modRoleIds: [], modLogChannelId: null },
     permissions: { commandRoles: {} },
-    roblox: { groupId: null, bloxlinkApiKey: null, enabled: false, ranks: [] },
+    roblox: { bloxlinkApiKey: null, enabled: false, ranks: [] },
     training: { channel: null, announceChannel: null, trainerRoles: [], requestRoles: [], pingRoles: [], types: [] },
   };
 }
@@ -553,21 +552,6 @@ async function resolveRobloxId(guildId, discordId, apiKey) {
   return robloxId;
 }
 
-// Gets a Roblox user's numeric rank (0-255) in a specific group.
-async function getRobloxGroupRank(robloxUserId, groupId) {
-  try {
-    const res = await fetch(`https://groups.roblox.com/v1/users/${robloxUserId}/groups/roles`);
-    if (!res.ok) return null;
-    const data = await res.json().catch(() => null);
-    const entry = data?.data?.find(g => String(g.group?.id) === String(groupId));
-    if (!entry) return null;
-    return typeof entry.role?.rank === 'number' ? entry.role.rank : null;
-  } catch (e) {
-    console.error(`Roblox group-rank lookup failed for user ${robloxUserId}:`, e.message);
-    return null;
-  }
-}
-
 async function getRobloxUsername(robloxUserId) {
   try {
     const res = await fetch(`https://users.roblox.com/v1/users/${robloxUserId}`);
@@ -580,16 +564,20 @@ async function getRobloxUsername(robloxUserId) {
   }
 }
 
-// Picks the prefix for the highest configured rank threshold the member's
-// actual rank meets or exceeds ("de hoogste telt").
-function findPrefixForRank(ranks, actualRank) {
-  const eligible = (ranks || []).filter(r => actualRank >= r.rank).sort((a, b) => b.rank - a.rank);
-  return eligible.length ? eligible[0].prefix : null;
+// Among the member's Discord roles that have a configured prefix, the one
+// highest in the server's role hierarchy wins ("de hoogste telt").
+function findPrefixForMember(guild, member, ranks) {
+  const matches = (ranks || [])
+    .map(r => ({ prefix: r.prefix, role: guild.roles.cache.get(r.roleId) }))
+    .filter(r => r.role && member.roles.cache.has(r.role.id));
+  if (!matches.length) return null;
+  matches.sort((a, b) => b.role.position - a.role.position);
+  return matches[0].prefix;
 }
 
 async function syncRobloxPrefixesForGuild(guild, cfg) {
   const rcfg = cfg.roblox;
-  if (!rcfg?.enabled || !rcfg.groupId || !rcfg.bloxlinkApiKey || !rcfg.ranks?.length) return;
+  if (!rcfg?.enabled || !rcfg.bloxlinkApiKey || !rcfg.ranks?.length) return;
 
   let members;
   try {
@@ -603,12 +591,10 @@ async function syncRobloxPrefixesForGuild(guild, cfg) {
     if (member.user.bot) continue;
     if (member.id === guild.ownerId) continue; // Discord never allows renaming the server owner
     try {
+      const prefix = findPrefixForMember(guild, member, rcfg.ranks);
+      if (!prefix) continue; // member has none of the configured roles — leave their nickname alone
       const robloxId = await resolveRobloxId(guild.id, member.id, rcfg.bloxlinkApiKey);
       if (!robloxId) continue;
-      const rank = await getRobloxGroupRank(robloxId, rcfg.groupId);
-      if (rank === null) continue;
-      const prefix = findPrefixForRank(rcfg.ranks, rank);
-      if (!prefix) continue;
       const username = await getRobloxUsername(robloxId);
       if (!username) continue;
       const targetNick = `${prefix} I ${username}`.slice(0, 32); // Discord nickname hard limit
@@ -618,7 +604,7 @@ async function syncRobloxPrefixesForGuild(guild, cfg) {
     } catch (e) {
       console.error(`Roblox sync failed for member ${member.id} in guild ${guild.id}:`, e.message);
     }
-    await new Promise(r => setTimeout(r, 300)); // pace requests to stay well under Roblox/Bloxlink rate limits
+    await new Promise(r => setTimeout(r, 300)); // pace requests to stay well under Bloxlink rate limits
   }
 }
 
@@ -627,6 +613,39 @@ async function syncAllGuildsRobloxPrefixes() {
     const cfg = await getConfig(guild.id);
     await syncRobloxPrefixesForGuild(guild, cfg).catch(e => console.error(`Roblox sync error for guild ${guild.id}:`, e.message));
   }
+}
+
+// Single interactive setup panel — everything is configured through this
+// one message (role-select + buttons + modals), no separate subcommands.
+function buildRobloxSetupPanel(cfg) {
+  const rcfg = cfg.roblox;
+  const rankLines = rcfg.ranks.length
+    ? rcfg.ranks.map(r => `<@&${r.roleId}> → \`${r.prefix}\``).join('\n')
+    : '*Nog geen rollen gekoppeld.*';
+
+  const embed = new EmbedBuilder()
+    .setTitle('🛠️ Roblox Rank Prefix Setup')
+    .setColor(0x5865F2)
+    .setDescription(
+      `**Bloxlink API-key:** ${rcfg.bloxlinkApiKey ? '✅ ingesteld' : '❌ niet ingesteld'}\n` +
+      `**Sync:** ${rcfg.enabled ? '✅ actief (elke 5 min)' : '❌ uitgeschakeld'}\n\n` +
+      `**Gekoppelde rollen:**\n${rankLines}`
+    )
+    .setFooter({ text: 'Heeft een lid meerdere gekoppelde rollen? Dan wint de rol die het hoogst staat in je serverhiërarchie.' });
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new RoleSelectMenuBuilder()
+      .setCustomId('rbxsetup__role')
+      .setPlaceholder('Selecteer een rol om te koppelen, bewerken of ontkoppelen...')
+      .setMaxValues(1),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('rbxsetup__key').setLabel('Bloxlink API-key instellen').setStyle(ButtonStyle.Secondary).setEmoji('🔑'),
+    new ButtonBuilder().setCustomId('rbxsetup__toggle').setLabel(rcfg.enabled ? 'Sync uitschakelen' : 'Sync inschakelen')
+      .setStyle(rcfg.enabled ? ButtonStyle.Danger : ButtonStyle.Success).setEmoji('🔁'),
+  );
+
+  return { embeds: [embed], components: [row1, row2] };
 }
 
 // ════════════════════════════════════════════
@@ -848,24 +867,7 @@ const commands = [
   ]},
 
   // ── Roblox rank-prefix sync (admin) ──
-  { name: 'setup', description: '[Admin] Configure the Roblox group rank → nickname prefix sync', default_member_permissions: P.ManageGuild.toString(), options: [
-    { name: 'group', type: 1, description: 'Set the Roblox group ID to sync ranks from', options: [
-      { name: 'groupid', type: 3, description: 'Roblox group ID', required: true },
-    ]},
-    { name: 'bloxlinkkey', type: 1, description: 'Set this server\'s Bloxlink Server API key (from the Bloxlink dashboard)', options: [
-      { name: 'key', type: 3, description: 'Bloxlink Server API key', required: true },
-    ]},
-    { name: 'addrank', type: 1, description: 'Set the prefix for a rank threshold (the highest matching rank wins)', options: [
-      { name: 'rank',   type: 4, description: 'Roblox rank number (0-255)', required: true, min_value: 0, max_value: 255 },
-      { name: 'prefix', type: 3, description: "Prefix, e.g. '[Owner]'", required: true },
-    ]},
-    { name: 'removerank', type: 1, description: 'Remove a configured rank prefix', options: [
-      { name: 'rank', type: 4, description: 'Roblox rank number', required: true, min_value: 0, max_value: 255 },
-    ]},
-    { name: 'listranks', type: 1, description: 'List all configured rank prefixes' },
-    { name: 'enable',  type: 1, description: 'Enable the rank-prefix sync (runs every 5 minutes)' },
-    { name: 'disable', type: 1, description: 'Disable the rank-prefix sync' },
-  ]},
+  { name: 'setup', description: '[Admin] Open the Roblox rank-prefix setup menu', default_member_permissions: P.ManageGuild.toString() },
 ];
 
 // ════════════════════════════════════════════
@@ -1028,10 +1030,54 @@ client.on('interactionCreate', async (interaction) => {
         }
         return;
       }
+      if (id === 'rbxsetup__key') {
+        if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+        const modal = new ModalBuilder().setCustomId('rbxsetup_modal_key').setTitle('Bloxlink API-key');
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('rbxsetup_key_value').setLabel('Bloxlink Server API-key').setStyle(TextInputStyle.Short)
+            .setPlaceholder('Van het Bloxlink dashboard (Server API Key)').setRequired(true).setMaxLength(200)
+            .setValue(cfg.roblox?.bloxlinkApiKey || ''),
+        ));
+        await interaction.showModal(modal);
+        return;
+      }
+
+      if (id === 'rbxsetup__toggle') {
+        if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+        cfg.roblox = cfg.roblox || { bloxlinkApiKey: null, enabled: false, ranks: [] };
+        if (!cfg.roblox.enabled) {
+          if (!cfg.roblox.bloxlinkApiKey) return interaction.reply({ content: '❌ Stel eerst een Bloxlink API-key in.', flags: MessageFlags.Ephemeral });
+          if (!cfg.roblox.ranks.length) return interaction.reply({ content: '❌ Koppel eerst minstens één rol aan een prefix.', flags: MessageFlags.Ephemeral });
+        }
+        cfg.roblox.enabled = !cfg.roblox.enabled;
+        await saveConfig(guildId);
+        await interaction.update(buildRobloxSetupPanel(cfg));
+        return;
+      }
+
       return;
     }
 
-    // ───────── SELECT MENUS ─────────
+    // ───────── ROLE SELECT MENUS ─────────
+    if (interaction.isRoleSelectMenu()) {
+      if (interaction.customId === 'rbxsetup__role') {
+        if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+        const role = interaction.roles.first();
+        cfg.roblox = cfg.roblox || { bloxlinkApiKey: null, enabled: false, ranks: [] };
+        const existing = cfg.roblox.ranks.find(r => r.roleId === role.id);
+        const modal = new ModalBuilder()
+          .setCustomId(existing ? `rbxsetup_modal_edit__${role.id}` : `rbxsetup_modal_add__${role.id}`)
+          .setTitle(`Prefix voor @${role.name}`.slice(0, 45));
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('rbxsetup_prefix_value')
+            .setLabel(existing ? 'Prefix (leeg = ontkoppelen)' : "Prefix, bv. '[Owner]'").setStyle(TextInputStyle.Short)
+            .setRequired(!existing).setMaxLength(50).setValue(existing?.prefix || ''),
+        ));
+        await interaction.showModal(modal);
+        return;
+      }
+      return;
+    }
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === 'tkt__opensel') {
         const typeId = interaction.values[0];
@@ -1076,6 +1122,35 @@ client.on('interactionCreate', async (interaction) => {
 
         return interaction.reply({ content: '✅ Your training request has been posted! A trainer will claim it soon.', flags: MessageFlags.Ephemeral });
       }
+
+      if (interaction.customId.startsWith('rbxsetup_modal_add__') || interaction.customId.startsWith('rbxsetup_modal_edit__')) {
+        if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+        const isEdit = interaction.customId.startsWith('rbxsetup_modal_edit__');
+        const roleId = interaction.customId.replace(isEdit ? 'rbxsetup_modal_edit__' : 'rbxsetup_modal_add__', '');
+        const prefix = interaction.fields.getTextInputValue('rbxsetup_prefix_value').trim();
+        cfg.roblox = cfg.roblox || { bloxlinkApiKey: null, enabled: false, ranks: [] };
+
+        if (isEdit && !prefix) {
+          cfg.roblox.ranks = cfg.roblox.ranks.filter(r => r.roleId !== roleId);
+        } else {
+          const existing = cfg.roblox.ranks.find(r => r.roleId === roleId);
+          if (existing) existing.prefix = prefix;
+          else cfg.roblox.ranks.push({ roleId, prefix });
+        }
+        await saveConfig(guildId);
+        await interaction.update(buildRobloxSetupPanel(cfg));
+        return;
+      }
+
+      if (interaction.customId === 'rbxsetup_modal_key') {
+        if (!isAdmin(interaction.member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+        cfg.roblox = cfg.roblox || { bloxlinkApiKey: null, enabled: false, ranks: [] };
+        cfg.roblox.bloxlinkApiKey = interaction.fields.getTextInputValue('rbxsetup_key_value').trim();
+        await saveConfig(guildId);
+        await interaction.update(buildRobloxSetupPanel(cfg));
+        return;
+      }
+
       return;
     }
 
@@ -1422,56 +1497,9 @@ client.on('interactionCreate', async (interaction) => {
     // ── Roblox rank-prefix sync setup (admin) ──
     if (cmd === 'setup') {
       if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
-      const sub = interaction.options.getSubcommand();
-      cfg.roblox = cfg.roblox || { groupId: null, bloxlinkApiKey: null, enabled: false, ranks: [] };
-
-      if (sub === 'group') {
-        const groupId = interaction.options.getString('groupid').trim();
-        if (!/^\d+$/.test(groupId)) return interaction.reply({ content: '❌ Group ID must be numeric.', flags: MessageFlags.Ephemeral });
-        cfg.roblox.groupId = groupId;
-        await saveConfig(guildId);
-        return interaction.reply({ content: `✅ Roblox group set to \`${groupId}\`.`, flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'bloxlinkkey') {
-        cfg.roblox.bloxlinkApiKey = interaction.options.getString('key').trim();
-        await saveConfig(guildId);
-        return interaction.reply({ content: '✅ Bloxlink Server API key saved. Keep this private — anyone with it can look up your Bloxlink verification data.', flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'addrank') {
-        const rank = interaction.options.getInteger('rank');
-        const prefix = interaction.options.getString('prefix');
-        const existing = cfg.roblox.ranks.find(r => r.rank === rank);
-        if (existing) existing.prefix = prefix;
-        else cfg.roblox.ranks.push({ rank, prefix });
-        await saveConfig(guildId);
-        return interaction.reply({ content: `✅ Rank **${rank}** and above now get the prefix \`${prefix}\` (unless a higher configured rank also matches — the highest one wins).`, flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'removerank') {
-        const rank = interaction.options.getInteger('rank');
-        const before = cfg.roblox.ranks.length;
-        cfg.roblox.ranks = cfg.roblox.ranks.filter(r => r.rank !== rank);
-        if (cfg.roblox.ranks.length === before) return interaction.reply({ content: '❌ No entry found for that rank.', flags: MessageFlags.Ephemeral });
-        await saveConfig(guildId);
-        return interaction.reply({ content: `✅ Removed the prefix entry for rank **${rank}**.`, flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'listranks') {
-        const sorted = [...cfg.roblox.ranks].sort((a, b) => b.rank - a.rank);
-        const list = sorted.map(r => `Rank **${r.rank}**+ → \`${r.prefix}\``).join('\n') || '*No rank prefixes configured.*';
-        return interaction.reply({ content: `**Group:** ${cfg.roblox.groupId ?? '*not set*'}\n**Sync:** ${cfg.roblox.enabled ? '✅ enabled' : '❌ disabled'}\n\n${list}`, flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'enable') {
-        if (!cfg.roblox.groupId) return interaction.reply({ content: '❌ Set a group first with `/setup group`.', flags: MessageFlags.Ephemeral });
-        if (!cfg.roblox.bloxlinkApiKey) return interaction.reply({ content: '❌ Set a Bloxlink API key first with `/setup bloxlinkkey`.', flags: MessageFlags.Ephemeral });
-        if (!cfg.roblox.ranks.length) return interaction.reply({ content: '❌ Add at least one rank prefix first with `/setup addrank`.', flags: MessageFlags.Ephemeral });
-        cfg.roblox.enabled = true;
-        await saveConfig(guildId);
-        return interaction.reply({ content: '✅ Rank-prefix sync enabled. It runs automatically every 5 minutes.', flags: MessageFlags.Ephemeral });
-      }
-      if (sub === 'disable') {
-        cfg.roblox.enabled = false;
-        await saveConfig(guildId);
-        return interaction.reply({ content: '✅ Rank-prefix sync disabled.', flags: MessageFlags.Ephemeral });
-      }
+      cfg.roblox = cfg.roblox || { bloxlinkApiKey: null, enabled: false, ranks: [] };
+      const panel = buildRobloxSetupPanel(cfg);
+      return interaction.reply({ ...panel, flags: MessageFlags.Ephemeral });
     }
 
     // ── Moderation commands ──
