@@ -297,6 +297,13 @@ function isModerator(member, cfg) {
 // Level 1 = base staff (anyone in modRoleIds). Level 2/3 require the extra rank roles configured
 // via /setup → Moderation. Levels are opt-in: if an admin never configures level2/3RoleIds, every
 // staff member in modRoleIds keeps the old (unrestricted) behavior.
+// Standard rank hierarchy (highest → lowest) used by /seedrankprefixes. Each entry is matched
+// against an existing role's exact name (case-insensitive) — the role itself isn't created.
+const STANDARD_RANK_PREFIXES = [
+  'F', 'CF', 'EO', 'D', 'DD', 'AD', 'SMGMT', 'JMGMT', 'CoS', 'ACoS',
+  'IAD', 'IAAD', 'IAS', 'IAI', 'HA', 'SA', 'JA', 'A', 'HM', 'SM', 'JM', 'M',
+];
+
 const COMMAND_LEVELS = {
   warn: 1, warnings: 1, note: 1, notes: 1, clear: 1, slowmode: 1, lock: 1, unlock: 1,
   mute: 2, unmute: 2, kick: 2, nickname: 2, clearwarnings: 2,
@@ -495,8 +502,10 @@ async function createTicketChannel(interaction, typeId, cfg, reason = null) {
   cfg.tickets.nextNumber = number + 1;
   await saveConfig(guild.id);
 
+  const typeSlug = (type.label || 'ticket').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const userSlug = user.username.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   const ticketCh = await guild.channels.create({
-    name: `ticket-${String(number).padStart(4, '0')}-${user.username}`.toLowerCase().slice(0, 90),
+    name: `${typeSlug}-${userSlug}`.slice(0, 90) || `ticket-${number}`,
     type: ChannelType.GuildText,
     parent: category ?? null,
     permissionOverwrites: perms,
@@ -568,6 +577,7 @@ async function closeTicket(interaction, ticket, cfg, reason) {
       { name: 'Closed by', value: userDisplay(interaction.user), inline: true },
       { name: 'Reason', value: reason || 'No reason provided', inline: true },
     )
+    .setDescription('This channel will be deleted automatically in 10 seconds.')
     .setTimestamp();
   await channel.send({ embeds: [embed] }).catch(() => {});
 
@@ -596,6 +606,8 @@ async function closeTicket(interaction, ticket, cfg, reason) {
       components: [ratingRow],
     }).catch(() => {});
   }
+
+  setTimeout(() => channel.delete().catch(e => console.error(`❌ Failed to auto-delete ticket channel ${channel.id}:`, e.message)), 10000);
 }
 
 // ════════════════════════════════════════════
@@ -1286,6 +1298,7 @@ const commands = [
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
   { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
+  { name: 'seedrankprefixes', description: '[Admin] Auto-configure prefixes for the standard rank hierarchy by matching role names', default_member_permissions: P.ManageGuild.toString() },
   { name: 'warn', description: 'Warn a user', default_member_permissions: P.ModerateMembers.toString(), options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
@@ -1706,6 +1719,53 @@ client.on('interactionCreate', async (interaction) => {
         await new Promise(r => setTimeout(r, 250));
       }
       return interaction.editReply({ content: `✅ Synced nicknames for ${synced} member(s).` });
+    }
+
+    if (cmd === 'seedrankprefixes') {
+      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      const matched = [];
+      const notFound = [];
+      const matchedRoleIds = [];
+      for (const abbr of STANDARD_RANK_PREFIXES) {
+        const role = interaction.guild.roles.cache.find(r => r.name.trim().toLowerCase() === abbr.toLowerCase());
+        if (!role) { notFound.push(abbr); continue; }
+        const existing = cfg.nicknamePrefixes.find(p => p.roleId === role.id);
+        if (existing) existing.prefix = abbr;
+        else cfg.nicknamePrefixes.push({ roleId: role.id, prefix: abbr });
+        matched.push(`\`${abbr}\` → <@&${role.id}>`);
+        matchedRoleIds.push(role.id);
+      }
+
+      if (!matched.length) {
+        return interaction.editReply({ content: `❌ None of the standard rank roles (${STANDARD_RANK_PREFIXES.join(', ')}) were found by exact name in this server. Make sure your role names match exactly, or configure them manually via **/setup → Nickname Prefixes**.` });
+      }
+
+      await saveConfig(guildId);
+
+      // Retroactively apply to every current holder of a matched role (deduped, capped + throttled).
+      const affectedMembers = new Map();
+      for (const roleId of matchedRoleIds) {
+        const role = interaction.guild.roles.cache.get(roleId);
+        if (!role) continue;
+        for (const m of role.members.values()) affectedMembers.set(m.id, m);
+      }
+      const members = [...affectedMembers.values()].slice(0, 200);
+      for (const m of members) {
+        await applyNicknamePrefix(m, cfg);
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🏷️ Rank Prefixes Seeded')
+        .setColor(0x57F287)
+        .addFields({ name: `✅ Matched (${matched.length})`, value: matched.join('\n').slice(0, 1024) });
+      if (notFound.length) {
+        embed.addFields({ name: `⚠️ No role found for (${notFound.length})`, value: `\`${notFound.join('`, `')}\`\nCreate/rename these roles to match exactly, or add them manually via **/setup → Nickname Prefixes**.`.slice(0, 1024) });
+      }
+      embed.setFooter({ text: `Synced nicknames for ${members.length} current member(s).` });
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // ── Ticket setup ──
