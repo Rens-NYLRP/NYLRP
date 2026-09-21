@@ -2304,5 +2304,9 @@ process.on('unhandledRejection', (reason) => { console.error('❌ Unhandled Reje
   startsWithBot: process.env.TOKEN?.startsWith('Bot'),
   hasQuotes: process.env.TOKEN?.startsWith('"') || process.env.TOKEN?.startsWith("'"),
 });
+  console.log("TOKEN TYPE:", typeof process.env.TOKEN);
+console.log("TOKEN LENGTH:", process.env.TOKEN?.length);
+console.log("TOKEN FIRST 10:", process.env.TOKEN?.slice(0, 10));
+console.log("TOKEN LAST 10:", process.env.TOKEN?.slice(-10));
   await client.login(process.env.TOKEN);
 })();
