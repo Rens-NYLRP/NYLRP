@@ -2298,5 +2298,11 @@ process.on('unhandledRejection', (reason) => { console.error('❌ Unhandled Reje
     process.exit(1);
   }
   await connectDB();
+  console.log('TOKEN CHECK:', {
+  exists: !!process.env.TOKEN,
+  length: process.env.TOKEN?.length,
+  startsWithBot: process.env.TOKEN?.startsWith('Bot'),
+  hasQuotes: process.env.TOKEN?.startsWith('"') || process.env.TOKEN?.startsWith("'"),
+});
   await client.login(process.env.TOKEN);
 })();
