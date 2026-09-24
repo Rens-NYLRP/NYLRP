@@ -184,6 +184,7 @@ const configCache = new Map();
 // Bridges the two-step "select roles, then set a prefix" flow (a modal can't carry an arbitrary list
 // of role IDs in its customId due to Discord's 100-char limit), keyed by the staff member's user ID.
 const pendingPrefixRoleSelections = new Map();
+const pendingCocImports = new Map();
 
 function defaultConfig(guildId) {
   return {
@@ -205,6 +206,13 @@ function defaultConfig(guildId) {
     moderation: { modRoleIds: [], modLogChannelId: null, level2RoleIds: [], level3RoleIds: [] },
     training: { channel: null, announceChannel: null, trainerRoles: [], requestRoles: [], pingRoles: [], types: [] },
     nicknamePrefixes: [],
+    welcome: {
+      enabled: false, channelId: null, embedEnabled: true, title: '👋 Welcome!',
+      message: 'Welcome {user} to **{server}**! You are member #{membercount}.',
+      color: '#57F287', image: null, thumbnail: null, dmEnabled: false,
+      dmMessage: 'Welcome to {server}! We\'re glad to have you.',
+    },
+    coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
   };
 }
 
@@ -218,6 +226,8 @@ async function getConfig(guildId) {
         moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) },
         training: { ...defaultConfig(guildId).training, ...(doc.training || {}) },
         nicknamePrefixes: doc.nicknamePrefixes || [],
+        welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
+        coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
       }
                   : defaultConfig(guildId);
   configCache.set(guildId, cfg);
@@ -233,7 +243,10 @@ async function saveConfig(guildId) {
   }
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      await GuildConfigModel.findByIdAndUpdate(guildId, { $set: { tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training, nicknamePrefixes: cfg.nicknamePrefixes } }, { upsert: true });
+      await GuildConfigModel.findByIdAndUpdate(guildId, { $set: {
+        tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training,
+        nicknamePrefixes: cfg.nicknamePrefixes, welcome: cfg.welcome, coc: cfg.coc,
+      } }, { upsert: true });
       return true;
     } catch (e) {
       console.error(`❌ saveConfig(${guildId}) attempt ${attempt}/2 failed:`, e.message);
@@ -692,6 +705,7 @@ function buildSetupHomeComponents() {
     new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
   )];
 }
 
@@ -877,6 +891,88 @@ function buildTrainingTypeDetailView(cfg, typeId) {
   return { embeds: [embed], components: [rowRoles, rowButtons] };
 }
 
+function buildCocView(cfg) {
+  const c = cfg.coc || { title: '🔱 Chain of Command', channelId: null, messageId: null, ranks: [] };
+  const lines = (c.ranks || []).map((r, i) => {
+    const prefix = r.prefix ? ` [${r.prefix}]` : '';
+    return `${i + 1}. <@&${r.roleId}>${prefix}`;
+  });
+  const embed = new EmbedBuilder()
+    .setTitle('🔱 Chain of Command Setup')
+    .setColor(0x5865F2)
+    .setDescription('Import your Chain of Command in bulk. Each line uses **Role Name | Prefix**. Prefix is optional.')
+    .addFields(
+      { name: 'Channel', value: c.channelId ? `<#${c.channelId}>` : '*not set*', inline: true },
+      { name: 'Title', value: c.title || '*not set*', inline: true },
+      { name: 'Imported Ranks', value: lines.length ? lines.join('\\n').slice(0, 4000) : '*none*', inline: false },
+    );
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new ChannelSelectMenuBuilder().setCustomId('setup__coc_channel').setPlaceholder('Select Chain of Command channel').addChannelTypes(ChannelType.GuildText),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup__coc_import').setLabel('Bulk Import').setEmoji('📥').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__coc_publish').setLabel('Publish / Update').setEmoji('📤').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('setup__coc_title').setLabel('Edit Title').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+    ),
+  ];
+  return { embeds: [embed], components };
+}
+
+function buildCocImportPreview(cfg, parsed) {
+  const description = parsed.length
+    ? parsed.map((r, i) => `${i + 1}. <@&${r.roleId}> → \`${r.prefix || 'no prefix'}\``).join('\\n').slice(0, 4000)
+    : '*Nothing to import.*';
+  return {
+    embeds: [new EmbedBuilder().setTitle('📥 Chain of Command Import Preview').setColor(0x5865F2)
+      .setDescription('Check the roles and prefixes below before saving. This will replace the current Chain of Command import.')
+      .addFields({ name: 'Preview', value: description })],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup__coc_import_confirm').setLabel('Confirm Import').setEmoji('✅').setStyle(ButtonStyle.Success).setDisabled(!parsed.length),
+      new ButtonBuilder().setCustomId('setup__coc_import_cancel').setLabel('Cancel').setEmoji('❌').setStyle(ButtonStyle.Secondary),
+    )],
+  };
+}
+
+function resolveCocRole(guild, input) {
+  const cleaned = input.trim().replace(/^<@&|>$/g, '');
+  if (/^\\d{15,25}$/.test(cleaned)) return guild.roles.cache.get(cleaned) || null;
+  return guild.roles.cache.find(r => r.name.toLowerCase() === input.trim().toLowerCase()) || null;
+}
+
+function parseCocImport(guild, raw) {
+  const parsed = [];
+  const errors = [];
+  const seen = new Set();
+  for (const [index, rawLine] of raw.split(/\\r?\\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const pieces = line.split('|').map(x => x.trim());
+    if (pieces.length < 2) {
+      errors.push(`Line ${index + 1}: use Role Name | Prefix`);
+      continue;
+    }
+    const role = resolveCocRole(guild, pieces[0]);
+    const prefix = pieces.slice(1).join('|').trim();
+    if (!role) {
+      errors.push(`Line ${index + 1}: role not found: ${pieces[0]}`);
+      continue;
+    }
+    if (seen.has(role.id)) {
+      errors.push(`Line ${index + 1}: duplicate role: ${role.name}`);
+      continue;
+    }
+    seen.add(role.id);
+    parsed.push({ roleId: role.id, name: role.name, prefix: prefix.slice(0, 20) });
+    if (parsed.length >= 50) {
+      errors.push('Only the first 50 valid ranks were imported.');
+      break;
+    }
+  }
+  return { parsed, errors };
+}
+
 function buildPrefixesView(cfg) {
   const embed = new EmbedBuilder()
     .setTitle('🏷️ Nickname Prefixes')
@@ -927,6 +1023,80 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__moderation') return interaction.update(buildModerationSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__training') return interaction.update(buildTrainingSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__prefixes') return interaction.update(buildPrefixesView(cfg));
+  if (interaction.isButton() && id === 'setup__home__coc') return interaction.update(buildCocView(cfg));
+
+  // ── Chain of Command ──
+  if (interaction.isChannelSelectMenu() && id === 'setup__coc_channel') {
+    cfg.coc.channelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildCocView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__coc_title') {
+    const modal = new ModalBuilder().setCustomId('setup__coc_title_submit').setTitle('Chain of Command Title');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setValue(cfg.coc.title || '🔱 Chain of Command').setRequired(true).setMaxLength(256),
+    ));
+    return interaction.showModal(modal);
+  }
+  if (interaction.isButton() && id === 'setup__coc_import') {
+    const modal = new ModalBuilder().setCustomId('setup__coc_import_submit').setTitle('Bulk Import Chain of Command');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('ranks').setLabel('Role Name | Prefix (one per line)').setStyle(TextInputStyle.Paragraph)
+        .setPlaceholder('Firefighter | F\nChief Firefighter | CF\nExecutive Officer | EO')
+        .setRequired(true).setMaxLength(4000),
+    ));
+    return interaction.showModal(modal);
+  }
+  if (interaction.isButton() && id === 'setup__coc_import_cancel') return interaction.update(buildCocView(cfg));
+  if (interaction.isButton() && id === 'setup__coc_import_confirm') {
+    const pending = pendingCocImports.get(interaction.user.id);
+    if (!pending || pending.guildId !== guildId) return interaction.reply({ content: '❌ Import expired. Start the bulk import again.', flags: MessageFlags.Ephemeral });
+    pendingCocImports.delete(interaction.user.id);
+    cfg.coc.ranks = pending.parsed.map(r => ({ roleId: r.roleId, name: r.name, prefix: r.prefix || '' }));
+    const importedPrefixes = cfg.coc.ranks.filter(r => r.prefix).map(r => ({ roleId: r.roleId, prefix: r.prefix }));
+    const importedRoleIds = new Set(cfg.coc.ranks.map(r => r.roleId));
+    cfg.nicknamePrefixes = (cfg.nicknamePrefixes || []).filter(p => !importedRoleIds.has(p.roleId)).concat(importedPrefixes);
+    await saveConfig(guildId);
+    await interaction.update(buildCocView(cfg));
+    const affected = new Map();
+    for (const r of importedPrefixes) {
+      const role = interaction.guild.roles.cache.get(r.roleId);
+      if (role) for (const m of role.members.values()) affected.set(m.id, m);
+    }
+    const members = [...affected.values()].slice(0, 200);
+    for (const m of members) {
+      await applyNicknamePrefix(m, cfg);
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return interaction.followUp({ content: `✅ Imported ${cfg.coc.ranks.length} rank(s) and ${importedPrefixes.length} prefix(es). Synced ${members.length} current member(s).`, flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  if (interaction.isModalSubmit() && id === 'setup__coc_import_submit') {
+    const { parsed, errors } = parseCocImport(interaction.guild, interaction.fields.getTextInputValue('ranks'));
+    if (!parsed.length) return interaction.reply({ content: `❌ No valid ranks found.\\n${errors.join('\\n').slice(0, 1800)}`, flags: MessageFlags.Ephemeral });
+    pendingCocImports.set(interaction.user.id, { guildId, parsed });
+    setTimeout(() => pendingCocImports.delete(interaction.user.id), 5 * 60 * 1000);
+    const preview = buildCocImportPreview(cfg, parsed);
+    if (errors.length) preview.embeds[0].addFields({ name: 'Warnings', value: errors.join('\\n').slice(0, 1024) });
+    return interaction.update(preview);
+  }
+  if (interaction.isButton() && id === 'setup__coc_publish') {
+    if (!cfg.coc.channelId) return interaction.reply({ content: '❌ Set a Chain of Command channel first.', flags: MessageFlags.Ephemeral });
+    const channel = interaction.guild.channels.cache.get(cfg.coc.channelId);
+    if (!channel) return interaction.reply({ content: '❌ The configured Chain of Command channel no longer exists.', flags: MessageFlags.Ephemeral });
+    const ranks = cfg.coc.ranks || [];
+    const description = ranks.length
+      ? ranks.map((r, i) => `**${i + 1}.** <@&${r.roleId}>${r.prefix ? ` — \`${r.prefix}\`` : ''}`).join('\\n').slice(0, 4000)
+      : '*No ranks imported yet.*';
+    const embed = new EmbedBuilder().setTitle(cfg.coc.title || '🔱 Chain of Command').setColor(0x5865F2).setDescription(description).setTimestamp();
+    let message = cfg.coc.messageId ? await channel.messages.fetch(cfg.coc.messageId).catch(() => null) : null;
+    if (message) await message.edit({ embeds: [embed], components: [] });
+    else {
+      message = await channel.send({ embeds: [embed] });
+      cfg.coc.messageId = message.id;
+      await saveConfig(guildId);
+    }
+    return interaction.reply({ content: `✅ Chain of Command ${message ? 'published/updated' : 'published'} in <#${channel.id}>.`, flags: MessageFlags.Ephemeral });
+  }
 
   // ── Tickets: channel/role selects ──
   if (interaction.isChannelSelectMenu() && id === 'setup__tk_category') {
