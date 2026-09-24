@@ -70,6 +70,23 @@ const guildConfigSchema = new mongoose.Schema({
     type: [{ roleId: String, prefix: String }],
     default: [],
   },
+  welcome: {
+    enabled:      { type: Boolean, default: false },
+    channelId:    { type: String, default: null },
+    embedEnabled: { type: Boolean, default: true },
+    title:        { type: String, default: '👋 Welcome!' },
+    message:      { type: String, default: 'Welcome {user} to **{server}**! You are member #{membercount}.' },
+    color:        { type: String, default: '#57F287' },
+    image:        { type: String, default: null },
+    thumbnail:    { type: String, default: null },
+    dmEnabled:    { type: Boolean, default: false },
+    dmMessage:    { type: String, default: 'Welcome to {server}! We\'re glad to have you.' },
+  },
+  coc: {
+    channelId: { type: String, default: null },
+    messageId: { type: String, default: null },
+    title:     { type: String, default: '🔱 Chain of Command' },
+  },
 }, { strict: false, timestamps: true });
 const GuildConfigModel = mongoose.model('GuildConfig', guildConfigSchema);
 
@@ -2298,15 +2315,5 @@ process.on('unhandledRejection', (reason) => { console.error('❌ Unhandled Reje
     process.exit(1);
   }
   await connectDB();
-  console.log('TOKEN CHECK:', {
-  exists: !!process.env.TOKEN,
-  length: process.env.TOKEN?.length,
-  startsWithBot: process.env.TOKEN?.startsWith('Bot'),
-  hasQuotes: process.env.TOKEN?.startsWith('"') || process.env.TOKEN?.startsWith("'"),
-});
-  console.log("TOKEN TYPE:", typeof process.env.TOKEN);
-console.log("TOKEN LENGTH:", process.env.TOKEN?.length);
-console.log("TOKEN FIRST 10:", process.env.TOKEN?.slice(0, 10));
-console.log("TOKEN LAST 10:", process.env.TOKEN?.slice(-10));
   await client.login(process.env.TOKEN);
 })();
