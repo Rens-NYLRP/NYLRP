@@ -945,28 +945,16 @@ function resolveCocRole(guild, input) {
     .replace(/\\s+/g, ' ')
     .trim();
 
-  // Imports can be written as "NYLRP Founder", while the actual Discord role
-  // may be "NYLRP | Founder". Strip the NYLRP prefix and search by the role name.
-  const search = normalize(cleaned).replace(/^nylrp\\s+/, '').trim();
+  const search = normalize(cleaned);
   if (!search) return null;
 
-  const roles = guild.roles.cache.filter(r => !r.managed);
-
-  // First try the role name itself, e.g. "Founder".
-  const exact = roles.find(r => normalize(r.name) === search);
+  const exact = guild.roles.cache.find(r => !r.managed && normalize(r.name) === search);
   if (exact) return exact;
 
-  // Then try the part after NYLRP, e.g. "NYLRP | Founder" -> "Founder".
-  const afterNylrp = roles.find(r => {
-    const roleName = normalize(r.name).replace(/^nylrp\\s+/, '').trim();
-    return roleName === search;
-  });
-  if (afterNylrp) return afterNylrp;
-
-  // Finally, match all words so separators like |, -, . do not matter.
   const words = search.split(' ').filter(Boolean);
-  return roles.find(r => {
-    const roleName = normalize(r.name).replace(/^nylrp\\s+/, '').trim();
+  return guild.roles.cache.find(r => {
+    if (r.managed) return false;
+    const roleName = normalize(r.name);
     return words.every(word => roleName.includes(word));
   }) || null;
 }
