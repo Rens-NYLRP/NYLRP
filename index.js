@@ -938,7 +938,22 @@ function buildCocImportPreview(cfg, parsed) {
 function resolveCocRole(guild, input) {
   const cleaned = input.trim().replace(/^<@&|>$/g, '');
   if (/^\\d{15,25}$/.test(cleaned)) return guild.roles.cache.get(cleaned) || null;
-  return guild.roles.cache.find(r => r.name.toLowerCase() === input.trim().toLowerCase()) || null;
+
+  const search = cleaned
+    .toLowerCase()
+    .replace(/\\s+/g, ' ')
+    .trim();
+
+  // Eerst exact zoeken
+  const exact = guild.roles.cache.find(
+    r => r.name.toLowerCase().replace(/\\s+/g, ' ').trim() === search
+  );
+  if (exact) return exact;
+
+  // Daarna zoeken of de ingevoerde naam ergens in de rolnaam voorkomt
+  return guild.roles.cache.find(
+    r => r.name.toLowerCase().includes(search)
+  ) || null;
 }
 
 function parseCocImport(guild, raw) {
