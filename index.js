@@ -939,21 +939,22 @@ function resolveCocRole(guild, input) {
   const cleaned = input.trim().replace(/^<@&|>$/g, '');
   if (/^\\d{15,25}$/.test(cleaned)) return guild.roles.cache.get(cleaned) || null;
 
-  const search = cleaned
+  const normalize = value => String(value)
     .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, ' ')
     .replace(/\\s+/g, ' ')
     .trim();
 
-  // Eerst exact zoeken
-  const exact = guild.roles.cache.find(
-    r => r.name.toLowerCase().replace(/\\s+/g, ' ').trim() === search
-  );
+  const search = normalize(cleaned);
+
+  const exact = guild.roles.cache.find(r => normalize(r.name) === search);
   if (exact) return exact;
 
-  // Daarna zoeken of de ingevoerde naam ergens in de rolnaam voorkomt
-  return guild.roles.cache.find(
-    r => r.name.toLowerCase().includes(search)
-  ) || null;
+  const words = search.split(' ').filter(Boolean);
+  return guild.roles.cache.find(r => {
+    const roleName = normalize(r.name);
+    return words.length > 0 && words.every(word => roleName.includes(word));
+  }) || null;
 }
 
 function parseCocImport(guild, raw) {
