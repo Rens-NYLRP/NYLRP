@@ -897,6 +897,43 @@ function buildCocView(cfg) {
     const prefix = r.prefix ? ` [${r.prefix}]` : '';
     return `${i + 1}. <@&${r.roleId}>${prefix}`;
   });
+
+  const rankFields = [];
+  let rankChunk = [];
+
+  for (const line of lines) {
+    const nextValue = [...rankChunk, line].join('\\n');
+
+    if (nextValue.length > 1024) {
+      if (rankChunk.length) {
+        rankFields.push({
+          name: rankFields.length ? 'Imported Ranks (continued)' : 'Imported Ranks',
+          value: rankChunk.join('\\n'),
+          inline: false,
+        });
+      }
+      rankChunk = [line];
+    } else {
+      rankChunk.push(line);
+    }
+  }
+
+  if (rankChunk.length) {
+    rankFields.push({
+      name: rankFields.length ? 'Imported Ranks (continued)' : 'Imported Ranks',
+      value: rankChunk.join('\\n'),
+      inline: false,
+    });
+  }
+
+  if (!rankFields.length) {
+    rankFields.push({
+      name: 'Imported Ranks',
+      value: '*none*',
+      inline: false,
+    });
+  }
+
   const embed = new EmbedBuilder()
     .setTitle('🔱 Chain of Command Setup')
     .setColor(0x5865F2)
@@ -904,7 +941,7 @@ function buildCocView(cfg) {
     .addFields(
       { name: 'Channel', value: c.channelId ? `<#${c.channelId}>` : '*not set*', inline: true },
       { name: 'Title', value: c.title || '*not set*', inline: true },
-      { name: 'Imported Ranks', value: lines.length ? lines.join('\\n').slice(0, 4000) : '*none*', inline: false },
+      ...rankFields,
     );
   const components = [
     new ActionRowBuilder().addComponents(
