@@ -1107,30 +1107,6 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     }
     return interaction.followUp({ content: `✅ Imported ${cfg.coc.ranks.length} rank(s) and ${importedPrefixes.length} prefix(es). Synced ${members.length} current member(s).`, flags: MessageFlags.Ephemeral }).catch(() => {});
   }
-  if (interaction.isModalSubmit() && id === 'setup__coc_import_submit') {
-    try {
-      const raw = interaction.fields.getTextInputValue('ranks') || '';
-      const { parsed, errors } = parseCocImport(interaction.guild, raw);
-      if (!parsed.length) {
-        return interaction.reply({ content: `❌ No valid ranks found.\\n${errors.join('\\n').slice(0, 1800)}`, flags: MessageFlags.Ephemeral });
-      }
-
-      pendingCocImports.set(interaction.user.id, { guildId, parsed });
-      setTimeout(() => pendingCocImports.delete(interaction.user.id), 5 * 60 * 1000);
-
-      const preview = buildCocImportPreview(cfg, parsed);
-      if (errors.length) {
-        preview.embeds[0].addFields({ name: 'Warnings', value: errors.join('\\n').slice(0, 1024) });
-      }
-
-      return interaction.update(preview);
-    } catch (error) {
-      console.error('[CoC Import] Modal processing failed:', error);
-      if (!interaction.replied && !interaction.deferred) {
-        return interaction.reply({ content: '❌ Er ging iets mis bij het verwerken van de bulk import. Controleer de botconsole.', flags: MessageFlags.Ephemeral });
-      }
-    }
-  }
   if (interaction.isButton() && id === 'setup__coc_publish') {
     if (!cfg.coc.channelId) return interaction.reply({ content: '❌ Set a Chain of Command channel first.', flags: MessageFlags.Ephemeral });
     const channel = interaction.guild.channels.cache.get(cfg.coc.channelId);
@@ -1741,6 +1717,39 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     const guildId = interaction.guild.id;
+
+    // Handle the CoC import modal before loading configuration so the interaction
+    // is acknowledged immediately and cannot expire while MongoDB is responding.
+    if (interaction.isModalSubmit() && cid === 'setup__coc_import_submit') {
+      if (!isAdmin(interaction.member)) {
+        return interaction.reply({ content: 'Manage Server permission required.', flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+
+      try {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const cfg = await getConfig(guildId);
+        const raw = interaction.fields.getTextInputValue('ranks') || '';
+        const { parsed, errors } = parseCocImport(interaction.guild, raw);
+
+        if (!parsed.length) {
+          return interaction.editReply({ content: `No valid ranks found.\\n${errors.join('\\n').slice(0, 1800)}` }).catch(() => {});
+        }
+
+        pendingCocImports.set(interaction.user.id, { guildId, parsed });
+        setTimeout(() => pendingCocImports.delete(interaction.user.id), 5 * 60 * 1000);
+
+        const preview = buildCocImportPreview(cfg, parsed);
+        if (errors.length) {
+          preview.embeds[0].addFields({ name: 'Warnings', value: errors.join('\\n').slice(0, 1024) });
+        }
+
+        return interaction.editReply(preview).catch(() => {});
+      } catch (error) {
+        console.error('[CoC Import] Modal processing failed:', error);
+        return interaction.editReply({ content: 'The bulk import could not be processed. Check the bot console for details.' }).catch(() => {});
+      }
+    }
+
     const cfg = await getConfig(guildId);
 
     // ───────── GUI /setup MENU (buttons, selects, modals) ─────────
