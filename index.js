@@ -921,13 +921,32 @@ function buildCocView(cfg) {
 }
 
 function buildCocImportPreview(cfg, parsed) {
-  const description = parsed.length
-    ? parsed.map((r, i) => `${i + 1}. <@&${r.roleId}> → \`${r.prefix || 'no prefix'}\``).join('\\n').slice(0, 4000)
-    : '*Nothing to import.*';
+  const lines = parsed.length
+    ? parsed.map((r, i) => `${i + 1}. <@&${r.roleId}> → \`${r.prefix || 'no prefix'}\``)
+    : ['*Nothing to import.*'];
+
+  const fields = [];
+  let chunk = [];
+  let chunkLength = 0;
+  for (const line of lines) {
+    if (chunk.length && chunkLength + line.length + 1 > 1000) {
+      fields.push({ name: fields.length ? 'Preview (continued)' : 'Preview', value: chunk.join('\\n') });
+      chunk = [];
+      chunkLength = 0;
+    }
+    chunk.push(line);
+    chunkLength += line.length + 1;
+  }
+  if (chunk.length) {
+    fields.push({ name: fields.length ? 'Preview (continued)' : 'Preview', value: chunk.join('\\n') });
+  }
+
   return {
-    embeds: [new EmbedBuilder().setTitle('📥 Chain of Command Import Preview').setColor(0x5865F2)
+    embeds: [new EmbedBuilder()
+      .setTitle('📥 Chain of Command Import Preview')
+      .setColor(0x5865F2)
       .setDescription('Check the roles and prefixes below before saving. This will replace the current Chain of Command import.')
-      .addFields({ name: 'Preview', value: description })],
+      .addFields(fields)],
     components: [new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup__coc_import_confirm').setLabel('Confirm Import').setEmoji('✅').setStyle(ButtonStyle.Success).setDisabled(!parsed.length),
       new ButtonBuilder().setCustomId('setup__coc_import_cancel').setLabel('Cancel').setEmoji('❌').setStyle(ButtonStyle.Secondary),
