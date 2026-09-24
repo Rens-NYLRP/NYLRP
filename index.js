@@ -1089,13 +1089,28 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     return interaction.followUp({ content: `✅ Imported ${cfg.coc.ranks.length} rank(s) and ${importedPrefixes.length} prefix(es). Synced ${members.length} current member(s).`, flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   if (interaction.isModalSubmit() && id === 'setup__coc_import_submit') {
-    const { parsed, errors } = parseCocImport(interaction.guild, interaction.fields.getTextInputValue('ranks'));
-    if (!parsed.length) return interaction.reply({ content: `❌ No valid ranks found.\\n${errors.join('\\n').slice(0, 1800)}`, flags: MessageFlags.Ephemeral });
-    pendingCocImports.set(interaction.user.id, { guildId, parsed });
-    setTimeout(() => pendingCocImports.delete(interaction.user.id), 5 * 60 * 1000);
-    const preview = buildCocImportPreview(cfg, parsed);
-    if (errors.length) preview.embeds[0].addFields({ name: 'Warnings', value: errors.join('\\n').slice(0, 1024) });
-    return interaction.update(preview);
+    try {
+      const raw = interaction.fields.getTextInputValue('ranks') || '';
+      const { parsed, errors } = parseCocImport(interaction.guild, raw);
+      if (!parsed.length) {
+        return interaction.reply({ content: `❌ No valid ranks found.\\n${errors.join('\\n').slice(0, 1800)}`, flags: MessageFlags.Ephemeral });
+      }
+
+      pendingCocImports.set(interaction.user.id, { guildId, parsed });
+      setTimeout(() => pendingCocImports.delete(interaction.user.id), 5 * 60 * 1000);
+
+      const preview = buildCocImportPreview(cfg, parsed);
+      if (errors.length) {
+        preview.embeds[0].addFields({ name: 'Warnings', value: errors.join('\\n').slice(0, 1024) });
+      }
+
+      return interaction.update(preview);
+    } catch (error) {
+      console.error('[CoC Import] Modal processing failed:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        return interaction.reply({ content: '❌ Er ging iets mis bij het verwerken van de bulk import. Controleer de botconsole.', flags: MessageFlags.Ephemeral });
+      }
+    }
   }
   if (interaction.isButton() && id === 'setup__coc_publish') {
     if (!cfg.coc.channelId) return interaction.reply({ content: '❌ Set a Chain of Command channel first.', flags: MessageFlags.Ephemeral });
