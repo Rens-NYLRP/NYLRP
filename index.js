@@ -963,7 +963,7 @@ function parseCocImport(guild, raw) {
   const parsed = [];
   const errors = [];
   const seen = new Set();
-  for (const [index, rawLine] of raw.split(/\\r?\\n/).entries()) {
+  for (const [index, rawLine] of raw.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     const pieces = line.split('|').map(x => x.trim());
