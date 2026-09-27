@@ -1549,6 +1549,18 @@ const commands = [
     { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
+  { name: 'promotion', description: 'Create a promotion announcement (SHR only)', options: [
+    { name: 'member', type: 6, description: 'Member being promoted', required: true },
+    { name: 'department', type: 3, description: 'Department', required: true, max_length: 50 },
+    { name: 'current_rank', type: 8, description: 'Current rank', required: true },
+    { name: 'new_rank', type: 8, description: 'New rank', required: true },
+    { name: 'type', type: 3, description: 'Promotion type', required: true, choices: [
+      { name: 'CoC', value: 'coc' },
+      { name: 'Overig', value: 'overig' },
+    ]},
+    { name: 'reason', type: 3, description: 'Reason for the promotion', required: true, max_length: 500 },
+  ]},
+
   { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
   { name: 'seedrankprefixes', description: '[Admin] Auto-configure prefixes for the standard rank hierarchy by matching role names', default_member_permissions: P.ManageGuild.toString() },
   { name: 'warn', description: 'Warn a user', default_member_permissions: P.ModerateMembers.toString(), options: [
@@ -2324,6 +2336,72 @@ client.on('interactionCreate', async (interaction) => {
         }
         return interaction.reply({ embeds: [embed] });
       }
+      return;
+    }
+
+    if (cmd === 'promotion') {
+      const isSHR = member.roles.cache.some(role => !role.managed && role.name.trim().toLowerCase() === 'shr');
+      if (!isSHR) {
+        return interaction.reply({ content: '❌ Only SHR members can use the promotion command.', flags: MessageFlags.Ephemeral });
+      }
+
+      const targetUser = interaction.options.getUser('member');
+      const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      if (!targetMember) return interaction.reply({ content: '❌ Member not found.', flags: MessageFlags.Ephemeral });
+
+      const department = interaction.options.getString('department').trim();
+      const currentRole = interaction.options.getRole('current_rank');
+      const newRole = interaction.options.getRole('new_rank');
+      const promotionType = interaction.options.getString('type');
+      const reason = interaction.options.getString('reason').trim();
+
+      if (!currentRole || !newRole) {
+        return interaction.reply({ content: '❌ Both ranks must be valid Discord roles.', flags: MessageFlags.Ephemeral });
+      }
+
+      const cocRanks = cfg.coc?.ranks || [];
+      const currentIndex = cocRanks.findIndex(r => r.roleId === currentRole.id);
+      const newIndex = cocRanks.findIndex(r => r.roleId === newRole.id);
+
+      if (promotionType === 'coc') {
+        if (currentIndex === -1 || newIndex === -1) {
+          return interaction.reply({
+            content: '❌ For a **CoC** promotion, both the current and new rank must be configured in **/setup → Chain of Command**.',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+        if (newIndex >= currentIndex) {
+          return interaction.reply({
+            content: '❌ The new rank must be higher than the current rank according to the configured Chain of Command.',
+            flags: MessageFlags.Ephemeral,
+          });
+        }
+      }
+
+      if (!targetMember.roles.cache.has(currentRole.id)) {
+        return interaction.reply({
+          content: `❌ ${targetUser} does not currently have the selected **${currentRole.name}** role.`,
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('NYLRP | Promotion')
+        .setColor(promotionType === 'coc' ? 0x5865F2 : 0x57F287)
+        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
+        .addFields(
+          { name: 'Member', value: `<@${targetUser.id}>`, inline: true },
+          { name: 'Department', value: department, inline: true },
+          { name: 'Promotion Type', value: promotionType === 'coc' ? 'CoC' : 'Overig', inline: true },
+          { name: 'Previous Rank', value: `<@&${currentRole.id}>`, inline: true },
+          { name: 'New Rank', value: `<@&${newRole.id}>`, inline: true },
+          { name: 'Reason', value: reason.slice(0, 1024), inline: false },
+          { name: 'Promoted by', value: `<@${interaction.user.id}>`, inline: true },
+        )
+        .setTimestamp()
+        .setFooter({ text: 'NYLRP Promotion System' });
+
+      await interaction.reply({ embeds: [embed] });
       return;
     }
 
