@@ -408,6 +408,46 @@ async function safeDM(user, payload) {
   try { const dm = await user.createDM(); await dm.send(payload); return true; } catch { return false; }
 }
 
+function replaceWelcomePlaceholders(text, member) {
+  if (!text) return '';
+  const guild = member.guild;
+  return String(text)
+    .replaceAll('{user}', `<@${member.id}>`)
+    .replaceAll('{mention}', `<@${member.id}>`)
+    .replaceAll('{username}', member.user.username)
+    .replaceAll('{server}', guild.name)
+    .replaceAll('{membercount}', String(guild.memberCount))
+    .replaceAll('{id}', member.id);
+}
+
+async function sendWelcomeMessage(member, cfg, channelOverride = null) {
+  const welcome = cfg.welcome;
+  if (!welcome?.enabled || !welcome.channelId) return false;
+  if (member.user.bot) return false;
+
+  const channel = channelOverride || member.guild.channels.cache.get(welcome.channelId);
+  if (!channel || !channel.isTextBased()) return false;
+
+  const content = replaceWelcomePlaceholders(welcome.message, member);
+  const payload = {};
+  if (welcome.embedEnabled) {
+    const embed = new EmbedBuilder()
+      .setColor(hexToInt(welcome.color))
+      .setTitle(replaceWelcomePlaceholders(welcome.title, member))
+      .setDescription(content || null)
+      .setTimestamp();
+    if (isValidUrl(welcome.image)) embed.setImage(welcome.image);
+    if (isValidUrl(welcome.thumbnail)) embed.setThumbnail(welcome.thumbnail);
+    payload.embeds = [embed];
+  } else if (content) {
+    payload.content = content;
+  }
+
+  if (!payload.content && !payload.embeds?.length) return false;
+  await channel.send(payload);
+  return true;
+}
+
 async function logModAction(guild, cfg, embed) {
   if (!cfg.moderation.modLogChannelId) return;
   const ch = guild.channels.cache.get(cfg.moderation.modLogChannelId);
@@ -1491,6 +1531,22 @@ const P = PermissionFlagsBits;
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
 
+  // ── Welcome system ──
+  { name: 'welcome', description: '[Admin] Configure the server welcome message', default_member_permissions: P.ManageGuild.toString(), options: [
+    { name: 'action', type: 3, description: 'What to do', required: true, choices: [
+      { name: 'Setup', value: 'setup' }, { name: 'Test', value: 'test' }, { name: 'Disable', value: 'disable' },
+    ]},
+    { name: 'channel', type: 7, description: 'Channel for welcome messages', required: false, channel_types: [0, 5] },
+    { name: 'message', type: 3, description: 'Message. Placeholders: {user}, {server}, {membercount}', required: false, max_length: 1000 },
+    { name: 'title', type: 3, description: 'Embed title', required: false, max_length: 256 },
+    { name: 'color', type: 3, description: 'Embed color, e.g. #57F287', required: false, max_length: 7 },
+    { name: 'image', type: 3, description: 'Optional image URL', required: false, max_length: 500 },
+    { name: 'thumbnail', type: 3, description: 'Optional thumbnail URL', required: false, max_length: 500 },
+    { name: 'embed', type: 5, description: 'Use an embed', required: false },
+    { name: 'dm', type: 5, description: 'Also send the member a DM', required: false },
+    { name: 'dm_message', type: 3, description: 'Optional DM message', required: false, max_length: 1000 },
+  ]},
+
   // ── GUI setup menu (admin) ──
   { name: 'setup', description: '[Admin] Open the interactive server setup menu', default_member_permissions: P.ManageGuild.toString() },
 
@@ -1706,8 +1762,12 @@ client.on('guildMemberAdd', async (member) => {
   try {
     const cfg = await getConfig(member.guild.id);
     await applyNicknamePrefix(member, cfg);
+    await sendWelcomeMessage(member, cfg);
+    if (cfg.welcome?.dmEnabled && cfg.welcome?.dmMessage) {
+      await safeDM(member.user, { content: replaceWelcomePlaceholders(cfg.welcome.dmMessage, member) });
+    }
   } catch (e) {
-    console.error('guildMemberAdd (nickname prefix) error:', e.message);
+    console.error('guildMemberAdd (welcome/prefix) error:', e.message);
   }
 });
 
@@ -2337,6 +2397,49 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ embeds: [embed] });
       }
       return;
+    }
+
+    if (cmd === 'welcome') {
+      if (!isAdmin(member)) {
+        return interaction.reply({ content: '❌ You do not have permission to configure the welcomer.', flags: MessageFlags.Ephemeral });
+      }
+      const action = interaction.options.getString('action');
+      if (action === 'disable') {
+        cfg.welcome.enabled = false;
+        await saveConfig(guildId);
+        return interaction.reply({ content: '✅ Welcome messages have been disabled.', flags: MessageFlags.Ephemeral });
+      }
+      if (action === 'setup') {
+        const channel = interaction.options.getChannel('channel');
+        if (!channel || !channel.isTextBased()) return interaction.reply({ content: '❌ Select a text channel with the channel option.', flags: MessageFlags.Ephemeral });
+        const message = interaction.options.getString('message');
+        const title = interaction.options.getString('title');
+        const color = interaction.options.getString('color');
+        const image = interaction.options.getString('image');
+        const thumbnail = interaction.options.getString('thumbnail');
+        const embed = interaction.options.getBoolean('embed');
+        const dm = interaction.options.getBoolean('dm');
+        const dmMessage = interaction.options.getString('dm_message');
+        if (color !== null && !/^#[0-9A-Fa-f]{6}$/.test(color)) return interaction.reply({ content: '❌ Color must be a hex value like #57F287.', flags: MessageFlags.Ephemeral });
+        cfg.welcome.enabled = true;
+        cfg.welcome.channelId = channel.id;
+        if (message !== null) cfg.welcome.message = message;
+        if (title !== null) cfg.welcome.title = title;
+        if (color !== null) cfg.welcome.color = color;
+        if (image !== null) cfg.welcome.image = isValidUrl(image) ? image : null;
+        if (thumbnail !== null) cfg.welcome.thumbnail = isValidUrl(thumbnail) ? thumbnail : null;
+        if (embed !== null) cfg.welcome.embedEnabled = embed;
+        if (dm !== null) cfg.welcome.dmEnabled = dm;
+        if (dmMessage !== null) cfg.welcome.dmMessage = dmMessage;
+        await saveConfig(guildId);
+        return interaction.reply({ content: `✅ Welcomer configured in <#${channel.id}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (action === 'test') {
+        if (!cfg.welcome.enabled || !cfg.welcome.channelId) return interaction.reply({ content: '❌ Configure the welcomer first with /welcome action:Setup.', flags: MessageFlags.Ephemeral });
+        const sent = await sendWelcomeMessage(member, cfg);
+        if (cfg.welcome.dmEnabled) await safeDM(member.user, { content: replaceWelcomePlaceholders(cfg.welcome.dmMessage, member) });
+        return interaction.reply({ content: sent ? '✅ Test welcome sent.' : '❌ Could not send the test welcome. Check the channel and bot permissions.', flags: MessageFlags.Ephemeral });
+      }
     }
 
     if (cmd === 'promotion') {
