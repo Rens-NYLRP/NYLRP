@@ -740,13 +740,45 @@ function buildSetupHomeEmbed() {
     .setDescription('Pick a category below to configure. Every selection saves instantly.');
 }
 function buildSetupHomeComponents() {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
-  )];
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup__home__welcome').setLabel('Welcome').setEmoji('👋').setStyle(ButtonStyle.Primary),
+    ),
+  ];
+}
+
+function buildWelcomeSetupView(cfg) {
+  const w = cfg.welcome || {};
+  const embed = new EmbedBuilder()
+    .setTitle('👋 Welcome Setup')
+    .setColor(hexToInt(w.color))
+    .setDescription('Configure the automatic welcome message for new members.')
+    .addFields(
+      { name: 'Status', value: w.enabled ? 'Enabled' : 'Disabled', inline: true },
+      { name: 'Channel', value: w.channelId ? '<#' + w.channelId + '>' : '*not set*', inline: true },
+      { name: 'Embed', value: w.embedEnabled ? 'Enabled' : 'Disabled', inline: true },
+      { name: 'DM', value: w.dmEnabled ? 'Enabled' : 'Disabled', inline: true },
+      { name: 'Title', value: w.title || '*not set*', inline: false },
+      { name: 'Message', value: (w.message || '*not set*').slice(0, 1024), inline: false },
+    );
+  const rowChannel = new ActionRowBuilder().addComponents(
+    new ChannelSelectMenuBuilder().setCustomId('setup__welcome_channel').setPlaceholder('Select the welcome channel').addChannelTypes(ChannelType.GuildText),
+  );
+  const rowButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__welcome_edit').setLabel('Edit Message').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__welcome_test').setLabel('Test').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__welcome_toggle_dm').setLabel(w.dmEnabled ? 'Disable DM' : 'Enable DM').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('setup__welcome_disable').setLabel('Disable').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [rowChannel, rowButtons] };
 }
 
 function buildTicketsSetupView(cfg) {
@@ -1138,6 +1170,60 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__training') return interaction.update(buildTrainingSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__prefixes') return interaction.update(buildPrefixesView(cfg));
   if (interaction.isButton() && id === 'setup__home__coc') return interaction.update(buildCocView(cfg));
+  if (interaction.isButton() && id === 'setup__home__welcome') return interaction.update(buildWelcomeSetupView(cfg));
+
+  if (interaction.isChannelSelectMenu() && id === 'setup__welcome_channel') {
+    cfg.welcome.channelId = interaction.values[0] || null;
+    cfg.welcome.enabled = Boolean(cfg.welcome.channelId);
+    await saveConfig(guildId);
+    return interaction.update(buildWelcomeSetupView(cfg));
+  }
+
+  if (interaction.isButton() && id === 'setup__welcome_test') {
+    if (!cfg.welcome.enabled || !cfg.welcome.channelId) return interaction.reply({ content: '❌ Select a welcome channel first.', flags: MessageFlags.Ephemeral });
+    const sent = await sendWelcomeMessage(interaction.member, cfg);
+    return interaction.reply({ content: sent ? '✅ Test welcome sent.' : '❌ Could not send the welcome message. Check the channel and bot permissions.', flags: MessageFlags.Ephemeral });
+  }
+
+  if (interaction.isButton() && id === 'setup__welcome_disable') {
+    cfg.welcome.enabled = false;
+    await saveConfig(guildId);
+    return interaction.update(buildWelcomeSetupView(cfg));
+  }
+
+  if (interaction.isButton() && id === 'setup__welcome_toggle_dm') {
+    cfg.welcome.dmEnabled = !cfg.welcome.dmEnabled;
+    await saveConfig(guildId);
+    return interaction.update(buildWelcomeSetupView(cfg));
+  }
+
+  if (interaction.isButton() && id === 'setup__welcome_edit') {
+    const modal = new ModalBuilder().setCustomId('setup__welcome_edit_submit').setTitle('Welcome Message');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('Embed title').setStyle(TextInputStyle.Short).setValue(cfg.welcome.title || '').setRequired(true).setMaxLength(256)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('message').setLabel('Welcome message').setStyle(TextInputStyle.Paragraph).setValue(cfg.welcome.message || '').setRequired(true).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('color').setLabel('Embed color (#57F287)').setStyle(TextInputStyle.Short).setValue(cfg.welcome.color || '#57F287').setRequired(true).setMaxLength(7)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setValue(cfg.welcome.image || '').setRequired(false).setMaxLength(500)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumbnail').setLabel('Thumbnail URL (optional)').setStyle(TextInputStyle.Short).setValue(cfg.welcome.thumbnail || '').setRequired(false).setMaxLength(500)),
+    );
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.isModalSubmit() && id === 'setup__welcome_edit_submit') {
+    const title = interaction.fields.getTextInputValue('title').trim();
+    const message = interaction.fields.getTextInputValue('message').trim();
+    const color = interaction.fields.getTextInputValue('color').trim();
+    const image = interaction.fields.getTextInputValue('image').trim();
+    const thumbnail = interaction.fields.getTextInputValue('thumbnail').trim();
+    if (!/^#[0-9A-Fa-f]{6}$/.test(color)) return interaction.reply({ content: '❌ Color must be a hex value like `#57F287`.', flags: MessageFlags.Ephemeral });
+    cfg.welcome.title = title;
+    cfg.welcome.message = message;
+    cfg.welcome.color = color;
+    cfg.welcome.image = image && isValidUrl(image) ? image : null;
+    cfg.welcome.thumbnail = thumbnail && isValidUrl(thumbnail) ? thumbnail : null;
+    await saveConfig(guildId);
+    return interaction.update(buildWelcomeSetupView(cfg));
+  }
 
   // ── Chain of Command ──
   if (interaction.isChannelSelectMenu() && id === 'setup__coc_channel') {
