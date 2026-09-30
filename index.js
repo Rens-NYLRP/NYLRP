@@ -363,19 +363,26 @@ function hasCommandClearance(member, cfg, cmd) {
 // ── Role-based nickname prefixes (e.g. role "Rang I" → nickname "Rang I Username") ──
 function stripKnownPrefixes(currentName, cfg) {
   let name = String(currentName || '').trim();
+
+  // LOA is a protected prefix. If present, keep it at the very front.
+  const loaMatch = name.match(/^LOA\s*\|\s*/i);
+  const hasLOA = Boolean(loaMatch);
+  if (hasLOA) {
+    name = name.slice(loaMatch[0].length).trim();
+  }
+
   const prefixes = (cfg.nicknamePrefixes || [])
     .map(p => String(p.prefix || '').trim())
     .filter(Boolean)
+    .filter(p => !/^LOA$/i.test(p))
     .sort((a, b) => b.length - a.length);
 
-  // Remove any configured prefix already at the start of the nickname.
-  // Supports both the old format ("F Rens") and the new format ("F | Rens").
-  // Keep checking so a nickname can never accumulate multiple old prefixes.
+  // Remove configured rank prefixes while preserving the protected LOA prefix.
   let changed = true;
   while (changed && name) {
     changed = false;
     for (const prefix of prefixes) {
-      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = prefix.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
       const match = name.match(new RegExp('^' + escaped + '(?:\\s*\\|\\s*|\\s+)', 'i'));
       if (match) {
         name = name.slice(match[0].length).trim();
@@ -385,24 +392,29 @@ function stripKnownPrefixes(currentName, cfg) {
     }
   }
 
-  return name;
+  return hasLOA ? `LOA | ${name}` : name;
 }
 
 async function applyNicknamePrefix(member, cfg) {
   if (!cfg.nicknamePrefixes?.length) return;
   if (member.user.bot) return;
-  if (!member.manageable) return; // bot's role isn't high enough, or target is the owner
+  if (!member.manageable) return;
 
-  // A member can have multiple configured prefix roles. The highest Discord role
-  // position always wins, so lower-rank prefixes are removed automatically.
   const applicable = cfg.nicknamePrefixes
-    .filter(p => p.prefix && member.roles.cache.has(p.roleId))
+    .filter(p => p.prefix && !/^LOA$/i.test(p.prefix) && member.roles.cache.has(p.roleId))
     .map(p => ({ ...p, position: member.guild.roles.cache.get(p.roleId)?.position ?? -1 }))
     .sort((a, b) => b.position - a.position);
 
   const currentName = member.nickname || member.user.username;
   const baseName = stripKnownPrefixes(currentName, cfg);
-  const desiredName = applicable.length ? `${applicable[0].prefix} | ${baseName}` : baseName;
+  const rankPrefix = applicable.length ? applicable[0].prefix : null;
+
+  // LOA stays first; the highest rank goes between LOA and the username.
+  const hasLOA = /^LOA\s*\|/i.test(baseName);
+  const username = hasLOA ? baseName.replace(/^LOA\s*\|\s*/i, '').trim() : baseName;
+  const desiredName = hasLOA
+    ? (rankPrefix ? `LOA | ${rankPrefix} | ${username}` : `LOA | ${username}`)
+    : (rankPrefix ? `${rankPrefix} | ${username}` : username);
 
   if (desiredName === currentName) return;
   if (desiredName.length > 32) {
