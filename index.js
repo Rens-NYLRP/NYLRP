@@ -362,12 +362,30 @@ function hasCommandClearance(member, cfg, cmd) {
 
 // ── Role-based nickname prefixes (e.g. role "Rang I" → nickname "Rang I Username") ──
 function stripKnownPrefixes(currentName, cfg) {
-  for (const p of cfg.nicknamePrefixes || []) {
-    if (p.prefix && currentName.startsWith(`${p.prefix} `)) {
-      return currentName.slice(p.prefix.length + 1);
+  let name = String(currentName || '').trim();
+  const prefixes = (cfg.nicknamePrefixes || [])
+    .map(p => String(p.prefix || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  // Remove any configured prefix already at the start of the nickname.
+  // Supports both the old format ("F Rens") and the new format ("F | Rens").
+  // Keep checking so a nickname can never accumulate multiple old prefixes.
+  let changed = true;
+  while (changed && name) {
+    changed = false;
+    for (const prefix of prefixes) {
+      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const match = name.match(new RegExp('^' + escaped + '(?:\\s*\\|\\s*|\\s+)', 'i'));
+      if (match) {
+        name = name.slice(match[0].length).trim();
+        changed = true;
+        break;
+      }
     }
   }
-  return currentName;
+
+  return name;
 }
 
 async function applyNicknamePrefix(member, cfg) {
@@ -375,6 +393,8 @@ async function applyNicknamePrefix(member, cfg) {
   if (member.user.bot) return;
   if (!member.manageable) return; // bot's role isn't high enough, or target is the owner
 
+  // A member can have multiple configured prefix roles. The highest Discord role
+  // position always wins, so lower-rank prefixes are removed automatically.
   const applicable = cfg.nicknamePrefixes
     .filter(p => p.prefix && member.roles.cache.has(p.roleId))
     .map(p => ({ ...p, position: member.guild.roles.cache.get(p.roleId)?.position ?? -1 }))
@@ -382,7 +402,7 @@ async function applyNicknamePrefix(member, cfg) {
 
   const currentName = member.nickname || member.user.username;
   const baseName = stripKnownPrefixes(currentName, cfg);
-  const desiredName = applicable.length ? `${applicable[0].prefix} ${baseName}` : baseName;
+  const desiredName = applicable.length ? `${applicable[0].prefix} | ${baseName}` : baseName;
 
   if (desiredName === currentName) return;
   if (desiredName.length > 32) {
@@ -391,7 +411,6 @@ async function applyNicknamePrefix(member, cfg) {
   }
   await member.setNickname(desiredName, 'Automatic role-based nickname prefix').catch(e => console.error(`❌ Failed to set nickname prefix for ${member.id}:`, e.message));
 }
-
 function isTrainer(member, cfg) {
   if (isAdmin(member)) return true;
   if (!cfg.training.trainerRoles.length) return false;
