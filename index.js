@@ -3026,6 +3026,28 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `❌ Your staff rank doesn't have clearance for \`/${cmd}\` (requires level ${required}). Ask an admin to grant your role via **/setup → Moderation**.`, flags: MessageFlags.Ephemeral });
       }
 
+      const approvalOnly = ['warn', 'mute', 'unmute', 'kick', 'ban', 'softban', 'tempban', 'unban', 'removerole', 'giveroles'];
+      if (approvalOnly.includes(cmd) && !isSHR(member, cfg)) {
+        const payload = { reason: interaction.options.getString('reason') || 'No reason provided' };
+        if (['warn','mute','unmute','kick','ban','softban','tempban'].includes(cmd)) {
+          payload.userId = interaction.options.getUser('user').id;
+          if (cmd === 'mute') payload.minutes = interaction.options.getInteger('minutes');
+          if (cmd === 'tempban') payload.hours = interaction.options.getInteger('hours');
+          if (cmd === 'ban') payload.deleteDays = interaction.options.getInteger('delete_days') ?? 0;
+        } else if (cmd === 'unban') {
+          payload.userId = interaction.options.getString('userid');
+        } else if (cmd === 'removerole') {
+          payload.userId = interaction.options.getUser('user').id;
+          payload.roleId = interaction.options.getRole('role').id;
+        } else if (cmd === 'giveroles') {
+          payload.userId = interaction.options.getUser('user').id;
+          payload.roleIds = parseRoleOrUserIds(interaction.options.getString('roles'));
+          if (!payload.roleIds.length) return interaction.reply({ content: '❌ No valid role IDs/mentions found.', flags: MessageFlags.Ephemeral });
+        }
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'disciplinary', action: cmd, requesterId: interaction.user.id, payload });
+        return interaction.reply({ content: `✅ ${cmd} request sent for SHR approval (request ${request._id.toString().slice(-6)}). No action has been taken yet.`, flags: MessageFlags.Ephemeral });
+      }
+
       if (cmd === 'warn') {
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason');
