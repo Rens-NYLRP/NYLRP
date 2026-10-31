@@ -3100,15 +3100,15 @@ client.on('interactionCreate', async (interaction) => {
 
     // ── Moderation commands ──
     if (['warn', 'warnings', 'clearwarnings', 'note', 'notes', 'mute', 'unmute', 'kick', 'ban', 'unban', 'softban', 'tempban', 'clear', 'slowmode', 'lock', 'unlock', 'nickname', 'removerole', 'giveroles'].includes(cmd)) {
-      if (!isModerator(member, cfg)) {
+      const approvalOnly = ['warn', 'mute', 'unmute', 'kick', 'ban', 'softban', 'tempban', 'unban', 'removerole', 'giveroles'];
+      const mayRequest = approvalOnly.includes(cmd) && isHR(member, cfg);
+      if (!isModerator(member, cfg) && !isSHR(member, cfg) && !mayRequest) {
         return interaction.reply({ content: '❌ You do not have permission to use moderation commands.', flags: MessageFlags.Ephemeral });
       }
-      if (!hasCommandClearance(member, cfg, cmd)) {
+      if (!isSHR(member, cfg) && !mayRequest && !hasCommandClearance(member, cfg, cmd)) {
         const required = COMMAND_LEVELS[cmd] || 1;
         return interaction.reply({ content: `❌ Your staff rank doesn't have clearance for \`/${cmd}\` (requires level ${required}). Ask an admin to grant your role via **/setup → Moderation**.`, flags: MessageFlags.Ephemeral });
       }
-
-      const approvalOnly = ['warn', 'mute', 'unmute', 'kick', 'ban', 'softban', 'tempban', 'unban', 'removerole', 'giveroles'];
       if (approvalOnly.includes(cmd) && !isSHR(member, cfg)) {
         const payload = { reason: interaction.options.getString('reason') || 'No reason provided' };
         if (['warn','mute','unmute','kick','ban','softban','tempban'].includes(cmd)) {
