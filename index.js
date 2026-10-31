@@ -975,7 +975,6 @@ function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_changelog_channel').setPlaceholder('Select change log channel').addChannelTypes(ChannelType.GuildText)),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
   ] };
 }
 
