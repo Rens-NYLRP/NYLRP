@@ -87,6 +87,16 @@ const guildConfigSchema = new mongoose.Schema({
     messageId: { type: String, default: null },
     title:     { type: String, default: '🔱 Chain of Command' },
   },
+  staffAccess: {
+    shrRoleIds: { type: [String], default: [] },
+    hrRoleIds: { type: [String], default: [] },
+    approvalRoleIds: { type: [String], default: [] },
+    requestChannelId: { type: String, default: null },
+    infractionChannelId: { type: String, default: null },
+  },
+  caseManagement: {
+    systems: { type: mongoose.Schema.Types.Mixed, default: {} },
+  },
 }, { strict: false, timestamps: true });
 const GuildConfigModel = mongoose.model('GuildConfig', guildConfigSchema);
 
@@ -159,6 +169,154 @@ const trainCooldownSchema = new mongoose.Schema({
 });
 const TrainCooldownModel = mongoose.model('TrainCooldown', trainCooldownSchema);
 
+const staffRequestSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  kind: { type: String, enum: ['promotion', 'disciplinary', 'case_infraction'], required: true },
+  action: { type: String, required: true },
+  payload: { type: mongoose.Schema.Types.Mixed, required: true },
+  requesterId: { type: String, required: true },
+  approverId: { type: String, default: null },
+  status: { type: String, enum: ['pending', 'processing', 'approved', 'rejected', 'executed', 'failed'], default: 'pending' },
+  channelId: { type: String, default: null },
+  messageId: { type: String, default: null },
+  caseNumber: { type: Number, default: null },
+  result: { type: String, default: null },
+  createdAt: { type: Date, default: Date.now },
+  resolvedAt: { type: Date, default: null },
+}, { timestamps: true });
+const StaffRequestModel = mongoose.model('StaffRequest', staffRequestSchema);
+
+const caseFileSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  number: { type: Number, required: true },
+  system: { type: String, enum: ['ia', 'management', 'supervisor', 'executive'], required: true },
+  channelId: { type: String, required: true },
+  threadId: { type: String, required: true, unique: true },
+  reportingPartyId: { type: String, required: true },
+  reportedPartyId: { type: String, required: true },
+  reason: { type: String, required: true },
+  status: { type: String, enum: ['Open', 'Under Investigation', 'Awaiting Approval', 'Resolved', 'Closed'], default: 'Open' },
+  investigatorIds: { type: [String], default: [] },
+  supervisorIds: { type: [String], default: [] },
+  notes: { type: [{ authorId: String, text: String, createdAt: Date }], default: [] },
+  bothSides: { type: String, default: null },
+  createdBy: { type: String, required: true },
+  closedAt: { type: Date, default: null },
+  archivedAt: { type: Date, default: null },
+  nextNumberKey: { type: String, required: true },
+}, { timestamps: true });
+caseFileSchema.index({ guildId: 1, number: 1 }, { unique: true });
+const CaseFileModel = mongoose.model('CaseFile', caseFileSchema);
+
+async function postStaffRequest(guild, cfg, data) {
+  const channel = cfg.staffAccess?.requestChannelId ? guild.channels.cache.get(cfg.staffAccess.requestChannelId) : null;
+  if (!channel) throw new Error('Approval channel is not configured. Set it in /setup → Staff Access.');
+  const record = await StaffRequestModel.create({ guildId: guild.id, ...data });
+  const roleIds = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
+  const ping = roleIds.map(id => `<@&${id}>`).join(' ');
+  const embed = new EmbedBuilder().setTitle(`⏳ Approval Request #${record._id.toString().slice(-6)}`).setColor(0xFEE75C)
+    .addFields(
+      { name: 'Type', value: data.kind },
+      { name: 'Action', value: data.action },
+      { name: 'Requested by', value: `<@${data.requesterId}>` },
+      { name: 'Details', value: JSON.stringify(data.payload).slice(0, 1000) },
+    ).setTimestamp();
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`staffreq__approve__${record._id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`staffreq__reject__${record._id}`).setLabel('Reject').setStyle(ButtonStyle.Danger),
+  );
+  const message = await channel.send({ content: ping || undefined, embeds: [embed], components: [row], allowedMentions: { roles: roleIds } });
+  record.channelId = channel.id; record.messageId = message.id; await record.save();
+  return record;
+}
+
+async function executeStaffRequest(interaction, record, cfg) {
+  const p = record.payload;
+  if (record.kind === 'promotion') {
+    const target = await interaction.guild.members.fetch(p.targetUserId);
+    const currentRole = interaction.guild.roles.cache.get(p.currentRoleId);
+    const newRole = interaction.guild.roles.cache.get(p.newRoleId);
+    if (!target || !currentRole || !newRole || !target.roles.cache.has(currentRole.id)) throw new Error('Promotion target or rank changed; request cannot be executed.');
+    const embed = new EmbedBuilder().setTitle('NYLRP | Promotion').setColor(p.promotionType === 'coc' ? 0x5865F2 : 0x57F287)
+      .setThumbnail(target.user.displayAvatarURL()).addFields(
+        { name: 'Member', value: `<@${p.targetUserId}>`, inline: true },
+        { name: 'Department', value: p.department, inline: true },
+        { name: 'Promotion Type', value: p.promotionType === 'coc' ? 'CoC' : 'Overig', inline: true },
+        { name: 'Previous Rank', value: `<@&${p.currentRoleId}>`, inline: true },
+        { name: 'New Rank', value: `<@&${p.newRoleId}>`, inline: true },
+        { name: 'Reason', value: p.reason.slice(0, 1024) },
+        { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+        { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+      ).setTimestamp().setFooter({ text: 'NYLRP Promotion System' });
+    await interaction.channel.send({ embeds: [embed] });
+    return 'Promotion announcement posted.';
+  }
+  const user = p.userId ? await interaction.client.users.fetch(p.userId).catch(() => null) : null;
+  if (record.kind === 'disciplinary') {
+    const notifyApproved = async label => {
+      if (user) await safeDM(user, { embeds: [new EmbedBuilder().setTitle('NYLRP | Case decision').setColor(0xFEE75C)
+        .setDescription(`A disciplinary decision related to a staff case in **${interaction.guild.name}** has been approved.`)
+        .addFields(
+          { name: 'Case number', value: p.caseNumber ? `#${p.caseNumber}` : 'N/A', inline: true },
+          { name: 'Action', value: label, inline: true },
+          { name: 'Reason', value: String(p.reason || 'Not provided').slice(0, 1024) },
+          { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+        ).setFooter({ text: 'The internal case discussion and transcript are confidential and are not included in this message.' }).setTimestamp()] }).catch(() => {});
+      if (cfg.staffAccess?.infractionChannelId) {
+        const auditChannel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
+        if (auditChannel) await auditChannel.send({ embeds: [new EmbedBuilder().setTitle(`Approved Infraction | Case #${record.caseNumber || 'N/A'}`).setColor(0xED4245)
+          .addFields(
+            { name: 'User', value: p.userId ? `<@${p.userId}>` : 'N/A', inline: true },
+            { name: 'Action', value: label, inline: true },
+            { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+            { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Reason', value: String(p.reason || 'N/A').slice(0, 1024) },
+          ).setTimestamp()] });
+      }
+      if (record.caseNumber) {
+        const caseRecord = await CaseFileModel.findOne({ guildId: interaction.guildId, number: record.caseNumber });
+        if (caseRecord) { caseRecord.status = 'Resolved'; await caseRecord.save(); }
+      }
+    };
+    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); await notifyApproved('Unban'); return 'Ban removed.'; }
+    const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
+    if (record.action === 'warn') {
+      if (!user) throw new Error('Target user not found.');
+      await WarningModel.create({ guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason });
+      await notifyApproved('Warning');
+      return 'Warning recorded.';
+    }
+    if (!target) throw new Error('Target must be a current server member.');
+    if (record.action === 'mute') { await target.timeout(p.minutes * 60000, p.reason); await notifyApproved(`Mute (${p.minutes} minutes)`); return 'Mute applied.'; }
+    if (record.action === 'kick') { await target.kick(p.reason); await notifyApproved('Kick'); return 'Member kicked.'; }
+    if (record.action === 'ban') { await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: (p.deleteDays || 0) * 86400 }); await notifyApproved('Ban'); return 'Member banned.'; }
+    if (record.action === 'tempban') {
+      const unbanAt = new Date(Date.now() + p.hours * 3600000);
+      await interaction.guild.members.ban(p.userId, { reason: p.reason });
+      await TempBanModel.findOneAndUpdate({ guildId: interaction.guildId, userId: p.userId }, { guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason, unbanAt }, { upsert: true });
+      await notifyApproved(`Temporary ban (${p.hours} hours)`); return 'Temporary ban applied.';
+    }
+    if (record.action === 'softban') {
+      await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: 86400 });
+      await interaction.guild.members.unban(p.userId, 'Softban completed after SHR approval');
+      await notifyApproved('Softban'); return 'Softban applied.';
+    }
+    if (record.action === 'demotion' || record.action === 'removerole') {
+      const role = interaction.guild.roles.cache.get(p.roleId);
+      if (!role || !target.roles.cache.has(role.id)) throw new Error('The role to remove is no longer assigned.');
+      await target.roles.remove(role.id, p.reason); await notifyApproved(`Role removal: ${role.name}`); return 'Role removed.';
+    }
+    if (record.action === 'giveroles') {
+      const roleIds = (p.roleIds || []).filter(id => interaction.guild.roles.cache.has(id));
+      if (!roleIds.length) throw new Error('No valid roles remain to assign.');
+      await target.roles.add(roleIds, p.reason); await notifyApproved('Role assignment'); return 'Roles assigned.';
+    }
+    if (record.action === 'unmute') { await target.timeout(null, p.reason); await notifyApproved('Unmute'); return 'Mute removed.'; }
+    throw new Error('Unsupported disciplinary action.');
+  }
+  throw new Error('Unsupported approval request type.');
+}
+
 let dbReady = false;
 async function connectDB() {
   if (!process.env.MONGODB_URI) {
@@ -213,6 +371,13 @@ function defaultConfig(guildId) {
       dmMessage: 'Welcome to {server}! We\'re glad to have you.',
     },
     coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
+    staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null },
+    caseManagement: { systems: {
+      ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      management: { label: 'Management', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      supervisor: { label: 'Supervisor', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      executive: { label: 'Executive', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+    } },
   };
 }
 
@@ -228,6 +393,8 @@ async function getConfig(guildId) {
         nicknamePrefixes: doc.nicknamePrefixes || [],
         welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
         coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
+        staffAccess: { ...defaultConfig(guildId).staffAccess, ...(doc.staffAccess || {}) },
+        caseManagement: { ...defaultConfig(guildId).caseManagement, ...(doc.caseManagement || {}), systems: { ...defaultConfig(guildId).caseManagement.systems, ...(doc.caseManagement?.systems || {}) } },
       }
                   : defaultConfig(guildId);
   configCache.set(guildId, cfg);
@@ -246,6 +413,7 @@ async function saveConfig(guildId) {
       await GuildConfigModel.findByIdAndUpdate(guildId, { $set: {
         tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training,
         nicknamePrefixes: cfg.nicknamePrefixes, welcome: cfg.welcome, coc: cfg.coc,
+        staffAccess: cfg.staffAccess, caseManagement: cfg.caseManagement,
       } }, { upsert: true });
       return true;
     } catch (e) {
@@ -316,6 +484,23 @@ function isTicketStaff(member, cfg, ticket = null) {
 // Resolve which support roles apply for a given ticket type (type-specific overrides, falling back to global)
 function resolveSupportRoleIds(cfg, type) {
   return (type?.supportRoleIds && type.supportRoleIds.length) ? type.supportRoleIds : cfg.tickets.supportRoleIds;
+}
+
+function hasAnyConfiguredRole(member, ids = []) {
+  return Boolean(member && ids?.some(id => member.roles?.cache?.has(id)));
+}
+function isOwner(member) {
+  return Boolean(member && member.id === member.guild?.ownerId);
+}
+function isSHR(member, cfg) {
+  return isOwner(member) || hasAnyConfiguredRole(member, cfg.staffAccess?.shrRoleIds || []);
+}
+function isHR(member, cfg) {
+  return isOwner(member) || hasAnyConfiguredRole(member, cfg.staffAccess?.hrRoleIds || []);
+}
+function canApproveStaffRequest(member, cfg) {
+  const ids = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
+  return isOwner(member) || hasAnyConfiguredRole(member, ids);
 }
 
 function isModerator(member, cfg) {
@@ -770,6 +955,58 @@ function buildSetupHomeEmbed() {
     .setColor(0x5865F2)
     .setDescription('Pick a category below to configure. Every selection saves instantly.');
 }
+function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
+  const a = cfg.staffAccess || {};
+  const fields = { shrRoleIds:'SHR roles', hrRoleIds:'HR roles', approvalRoleIds:'Approval roles (SHR / SHRM)' };
+  const embed = new EmbedBuilder().setTitle('🛡️ Staff Access & Approvals').setColor(0x5865F2)
+    .setDescription('Configure role IDs here. The server owner always has full access. Approval roles default to SHR when left empty.')
+    .addFields(
+      { name: 'SHR roles', value: a.shrRoleIds?.length ? a.shrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
+      { name: 'HR roles', value: a.hrRoleIds?.length ? a.hrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
+      { name: 'Approval roles', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
+      { name: 'Request channel', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
+      { name: 'Infractions channel', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
+    );
+  return { embeds: [embed], components: [
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__staff_rolefield').setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label]) => ({ value, label })))),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__staff_roles__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ] };
+}
+
+function buildCaseSetupView(cfg) {
+  const systems = cfg.caseManagement?.systems || {};
+  const labels = { ia:'Internal Affairs', management:'Management', supervisor:'Supervisor', executive:'Executive' };
+  const rows = Object.entries(labels).map(([key,label]) => {
+    const s = systems[key] || {};
+    return { name:label, value:`Channel: ${s.channelId ? `<#${s.channelId}>` : '*not set*'}\nLog: ${s.logChannelId ? `<#${s.logChannelId}>` : '*not set*'}\nRoles configured: ${(s.createRoleIds||[]).length} create, ${(s.accessRoleIds||[]).length} access` };
+  });
+  return { embeds:[new EmbedBuilder().setTitle('📁 Case Management Setup').setColor(0x5865F2).setDescription('Choose a case system. Each system can use a separate channel and role configuration.').addFields(rows)], components:[
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case system').addOptions(Object.entries(labels).map(([value,label])=>({label,value})))),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ]};
+}
+
+function buildCaseSystemSetupView(cfg, key, selectedField = 'createRoleIds') {
+  const s = cfg.caseManagement.systems[key];
+  const fields = { pingRoleIds:'Ping roles', accessRoleIds:'Access roles', createRoleIds:'Create case roles', investigatorRoleIds:'Investigator roles', supervisorRoleIds:'Supervisor roles' };
+  const roleText = ids => ids?.length ? ids.map(x=>`<@&${x}>`).join(' ') : '*none*';
+  const embed = new EmbedBuilder().setTitle(`📁 ${s.label || key} Setup`).setColor(0x5865F2).addFields(
+    {name:'Case channel',value:s.channelId?`<#${s.channelId}>`:'*not set*'},
+    {name:'Log channel',value:s.logChannelId?`<#${s.logChannelId}>`:'*not set*'},
+    ...Object.entries(fields).map(([field,label])=>({name:label,value:roleText(s[field])})),
+  );
+  return { embeds:[embed], components:[
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select case channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Select log channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`setup__case_rolefield__${key}`).setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label])=>({value,label})))),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ]};
+}
+
 function buildSetupHomeComponents() {
   return [
     new ActionRowBuilder().addComponents(
@@ -781,6 +1018,8 @@ function buildSetupHomeComponents() {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup__home__welcome').setLabel('Welcome').setEmoji('👋').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__staff').setLabel('Staff Access').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Case Management').setEmoji('📁').setStyle(ButtonStyle.Primary),
     ),
   ];
 }
@@ -1202,6 +1441,29 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__prefixes') return interaction.update(buildPrefixesView(cfg));
   if (interaction.isButton() && id === 'setup__home__coc') return interaction.update(buildCocView(cfg));
   if (interaction.isButton() && id === 'setup__home__welcome') return interaction.update(buildWelcomeSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__staff') return interaction.update(buildStaffAccessSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__cases') return interaction.update(buildCaseSetupView(cfg));
+  if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
+  if (interaction.isStringSelectMenu() && id.startsWith('setup__case_rolefield__')) return interaction.update(buildCaseSystemSetupView(cfg, id.split('__').pop(), interaction.values[0]));
+  if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_channel__')) {
+    const key = id.split('__').pop(); cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_log__')) {
+    const key = id.split('__').pop(); cfg.caseManagement.systems[key].logChannelId = interaction.values[0] || null;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
+    const [, , , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key, field));
+  }
+  if (interaction.isStringSelectMenu() && id === 'setup__staff_rolefield') return interaction.update(buildStaffAccessSetupView(cfg, interaction.values[0]));
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__staff_roles__')) {
+    const field = id.split('__').pop(); cfg.staffAccess[field] = interaction.values;
+    await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg, field));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_request_channel') { cfg.staffAccess.requestChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_infraction_channel') { cfg.staffAccess.infractionChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
 
   if (interaction.isChannelSelectMenu() && id === 'setup__welcome_channel') {
     cfg.welcome.channelId = interaction.values[0] || null;
@@ -1722,7 +1984,34 @@ const commands = [
     { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
-  { name: 'promotion', description: 'Create a promotion announcement (SHR only)', options: [
+  { name: 'case-create', description: 'Create a new staff case file', options: [
+    { name: 'system', type: 3, description: 'Case system', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
+    { name: 'reporting_party', type: 6, description: 'Reporting party', required: true },
+    { name: 'reported_party', type: 6, description: 'Reported party', required: true },
+    { name: 'reason', type: 3, description: 'Reason / summary', required: true, max_length: 900 },
+  ]},
+  { name: 'case-status', description: 'Update a case status', options: [
+    { name: 'number', type: 4, description: 'Case number', required: true },
+    { name: 'status', type: 3, description: 'New status', required: true, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
+  ]},
+  { name: 'case-note', description: 'Add a note to a case', options: [{ name:'number',type:4,description:'Case number',required:true },{ name:'note',type:3,description:'Internal note',required:true,max_length:900 }]},
+  { name: 'case-investigate', description: 'Assign an investigator or supervisor to a case', options: [
+    {name:'number',type:4,description:'Case number',required:true},
+    {name:'user',type:6,description:'Staff member to assign',required:true},
+    {name:'level',type:3,description:'Investigator level',required:true,choices:[{name:'Investigator',value:'investigator'},{name:'Supervisor+',value:'supervisor'}]},
+  ]},
+  { name: 'case-story', description: 'Add both sides of the story to a case', options: [{name:'number',type:4,description:'Case number',required:true},{name:'text',type:3,description:'Statement / both sides',required:true,max_length:900}]},
+
+  { name: 'case-close', description: 'Close a case without deleting its record', options: [{ name:'number',type:4,description:'Case number',required:true }]},
+  { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
+  { name: 'case-infraction', description: 'Propose an infraction from a case for SHR approval', options: [
+    { name:'number',type:4,description:'Case number',required:true },{ name:'user',type:6,description:'Member',required:true },
+    { name:'action',type:3,description:'Disciplinary action',required:true,choices:[{name:'Warn',value:'warn'},{name:'Mute',value:'mute'},{name:'Kick',value:'kick'},{name:'Ban',value:'ban'},{name:'Tempban',value:'tempban'},{name:'Demotion (remove role)',value:'demotion'}]},
+    { name:'reason',type:3,description:'Reason',required:true,max_length:500 },
+    { name:'duration',type:4,description:'Minutes for mute / hours for tempban',required:false,min_value:1 },
+    { name:'role',type:8,description:'Role to remove for demotion',required:false },
+  ]},
+  { name: 'promotion', description: 'Create a promotion announcement (SHR direct; HR requests approval)', options: [
     { name: 'member', type: 6, description: 'Member being promoted', required: true },
     { name: 'department', type: 3, description: 'Department', required: true, max_length: 50 },
     { name: 'current_rank', type: 8, description: 'Current rank', required: true },
@@ -1736,7 +2025,7 @@ const commands = [
 
   { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
   { name: 'seedrankprefixes', description: '[Admin] Auto-configure prefixes for the standard rank hierarchy by matching role names', default_member_permissions: P.ManageGuild.toString() },
-  { name: 'warn', description: 'Warn a user', default_member_permissions: P.ModerateMembers.toString(), options: [
+  { name: 'warn', description: 'Warn a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
   { name: 'warnings', description: 'View a user\'s warnings', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
@@ -1745,27 +2034,27 @@ const commands = [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true },
   ]},
   { name: 'notes', description: 'View moderator notes for a user', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'mute', description: 'Timeout (mute) a user', default_member_permissions: P.ModerateMembers.toString(), options: [
+  { name: 'mute', description: 'Timeout (mute) a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'minutes', type: 4, description: 'Minutes', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
   { name: 'unmute', description: 'Remove a user\'s timeout', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'kick', description: 'Kick a user', default_member_permissions: P.KickMembers.toString(), options: [
+  { name: 'kick', description: 'Kick a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'ban', description: 'Ban a user', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'ban', description: 'Ban a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
     { name: 'delete_days', type: 4, description: 'Days of messages to delete (0-7)', required: false, min_value: 0, max_value: 7 },
   ]},
-  { name: 'unban', description: 'Unban a user by ID', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'unban', description: 'Unban a user by ID', options: [
     { name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'softban', description: 'Softban a user (ban + immediate unban to purge messages)', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'softban', description: 'Softban a user (ban + immediate unban to purge messages)', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'tempban', description: 'Temporarily ban a user', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'tempban', description: 'Temporarily ban a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'hours', type: 4, description: 'Hours', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
@@ -1780,10 +2069,10 @@ const commands = [
   { name: 'nickname', description: 'Change a user\'s nickname', default_member_permissions: P.ManageNicknames.toString(), options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname (blank to reset)', required: false },
   ]},
-  { name: 'removerole', description: 'Remove a role from a user', default_member_permissions: P.ManageRoles.toString(), options: [
+  { name: 'removerole', description: 'Remove a role from a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true },
   ]},
-  { name: 'giveroles', description: 'Add one or more roles to a user', default_member_permissions: P.ManageRoles.toString(), options: [
+  { name: 'giveroles', description: 'Add one or more roles to a user', options: [
     { name: 'user',  type: 6, description: 'Who?', required: true },
     { name: 'roles', type: 3, description: 'Role IDs or mentions, space separated', required: true },
   ]},
@@ -1987,6 +2276,51 @@ client.on('interactionCreate', async (interaction) => {
     // ───────── BUTTONS ─────────
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      if (id.startsWith('staffreq__')) {
+        const [, action, requestId] = id.split('__');
+        if (!canApproveStaffRequest(interaction.member, cfg)) return interaction.reply({ content: '❌ Only configured SHR / SHRM approval roles can decide requests.', flags: MessageFlags.Ephemeral });
+        let record = await StaffRequestModel.findOne({ _id: requestId, guildId });
+        if (!record || record.status !== 'pending') return interaction.reply({ content: 'This request has already been handled or no longer exists.', flags: MessageFlags.Ephemeral });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        record = await StaffRequestModel.findOneAndUpdate(
+          { _id: requestId, guildId, status: 'pending' },
+          { $set: { status: 'processing', approverId: interaction.user.id } },
+          { new: true },
+        );
+        if (!record) return interaction.editReply('Another SHR member has already handled this request.');
+        if (action === 'reject') {
+          record.status = 'rejected'; record.approverId = interaction.user.id; record.resolvedAt = new Date(); await record.save();
+          await interaction.message.edit({ components: [] }).catch(() => {});
+          return interaction.editReply('Request rejected.');
+        }
+        try {
+          record.approverId = interaction.user.id;
+          record.result = await executeStaffRequest(interaction, record, cfg);
+          record.status = 'executed'; record.resolvedAt = new Date(); await record.save();
+          if (record.kind === 'disciplinary') {
+            const cfgNow = await getConfig(guildId);
+            const logChannel = cfgNow.staffAccess?.infractionChannelId ? interaction.guild.channels.cache.get(cfgNow.staffAccess.infractionChannelId) : null;
+            if (logChannel) {
+              const caseRecord = record.caseNumber ? await CaseFileModel.findOne({ guildId, number: record.caseNumber }) : null;
+              const logEmbed = new EmbedBuilder().setTitle('Approved Infraction').setColor(0xED4245).addFields(
+                { name:'Action', value:record.action, inline:true },
+                { name:'Target', value:record.payload.userId ? `<@${record.payload.userId}>` : 'Unknown', inline:true },
+                { name:'Reason', value:String(record.payload.reason || 'No reason provided').slice(0,1024) },
+                { name:'Requested by', value:`<@${record.requesterId}>`, inline:true },
+                { name:'Approved by', value:`<@${interaction.user.id}>`, inline:true },
+                { name:'Case', value:caseRecord ? `#${caseRecord.number} — <#${caseRecord.threadId}>` : 'No linked case', inline:false },
+              ).setTimestamp();
+              await logChannel.send({ embeds:[logEmbed] }).catch(() => {});
+            }
+          }
+          await interaction.message.edit({ components: [] }).catch(() => {});
+          return interaction.editReply(`Approved and executed: ${record.result}`);
+        } catch (error) {
+          record.status = 'failed'; record.approverId = interaction.user.id; record.result = error.message; record.resolvedAt = new Date(); await record.save();
+          return interaction.editReply(`Approval failed: ${error.message}`);
+        }
+      }
 
       if (id.startsWith('tkt__open__')) {
         const typeId = id.replace('tkt__open__', '');
@@ -2560,9 +2894,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'promotion') {
-      const isSHR = member.roles.cache.some(role => !role.managed && role.name.trim().toLowerCase() === 'shr');
-      if (!isSHR) {
-        return interaction.reply({ content: '❌ Only SHR members can use the promotion command.', flags: MessageFlags.Ephemeral });
+      if (!isSHR(member, cfg) && !isHR(member, cfg)) {
+        return interaction.reply({ content: '❌ You need a configured SHR or HR role to request a promotion.', flags: MessageFlags.Ephemeral });
       }
 
       const targetUser = interaction.options.getUser('member');
@@ -2603,6 +2936,13 @@ client.on('interactionCreate', async (interaction) => {
           content: `❌ ${targetUser} does not currently have the selected **${currentRole.name}** role.`,
           flags: MessageFlags.Ephemeral,
         });
+      }
+
+      if (!isSHR(member, cfg)) {
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'promotion', action: 'promotion', requesterId: interaction.user.id, payload: {
+          targetUserId: targetUser.id, department, currentRoleId: currentRole.id, newRoleId: newRole.id, promotionType, reason,
+        } });
+        return interaction.reply({ content: `✅ Promotion request submitted for SHR approval (request ${request._id.toString().slice(-6)}).`, flags: MessageFlags.Ephemeral });
       }
 
       const embed = new EmbedBuilder()
@@ -2659,14 +2999,151 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.editReply({ embeds: [embed] });
     }
 
+    // Case management commands
+    if (cmd.startsWith('case-')) {
+      const caseNumber = interaction.options.getInteger('number');
+      const systemKey = cmd === 'case-create' ? interaction.options.getString('system') : null;
+      if (cmd === 'case-create') {
+        const sys = cfg.caseManagement.systems[systemKey];
+        if (!sys?.channelId) return interaction.reply({ content: '❌ This case system has no channel configured in /setup → Case Management.', flags: MessageFlags.Ephemeral });
+        const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds);
+        if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
+        const channel = interaction.guild.channels.cache.get(sys.channelId);
+        if (!channel) return interaction.reply({ content: '❌ Configured case channel not found.', flags: MessageFlags.Ephemeral });
+        const next = await CaseFileModel.findOne({ guildId }).sort({ number: -1 }).select('number').lean();
+        const number = (next?.number || 0) + 1;
+        const reporter = interaction.options.getUser('reporting_party');
+        const reported = interaction.options.getUser('reported_party');
+        const reason = interaction.options.getString('reason');
+        const embed = new EmbedBuilder().setTitle(`${sys.label} | Case #${number}`).setColor(0x5865F2).addFields(
+          { name: 'Reporting Party', value: `<@${reporter.id}>`, inline: true },
+          { name: 'Reported Party', value: `<@${reported.id}>`, inline: true },
+          { name: 'Reason', value: reason },
+          { name: 'Status', value: 'Open', inline: true },
+          { name: 'User Investigating', value: '*Not assigned*', inline: true },
+          { name: 'Supervisor+ Investigating', value: '*Not assigned*', inline: true },
+          { name: 'Both Sides of the Story', value: '*Pending*' },
+          { name: 'Notes', value: '*No notes yet*' },
+        ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
+        const pingIds = sys.pingRoleIds || [];
+        const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
+        const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
+        const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
+        await interaction.guild.members.fetch().catch(() => {});
+        const allowedMembers = new Set([interaction.user.id]);
+        const roleIds = [...(sys.accessRoleIds || []), ...(sys.createRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || [])];
+        for (const roleId of roleIds) {
+          const role = interaction.guild.roles.cache.get(roleId);
+          if (role) for (const roleMember of role.members.values()) allowedMembers.add(roleMember.id);
+        }
+        for (const userId of [...allowedMembers].slice(0, 1000)) {
+          await thread.members.add(userId).catch(error => console.warn(`Could not add ${userId} to private case thread ${thread.id}:`, error.message));
+        }
+        if (sys.logChannelId) {
+          const logChannel = interaction.guild.channels.cache.get(sys.logChannelId);
+          if (logChannel) await logChannel.send({ embeds: [new EmbedBuilder().setTitle(`Case #${number} Created`).setColor(0x5865F2).addFields(
+            {name:'System',value:sys.label,inline:true},{name:'Created by',value:`<@${interaction.user.id}>`,inline:true},
+            {name:'Reporting party',value:`<@${reporter.id}>`,inline:true},{name:'Reported party',value:`<@${reported.id}>`,inline:true},
+            {name:'Thread',value:`<#${thread.id}>`},{name:'Reason',value:reason.slice(0,1024)},
+          ).setTimestamp()] }).catch(() => {});
+        }
+        await interaction.reply({ content: `✅ Private case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const record = await CaseFileModel.findOne({ guildId, number: caseNumber || interaction.options.getInteger('number') });
+      if (!record) return interaction.reply({ content: '❌ Case not found.', flags: MessageFlags.Ephemeral });
+      const sys = cfg.caseManagement.systems[record.system] || {};
+      const hasAccess = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
+      if (!hasAccess) return interaction.reply({ content: '❌ You do not have access to this case.', flags: MessageFlags.Ephemeral });
+      if (cmd === 'case-status') {
+        record.status = interaction.options.getString('status'); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`📊 Case status updated to **${record.status}** by <@${interaction.user.id}>.`);
+        return interaction.reply({ content: `✅ Case #${record.number} status: ${record.status}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-note') {
+        const note = interaction.options.getString('note');
+        record.notes.push({ authorId: interaction.user.id, text: note, createdAt: new Date() }); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`📝 **Case note by <@${interaction.user.id}>:** ${note}`);
+        return interaction.reply({ content: `✅ Note added to case #${record.number}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-investigate') {
+        const assigned = interaction.options.getUser('user');
+        const level = interaction.options.getString('level');
+        const allowedRoles = level === 'supervisor' ? (sys.supervisorRoleIds || []) : (sys.investigatorRoleIds || []);
+        if (!isOwner(member) && !hasAnyConfiguredRole(member, [...(sys.supervisorRoleIds || []), ...(sys.accessRoleIds || [])])) {
+          return interaction.reply({ content:'❌ Only case supervisors or configured case managers can assign investigators.', flags:MessageFlags.Ephemeral });
+        }
+        if (!hasAnyConfiguredRole(await interaction.guild.members.fetch(assigned.id).catch(()=>null), allowedRoles) && !isOwner(await interaction.guild.members.fetch(assigned.id).catch(()=>null))) {
+          return interaction.reply({ content:'❌ That member does not have a configured role for this investigator level.', flags:MessageFlags.Ephemeral });
+        }
+        const list = level === 'supervisor' ? record.supervisorIds : record.investigatorIds;
+        if (!list.includes(assigned.id)) list.push(assigned.id);
+        await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`👤 <@${assigned.id}> assigned as ${level === 'supervisor' ? 'Supervisor+' : 'Investigator'} by <@${interaction.user.id}>.`);
+        return interaction.reply({ content:`✅ <@${assigned.id}> assigned to case #${record.number}.`,flags:MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-story') {
+        record.bothSides = interaction.options.getString('text'); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`🗣️ **Both Sides of the Story — added by <@${interaction.user.id}>**\n${record.bothSides}`);
+        return interaction.reply({ content:`✅ Statement added to case #${record.number}.`,flags:MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-close' || cmd === 'case-reopen') {
+        record.status = cmd === 'case-close' ? 'Closed' : 'Open';
+        record.closedAt = cmd === 'case-close' ? new Date() : null; await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) { await thread.send(`📁 Case ${cmd === 'case-close' ? 'closed' : 'reopened'} by <@${interaction.user.id}>. Record retained.`); if (cmd === 'case-close') await thread.setArchived(true).catch(() => {}); else await thread.setArchived(false).catch(() => {}); }
+        return interaction.reply({ content: `✅ Case #${record.number} ${cmd === 'case-close' ? 'closed' : 'reopened'}; record retained.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-infraction') {
+        const user = interaction.options.getUser('user');
+        const action = interaction.options.getString('action');
+        const reason = interaction.options.getString('reason');
+        const duration = interaction.options.getInteger('duration');
+        const role = interaction.options.getRole('role');
+        if (action === 'demotion' && !role) return interaction.reply({ content: 'A role is required for demotion.', flags: MessageFlags.Ephemeral });
+        if (['mute','tempban'].includes(action) && !duration) return interaction.reply({ content: 'A duration is required for this action.', flags: MessageFlags.Ephemeral });
+        record.status = 'Awaiting Approval'; await record.save();
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'disciplinary', action, requesterId: interaction.user.id, caseNumber: record.number, payload: { userId: user.id, reason, minutes: action === 'mute' ? duration : undefined, hours: action === 'tempban' ? duration : undefined, roleId: role?.id, caseNumber: record.number } });
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`⚖️ Proposed ${action} for <@${user.id}>; awaiting SHR approval. Request ${request._id}.`);
+        return interaction.reply({ content: `✅ Infraction proposal sent for SHR approval (request ${request._id.toString().slice(-6)}).`, flags: MessageFlags.Ephemeral });
+      }
+    }
+
     // ── Moderation commands ──
     if (['warn', 'warnings', 'clearwarnings', 'note', 'notes', 'mute', 'unmute', 'kick', 'ban', 'unban', 'softban', 'tempban', 'clear', 'slowmode', 'lock', 'unlock', 'nickname', 'removerole', 'giveroles'].includes(cmd)) {
-      if (!isModerator(member, cfg)) {
+      const approvalOnly = ['warn', 'mute', 'unmute', 'kick', 'ban', 'softban', 'tempban', 'unban', 'removerole', 'giveroles'];
+      const mayRequest = approvalOnly.includes(cmd) && isHR(member, cfg);
+      if (!isModerator(member, cfg) && !isSHR(member, cfg) && !mayRequest) {
         return interaction.reply({ content: '❌ You do not have permission to use moderation commands.', flags: MessageFlags.Ephemeral });
       }
-      if (!hasCommandClearance(member, cfg, cmd)) {
+      if (!isSHR(member, cfg) && !mayRequest && !hasCommandClearance(member, cfg, cmd)) {
         const required = COMMAND_LEVELS[cmd] || 1;
         return interaction.reply({ content: `❌ Your staff rank doesn't have clearance for \`/${cmd}\` (requires level ${required}). Ask an admin to grant your role via **/setup → Moderation**.`, flags: MessageFlags.Ephemeral });
+      }
+      if (approvalOnly.includes(cmd) && !isSHR(member, cfg)) {
+        const payload = { reason: interaction.options.getString('reason') || 'No reason provided' };
+        if (['warn','mute','unmute','kick','ban','softban','tempban'].includes(cmd)) {
+          payload.userId = interaction.options.getUser('user').id;
+          if (cmd === 'mute') payload.minutes = interaction.options.getInteger('minutes');
+          if (cmd === 'tempban') payload.hours = interaction.options.getInteger('hours');
+          if (cmd === 'ban') payload.deleteDays = interaction.options.getInteger('delete_days') ?? 0;
+        } else if (cmd === 'unban') {
+          payload.userId = interaction.options.getString('userid');
+        } else if (cmd === 'removerole') {
+          payload.userId = interaction.options.getUser('user').id;
+          payload.roleId = interaction.options.getRole('role').id;
+        } else if (cmd === 'giveroles') {
+          payload.userId = interaction.options.getUser('user').id;
+          payload.roleIds = parseRoleOrUserIds(interaction.options.getString('roles'));
+          if (!payload.roleIds.length) return interaction.reply({ content: '❌ No valid role IDs/mentions found.', flags: MessageFlags.Ephemeral });
+        }
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'disciplinary', action: cmd, requesterId: interaction.user.id, payload });
+        return interaction.reply({ content: `✅ ${cmd} request sent for SHR approval (request ${request._id.toString().slice(-6)}). No action has been taken yet.`, flags: MessageFlags.Ephemeral });
       }
 
       if (cmd === 'warn') {
@@ -2727,7 +3204,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `🔊 **${userDisplay(user)}** unmuted.` });
       }
       if (cmd === 'kick') {
-        if (!member.permissions.has(P.KickMembers)) return interaction.reply({ content: '❌ Kick Members permission required.', flags: MessageFlags.Ephemeral });
+        if (!isSHR(member, cfg) && !member.permissions.has(P.KickMembers)) return interaction.reply({ content: '❌ Kick Members permission required.', flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason') || 'No reason provided';
         const target = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -2740,7 +3217,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `👢 **${userDisplay(user)}** kicked.` });
       }
       if (cmd === 'ban') {
-        if (!member.permissions.has(P.BanMembers)) return interaction.reply({ content: '❌ Ban Members permission required.', flags: MessageFlags.Ephemeral });
+        if (!isSHR(member, cfg) && !member.permissions.has(P.BanMembers)) return interaction.reply({ content: '❌ Ban Members permission required.', flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason') || 'No reason provided';
         const deleteDays = interaction.options.getInteger('delete_days') ?? 0;
