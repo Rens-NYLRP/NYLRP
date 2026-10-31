@@ -258,35 +258,45 @@ async function executeStaffRequest(interaction, record) {
     if (record.action === 'warn') {
       if (!user) throw new Error('Target user not found.');
       await WarningModel.create({ guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason });
-      await safeDM(user, { content: `⚠️ You were warned in **${interaction.guild.name}**: ${p.reason}` });
+      await safeDM(user, { content: `⚠️ Your case-related warning in **${interaction.guild.name}** has been approved by <@${interaction.user.id}>.\nReason: ${p.reason}\nCase: #${p.caseNumber || 'N/A'}` });
       return 'Warning recorded.';
     }
     if (!target) throw new Error('Target must be a current server member.');
-    if (record.action === 'mute') { await target.timeout(p.minutes * 60000, p.reason); return 'Mute applied.'; }
-    if (record.action === 'kick') { await target.kick(p.reason); return 'Member kicked.'; }
-    if (record.action === 'ban') { await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: (p.deleteDays || 0) * 86400 }); return 'Member banned.'; }
+    const notifyApproved = async label => {
+      if (user) await safeDM(user, { embeds: [new EmbedBuilder().setTitle('NYLRP | Case decision').setColor(0xFEE75C)
+        .setDescription(`A disciplinary decision related to a staff case in **${interaction.guild.name}** has been approved.`)
+        .addFields(
+          { name: 'Case number', value: p.caseNumber ? `#${p.caseNumber}` : 'N/A', inline: true },
+          { name: 'Action', value: label, inline: true },
+          { name: 'Reason', value: String(p.reason || 'Not provided').slice(0, 1024) },
+          { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+        ).setFooter({ text: 'The internal case discussion and transcript are confidential and are not included in this message.' }).setTimestamp()] }).catch(() => {});
+    };
+    if (record.action === 'mute') { await target.timeout(p.minutes * 60000, p.reason); await notifyApproved(`Mute (${p.minutes} minutes)`); return 'Mute applied.'; }
+    if (record.action === 'kick') { await target.kick(p.reason); await notifyApproved('Kick'); return 'Member kicked.'; }
+    if (record.action === 'ban') { await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: (p.deleteDays || 0) * 86400 }); await notifyApproved('Ban'); return 'Member banned.'; }
     if (record.action === 'tempban') {
       const unbanAt = new Date(Date.now() + p.hours * 3600000);
       await interaction.guild.members.ban(p.userId, { reason: p.reason });
       await TempBanModel.findOneAndUpdate({ guildId: interaction.guildId, userId: p.userId }, { guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason, unbanAt }, { upsert: true });
-      return 'Temporary ban applied.';
+      await notifyApproved(`Temporary ban (${p.hours} hours)`); return 'Temporary ban applied.';
     }
     if (record.action === 'softban') {
       await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: 86400 });
       await interaction.guild.members.unban(p.userId, 'Softban completed after SHR approval');
-      return 'Softban applied.';
+      await notifyApproved('Softban'); return 'Softban applied.';
     }
     if (record.action === 'demotion' || record.action === 'removerole') {
       const role = interaction.guild.roles.cache.get(p.roleId);
       if (!role || !target.roles.cache.has(role.id)) throw new Error('The role to remove is no longer assigned.');
-      await target.roles.remove(role.id, p.reason); return 'Role removed.';
+      await target.roles.remove(role.id, p.reason); await notifyApproved(`Role removal: ${role.name}`); return 'Role removed.';
     }
     if (record.action === 'giveroles') {
       const roleIds = (p.roleIds || []).filter(id => interaction.guild.roles.cache.has(id));
       if (!roleIds.length) throw new Error('No valid roles remain to assign.');
       await target.roles.add(roleIds, p.reason); return 'Roles assigned.';
     }
-    if (record.action === 'unmute') { await target.timeout(null, p.reason); return 'Mute removed.'; }
+    if (record.action === 'unmute') { await target.timeout(null, p.reason); await notifyApproved('Unmute'); return 'Mute removed.'; }
     throw new Error('Unsupported disciplinary action.');
   }
   throw new Error('Unsupported approval request type.');
