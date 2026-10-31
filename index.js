@@ -1993,7 +1993,7 @@ const commands = [
 
   { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
   { name: 'seedrankprefixes', description: '[Admin] Auto-configure prefixes for the standard rank hierarchy by matching role names', default_member_permissions: P.ManageGuild.toString() },
-  { name: 'warn', description: 'Warn a user', default_member_permissions: P.ModerateMembers.toString(), options: [
+  { name: 'warn', description: 'Warn a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
   { name: 'warnings', description: 'View a user\'s warnings', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
@@ -2002,27 +2002,27 @@ const commands = [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'text', type: 3, description: 'Note', required: true },
   ]},
   { name: 'notes', description: 'View moderator notes for a user', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'mute', description: 'Timeout (mute) a user', default_member_permissions: P.ModerateMembers.toString(), options: [
+  { name: 'mute', description: 'Timeout (mute) a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'minutes', type: 4, description: 'Minutes', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
   { name: 'unmute', description: 'Remove a user\'s timeout', default_member_permissions: P.ModerateMembers.toString(), options: [{ name: 'user', type: 6, description: 'Who?', required: true }] },
-  { name: 'kick', description: 'Kick a user', default_member_permissions: P.KickMembers.toString(), options: [
+  { name: 'kick', description: 'Kick a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'ban', description: 'Ban a user', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'ban', description: 'Ban a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
     { name: 'delete_days', type: 4, description: 'Days of messages to delete (0-7)', required: false, min_value: 0, max_value: 7 },
   ]},
-  { name: 'unban', description: 'Unban a user by ID', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'unban', description: 'Unban a user by ID', options: [
     { name: 'userid', type: 3, description: 'User ID', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'softban', description: 'Softban a user (ban + immediate unban to purge messages)', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'softban', description: 'Softban a user (ban + immediate unban to purge messages)', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: false },
   ]},
-  { name: 'tempban', description: 'Temporarily ban a user', default_member_permissions: P.BanMembers.toString(), options: [
+  { name: 'tempban', description: 'Temporarily ban a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true },
     { name: 'hours', type: 4, description: 'Hours', required: true },
     { name: 'reason', type: 3, description: 'Reason', required: false },
@@ -2037,10 +2037,10 @@ const commands = [
   { name: 'nickname', description: 'Change a user\'s nickname', default_member_permissions: P.ManageNicknames.toString(), options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'nickname', type: 3, description: 'New nickname (blank to reset)', required: false },
   ]},
-  { name: 'removerole', description: 'Remove a role from a user', default_member_permissions: P.ManageRoles.toString(), options: [
+  { name: 'removerole', description: 'Remove a role from a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'role', type: 8, description: 'Role', required: true },
   ]},
-  { name: 'giveroles', description: 'Add one or more roles to a user', default_member_permissions: P.ManageRoles.toString(), options: [
+  { name: 'giveroles', description: 'Add one or more roles to a user', options: [
     { name: 'user',  type: 6, description: 'Who?', required: true },
     { name: 'roles', type: 3, description: 'Role IDs or mentions, space separated', required: true },
   ]},
@@ -2260,6 +2260,22 @@ client.on('interactionCreate', async (interaction) => {
           record.approverId = interaction.user.id;
           record.result = await executeStaffRequest(interaction, record);
           record.status = 'executed'; record.resolvedAt = new Date(); await record.save();
+          if (record.kind === 'disciplinary') {
+            const cfgNow = await getConfig(guildId);
+            const logChannel = cfgNow.staffAccess?.infractionChannelId ? interaction.guild.channels.cache.get(cfgNow.staffAccess.infractionChannelId) : null;
+            if (logChannel) {
+              const caseRecord = record.caseNumber ? await CaseFileModel.findOne({ guildId, number: record.caseNumber }) : null;
+              const logEmbed = new EmbedBuilder().setTitle('Approved Infraction').setColor(0xED4245).addFields(
+                { name:'Action', value:record.action, inline:true },
+                { name:'Target', value:record.payload.userId ? `<@${record.payload.userId}>` : 'Unknown', inline:true },
+                { name:'Reason', value:String(record.payload.reason || 'No reason provided').slice(0,1024) },
+                { name:'Requested by', value:`<@${record.requesterId}>`, inline:true },
+                { name:'Approved by', value:`<@${interaction.user.id}>`, inline:true },
+                { name:'Case', value:caseRecord ? `#${caseRecord.number} — <#${caseRecord.threadId}>` : 'No linked case', inline:false },
+              ).setTimestamp();
+              await logChannel.send({ embeds:[logEmbed] }).catch(() => {});
+            }
+          }
           await interaction.message.edit({ components: [] }).catch(() => {});
           return interaction.editReply(`Approved and executed: ${record.result}`);
         } catch (error) {
@@ -3109,7 +3125,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `🔊 **${userDisplay(user)}** unmuted.` });
       }
       if (cmd === 'kick') {
-        if (!member.permissions.has(P.KickMembers)) return interaction.reply({ content: '❌ Kick Members permission required.', flags: MessageFlags.Ephemeral });
+        if (!isSHR(member, cfg) && !member.permissions.has(P.KickMembers)) return interaction.reply({ content: '❌ Kick Members permission required.', flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason') || 'No reason provided';
         const target = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -3122,7 +3138,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `👢 **${userDisplay(user)}** kicked.` });
       }
       if (cmd === 'ban') {
-        if (!member.permissions.has(P.BanMembers)) return interaction.reply({ content: '❌ Ban Members permission required.', flags: MessageFlags.Ephemeral });
+        if (!isSHR(member, cfg) && !member.permissions.has(P.BanMembers)) return interaction.reply({ content: '❌ Ban Members permission required.', flags: MessageFlags.Ephemeral });
         const user = interaction.options.getUser('user');
         const reason = interaction.options.getString('reason') || 'No reason provided';
         const deleteDays = interaction.options.getInteger('delete_days') ?? 0;
