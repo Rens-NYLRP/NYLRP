@@ -993,6 +993,10 @@ function buildCaseSetupView(cfg) {
 }
 
 function buildCaseSystemSetupView(cfg, key, selectedField = 'createRoleIds') {
+  const validSystems = ['ia', 'management', 'supervisor', 'executive'];
+  if (!validSystems.includes(key) || !cfg.caseManagement?.systems?.[key]) {
+    throw new Error(`Invalid case system key: ${key}`);
+  }
   const s = cfg.caseManagement.systems[key];
   const fields = { pingRoleIds:'Ping roles', accessRoleIds:'Access roles', createRoleIds:'Create case roles', investigatorRoleIds:'Investigator roles', supervisorRoleIds:'Supervisor roles' };
   const roleText = ids => ids?.length ? ids.map(x=>`<@&${x}>`).join(' ') : '*none*';
@@ -1463,7 +1467,14 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     return interaction.editReply(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
-    const [, , , key, field] = id.split('__');
+    const parts = id.split('__');
+    const key = parts[4];
+    const field = parts[5];
+    const validSystems = ['ia', 'management', 'supervisor', 'executive'];
+    const validFields = ['pingRoleIds', 'accessRoleIds', 'createRoleIds', 'investigatorRoleIds', 'supervisorRoleIds'];
+    if (!validSystems.includes(key) || !validFields.includes(field) || !cfg.caseManagement?.systems?.[key]) {
+      return interaction.reply({ content: 'Invalid case role selection. Please reopen /setup → Case Management and try again.', flags: MessageFlags.Ephemeral });
+    }
     await interaction.deferUpdate();
     cfg.caseManagement.systems[key][field] = interaction.values;
     await saveConfig(guildId);
