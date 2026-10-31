@@ -93,6 +93,7 @@ const guildConfigSchema = new mongoose.Schema({
     approvalRoleIds: { type: [String], default: [] },
     requestChannelId: { type: String, default: null },
     infractionChannelId: { type: String, default: null },
+    changeLogChannelId: { type: String, default: null },
   },
   caseManagement: {
     systems: { type: mongoose.Schema.Types.Mixed, default: {} },
@@ -371,7 +372,7 @@ function defaultConfig(guildId) {
       dmMessage: 'Welcome to {server}! We\'re glad to have you.',
     },
     coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
-    staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null },
+    staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null, changeLogChannelId: null },
     caseManagement: { systems: {
       ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
       management: { label: 'Management', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
@@ -966,12 +967,14 @@ function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
       { name: 'Approval roles', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
       { name: 'Request channel', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
       { name: 'Infractions channel', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
+      { name: 'Change log channel', value: a.changeLogChannelId ? `<#${a.changeLogChannelId}>` : '*not set*', inline: true },
     );
   return { embeds: [embed], components: [
     new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__staff_rolefield').setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label]) => ({ value, label })))),
     new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__staff_roles__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_changelog_channel').setPlaceholder('Select change log channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
   ] };
 }
@@ -1464,6 +1467,7 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   }
   if (interaction.isChannelSelectMenu() && id === 'setup__staff_request_channel') { cfg.staffAccess.requestChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
   if (interaction.isChannelSelectMenu() && id === 'setup__staff_infraction_channel') { cfg.staffAccess.infractionChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_changelog_channel') { cfg.staffAccess.changeLogChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
 
   if (interaction.isChannelSelectMenu() && id === 'setup__welcome_channel') {
     cfg.welcome.channelId = interaction.values[0] || null;
