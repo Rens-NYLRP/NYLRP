@@ -176,7 +176,7 @@ const staffRequestSchema = new mongoose.Schema({
   payload: { type: mongoose.Schema.Types.Mixed, required: true },
   requesterId: { type: String, required: true },
   approverId: { type: String, default: null },
-  status: { type: String, enum: ['pending', 'approved', 'rejected', 'executed', 'failed'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'processing', 'approved', 'rejected', 'executed', 'failed'], default: 'pending' },
   channelId: { type: String, default: null },
   messageId: { type: String, default: null },
   caseNumber: { type: Number, default: null },
@@ -253,6 +253,7 @@ async function executeStaffRequest(interaction, record) {
   }
   const user = p.userId ? await interaction.client.users.fetch(p.userId) : null;
   if (record.kind === 'disciplinary') {
+    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); return 'Ban removed.'; }
     const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
     if (record.action === 'warn') {
       if (!user) throw new Error('Target user not found.');
@@ -275,7 +276,6 @@ async function executeStaffRequest(interaction, record) {
       await interaction.guild.members.unban(p.userId, 'Softban completed after SHR approval');
       return 'Softban applied.';
     }
-    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); return 'Ban removed.'; }
     if (record.action === 'demotion' || record.action === 'removerole') {
       const role = interaction.guild.roles.cache.get(p.roleId);
       if (!role || !target.roles.cache.has(role.id)) throw new Error('The role to remove is no longer assigned.');
@@ -2248,9 +2248,15 @@ client.on('interactionCreate', async (interaction) => {
       if (id.startsWith('staffreq__')) {
         const [, action, requestId] = id.split('__');
         if (!canApproveStaffRequest(interaction.member, cfg)) return interaction.reply({ content: '❌ Only configured SHR / SHRM approval roles can decide requests.', flags: MessageFlags.Ephemeral });
-        const record = await StaffRequestModel.findOne({ _id: requestId, guildId });
+        let record = await StaffRequestModel.findOne({ _id: requestId, guildId });
         if (!record || record.status !== 'pending') return interaction.reply({ content: 'This request has already been handled or no longer exists.', flags: MessageFlags.Ephemeral });
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        record = await StaffRequestModel.findOneAndUpdate(
+          { _id: requestId, guildId, status: 'pending' },
+          { $set: { status: 'processing', approverId: interaction.user.id } },
+          { new: true },
+        );
+        if (!record) return interaction.editReply('Another SHR member has already handled this request.');
         if (action === 'reject') {
           record.status = 'rejected'; record.approverId = interaction.user.id; record.resolvedAt = new Date(); await record.save();
           await interaction.message.edit({ components: [] }).catch(() => {});
