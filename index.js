@@ -87,6 +87,16 @@ const guildConfigSchema = new mongoose.Schema({
     messageId: { type: String, default: null },
     title:     { type: String, default: '🔱 Chain of Command' },
   },
+  staffAccess: {
+    shrRoleIds: { type: [String], default: [] },
+    hrRoleIds: { type: [String], default: [] },
+    approvalRoleIds: { type: [String], default: [] },
+    requestChannelId: { type: String, default: null },
+    infractionChannelId: { type: String, default: null },
+  },
+  caseManagement: {
+    systems: { type: mongoose.Schema.Types.Mixed, default: {} },
+  },
 }, { strict: false, timestamps: true });
 const GuildConfigModel = mongoose.model('GuildConfig', guildConfigSchema);
 
@@ -159,6 +169,118 @@ const trainCooldownSchema = new mongoose.Schema({
 });
 const TrainCooldownModel = mongoose.model('TrainCooldown', trainCooldownSchema);
 
+const staffRequestSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  kind: { type: String, enum: ['promotion', 'disciplinary', 'case_infraction'], required: true },
+  action: { type: String, required: true },
+  payload: { type: mongoose.Schema.Types.Mixed, required: true },
+  requesterId: { type: String, required: true },
+  approverId: { type: String, default: null },
+  status: { type: String, enum: ['pending', 'approved', 'rejected', 'executed', 'failed'], default: 'pending' },
+  channelId: { type: String, default: null },
+  messageId: { type: String, default: null },
+  caseNumber: { type: Number, default: null },
+  result: { type: String, default: null },
+  createdAt: { type: Date, default: Date.now },
+  resolvedAt: { type: Date, default: null },
+}, { timestamps: true });
+const StaffRequestModel = mongoose.model('StaffRequest', staffRequestSchema);
+
+const caseFileSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  number: { type: Number, required: true },
+  system: { type: String, enum: ['ia', 'management', 'supervisor', 'executive'], required: true },
+  channelId: { type: String, required: true },
+  threadId: { type: String, required: true, unique: true },
+  reportingPartyId: { type: String, required: true },
+  reportedPartyId: { type: String, required: true },
+  reason: { type: String, required: true },
+  status: { type: String, enum: ['Open', 'Under Investigation', 'Awaiting Approval', 'Resolved', 'Closed'], default: 'Open' },
+  investigatorIds: { type: [String], default: [] },
+  supervisorIds: { type: [String], default: [] },
+  notes: { type: [{ authorId: String, text: String, createdAt: Date }], default: [] },
+  bothSides: { type: String, default: null },
+  createdBy: { type: String, required: true },
+  closedAt: { type: Date, default: null },
+  archivedAt: { type: Date, default: null },
+  nextNumberKey: { type: String, required: true },
+}, { timestamps: true });
+caseFileSchema.index({ guildId: 1, nextNumberKey: 1, number: 1 }, { unique: true });
+const CaseFileModel = mongoose.model('CaseFile', caseFileSchema);
+
+async function postStaffRequest(guild, cfg, data) {
+  const channel = cfg.staffAccess?.requestChannelId ? guild.channels.cache.get(cfg.staffAccess.requestChannelId) : null;
+  if (!channel) throw new Error('Approval channel is not configured. Set it in /setup → Staff Access.');
+  const record = await StaffRequestModel.create({ guildId: guild.id, ...data });
+  const roleIds = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
+  const ping = roleIds.map(id => `<@&${id}>`).join(' ');
+  const embed = new EmbedBuilder().setTitle(`⏳ Approval Request #${record._id.toString().slice(-6)}`).setColor(0xFEE75C)
+    .addFields(
+      { name: 'Type', value: data.kind },
+      { name: 'Action', value: data.action },
+      { name: 'Requested by', value: `<@${data.requesterId}>` },
+      { name: 'Details', value: JSON.stringify(data.payload).slice(0, 1000) },
+    ).setTimestamp();
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`staffreq__approve__${record._id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`staffreq__reject__${record._id}`).setLabel('Reject').setStyle(ButtonStyle.Danger),
+  );
+  const message = await channel.send({ content: ping || undefined, embeds: [embed], components: [row], allowedMentions: { roles: roleIds } });
+  record.channelId = channel.id; record.messageId = message.id; await record.save();
+  return record;
+}
+
+async function executeStaffRequest(interaction, record) {
+  const p = record.payload;
+  if (record.kind === 'promotion') {
+    const target = await interaction.guild.members.fetch(p.targetUserId);
+    const currentRole = interaction.guild.roles.cache.get(p.currentRoleId);
+    const newRole = interaction.guild.roles.cache.get(p.newRoleId);
+    if (!target || !currentRole || !newRole || !target.roles.cache.has(currentRole.id)) throw new Error('Promotion target or rank changed; request cannot be executed.');
+    const embed = new EmbedBuilder().setTitle('NYLRP | Promotion').setColor(p.promotionType === 'coc' ? 0x5865F2 : 0x57F287)
+      .setThumbnail(target.user.displayAvatarURL()).addFields(
+        { name: 'Member', value: `<@${p.targetUserId}>`, inline: true },
+        { name: 'Department', value: p.department, inline: true },
+        { name: 'Promotion Type', value: p.promotionType === 'coc' ? 'CoC' : 'Overig', inline: true },
+        { name: 'Previous Rank', value: `<@&${p.currentRoleId}>`, inline: true },
+        { name: 'New Rank', value: `<@&${p.newRoleId}>`, inline: true },
+        { name: 'Reason', value: p.reason.slice(0, 1024) },
+        { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+        { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+      ).setTimestamp().setFooter({ text: 'NYLRP Promotion System' });
+    await interaction.channel.send({ embeds: [embed] });
+    return 'Promotion announcement posted.';
+  }
+  const user = p.userId ? await interaction.client.users.fetch(p.userId) : null;
+  if (record.kind === 'disciplinary') {
+    const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
+    if (record.action === 'warn') {
+      if (!user) throw new Error('Target user not found.');
+      await WarningModel.create({ guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason });
+      await safeDM(user, { content: `⚠️ You were warned in **${interaction.guild.name}**: ${p.reason}` });
+      return 'Warning recorded.';
+    }
+    if (!target) throw new Error('Target must be a current server member.');
+    if (record.action === 'mute') { await target.timeout(p.minutes * 60000, p.reason); return 'Mute applied.'; }
+    if (record.action === 'kick') { await target.kick(p.reason); return 'Member kicked.'; }
+    if (record.action === 'ban') { await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: (p.deleteDays || 0) * 86400 }); return 'Member banned.'; }
+    if (record.action === 'tempban') {
+      const unbanAt = new Date(Date.now() + p.hours * 3600000);
+      await interaction.guild.members.ban(p.userId, { reason: p.reason });
+      await TempBanModel.findOneAndUpdate({ guildId: interaction.guildId, userId: p.userId }, { guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason, unbanAt }, { upsert: true });
+      return 'Temporary ban applied.';
+    }
+    if (record.action === 'demotion') {
+      const role = interaction.guild.roles.cache.get(p.roleId);
+      if (!role || !target.roles.cache.has(role.id)) throw new Error('The role to remove is no longer assigned.');
+      await target.roles.remove(role.id, p.reason); return 'Demotion role removed.';
+    }
+    if (record.action === 'unmute') { await target.timeout(null, p.reason); return 'Mute removed.'; }
+    throw new Error('Unsupported disciplinary action.');
+  }
+  throw new Error('Unsupported approval request type.');
+}
+
 let dbReady = false;
 async function connectDB() {
   if (!process.env.MONGODB_URI) {
@@ -213,6 +335,13 @@ function defaultConfig(guildId) {
       dmMessage: 'Welcome to {server}! We\'re glad to have you.',
     },
     coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
+    staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null },
+    caseManagement: { systems: {
+      ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      management: { label: 'Management', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      supervisor: { label: 'Supervisor', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      executive: { label: 'Executive', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+    } },
   };
 }
 
@@ -228,6 +357,8 @@ async function getConfig(guildId) {
         nicknamePrefixes: doc.nicknamePrefixes || [],
         welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
         coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
+        staffAccess: { ...defaultConfig(guildId).staffAccess, ...(doc.staffAccess || {}) },
+        caseManagement: { ...defaultConfig(guildId).caseManagement, ...(doc.caseManagement || {}), systems: { ...defaultConfig(guildId).caseManagement.systems, ...(doc.caseManagement?.systems || {}) } },
       }
                   : defaultConfig(guildId);
   configCache.set(guildId, cfg);
@@ -246,6 +377,7 @@ async function saveConfig(guildId) {
       await GuildConfigModel.findByIdAndUpdate(guildId, { $set: {
         tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training,
         nicknamePrefixes: cfg.nicknamePrefixes, welcome: cfg.welcome, coc: cfg.coc,
+        staffAccess: cfg.staffAccess, caseManagement: cfg.caseManagement,
       } }, { upsert: true });
       return true;
     } catch (e) {
@@ -316,6 +448,23 @@ function isTicketStaff(member, cfg, ticket = null) {
 // Resolve which support roles apply for a given ticket type (type-specific overrides, falling back to global)
 function resolveSupportRoleIds(cfg, type) {
   return (type?.supportRoleIds && type.supportRoleIds.length) ? type.supportRoleIds : cfg.tickets.supportRoleIds;
+}
+
+function hasAnyConfiguredRole(member, ids = []) {
+  return Boolean(member && ids?.some(id => member.roles?.cache?.has(id)));
+}
+function isOwner(member) {
+  return Boolean(member && member.id === member.guild?.ownerId);
+}
+function isSHR(member, cfg) {
+  return isOwner(member) || hasAnyConfiguredRole(member, cfg.staffAccess?.shrRoleIds || []);
+}
+function isHR(member, cfg) {
+  return isOwner(member) || hasAnyConfiguredRole(member, cfg.staffAccess?.hrRoleIds || []);
+}
+function canApproveStaffRequest(member, cfg) {
+  const ids = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
+  return isOwner(member) || hasAnyConfiguredRole(member, ids);
 }
 
 function isModerator(member, cfg) {
@@ -770,6 +919,69 @@ function buildSetupHomeEmbed() {
     .setColor(0x5865F2)
     .setDescription('Pick a category below to configure. Every selection saves instantly.');
 }
+function buildStaffAccessSetupView(cfg) {
+  const a = cfg.staffAccess || {};
+  const embed = new EmbedBuilder().setTitle('🛡️ Staff Access & Approvals').setColor(0x5865F2)
+    .setDescription('Configure role IDs here. Server owner always has full access. Approval roles default to SHR when left empty.')
+    .addFields(
+      { name: 'SHR roles', value: a.shrRoleIds?.length ? a.shrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
+      { name: 'HR roles', value: a.hrRoleIds?.length ? a.hrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
+      { name: 'Approval roles (SHR / SHRM)', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
+      { name: 'Request channel', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
+      { name: 'Infractions channel', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
+    );
+  return { embeds: [embed], components: [
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_shr').setPlaceholder('Select SHR roles').setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_hr').setPlaceholder('Select HR roles').setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_approval').setPlaceholder('Select approval roles (SHR / SHRM)').setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ] };
+}
+
+function buildCaseSetupView(cfg) {
+  const systems = cfg.caseManagement?.systems || {};
+  const labels = { ia: 'Internal Affairs', management: 'Management', supervisor: 'Supervisor', executive: 'Executive' };
+  const rows = Object.entries(labels).map(([key, label]) => {
+    const s = systems[key] || {};
+    return { name: label, value: `Channel: ${s.channelId ? `<#${s.channelId}>` : '*not set*'}\nLog: ${s.logChannelId ? `<#${s.logChannelId}>` : '*not set*'}\nCreate/access/investigator/supervisor roles: ${(s.createRoleIds || []).length}/${(s.accessRoleIds || []).length}/${(s.investigatorRoleIds || []).length}/${(s.supervisorRoleIds || []).length}` };
+  });
+  const embed = new EmbedBuilder().setTitle('📁 Case Management Setup').setColor(0x5865F2)
+    .setDescription('Choose a case system to configure. Each system can use its own channel, log channel, ping roles and access roles.')
+    .addFields(rows);
+  const menu = new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case system').addOptions(
+    Object.entries(labels).map(([value, label]) => ({ label, value })),
+  );
+  return { embeds: [embed], components: [
+    new ActionRowBuilder().addComponents(menu),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ] };
+}
+
+function buildCaseSystemSetupView(cfg, key) {
+  const s = cfg.caseManagement.systems[key];
+  const label = s.label || key;
+  const roleText = ids => ids?.length ? ids.map(x => `<@&${x}>`).join(' ') : '*none*';
+  const embed = new EmbedBuilder().setTitle(`📁 ${label} Setup`).setColor(0x5865F2).addFields(
+    { name: 'Case channel', value: s.channelId ? `<#${s.channelId}>` : '*not set*' },
+    { name: 'Log channel', value: s.logChannelId ? `<#${s.logChannelId}>` : '*not set*' },
+    { name: 'Ping roles', value: roleText(s.pingRoleIds) },
+    { name: 'Access roles', value: roleText(s.accessRoleIds) },
+    { name: 'Create case roles', value: roleText(s.createRoleIds) },
+    { name: 'Investigator roles', value: roleText(s.investigatorRoleIds) },
+    { name: 'Supervisor roles', value: roleText(s.supervisorRoleIds) },
+  );
+  return { embeds: [embed], components: [
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select case channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Select log channel').addChannelTypes(ChannelType.GuildText)),
+    ...['pingRoleIds','accessRoleIds','createRoleIds','investigatorRoleIds','supervisorRoleIds'].map((field, i) => new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${field}`).setPlaceholder(['Ping roles','Access roles','Create case roles','Investigator roles','Supervisor roles'][i]).setMinValues(0).setMaxValues(25),
+    )),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ] };
+}
+
 function buildSetupHomeComponents() {
   return [
     new ActionRowBuilder().addComponents(
@@ -778,6 +990,8 @@ function buildSetupHomeComponents() {
       new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__staff').setLabel('Staff Access').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Case Management').setEmoji('📁').setStyle(ButtonStyle.Primary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup__home__welcome').setLabel('Welcome').setEmoji('👋').setStyle(ButtonStyle.Primary),
@@ -1202,6 +1416,26 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__prefixes') return interaction.update(buildPrefixesView(cfg));
   if (interaction.isButton() && id === 'setup__home__coc') return interaction.update(buildCocView(cfg));
   if (interaction.isButton() && id === 'setup__home__welcome') return interaction.update(buildWelcomeSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__staff') return interaction.update(buildStaffAccessSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__cases') return interaction.update(buildCaseSetupView(cfg));
+  if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
+  if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_channel__')) {
+    const key = id.split('__').pop(); cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_log__')) {
+    const key = id.split('__').pop(); cfg.caseManagement.systems[key].logChannelId = interaction.values[0] || null;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
+    const [, , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
+    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__staff_shr') { cfg.staffAccess.shrRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isRoleSelectMenu() && id === 'setup__staff_hr') { cfg.staffAccess.hrRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isRoleSelectMenu() && id === 'setup__staff_approval') { cfg.staffAccess.approvalRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_request_channel') { cfg.staffAccess.requestChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_infraction_channel') { cfg.staffAccess.infractionChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
 
   if (interaction.isChannelSelectMenu() && id === 'setup__welcome_channel') {
     cfg.welcome.channelId = interaction.values[0] || null;
