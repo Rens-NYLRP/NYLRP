@@ -253,7 +253,7 @@ async function executeStaffRequest(interaction, record) {
   }
   const user = p.userId ? await interaction.client.users.fetch(p.userId) : null;
   if (record.kind === 'disciplinary') {
-    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); return 'Ban removed.'; }
+    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); if (user) await safeDM(user, { content: `A ban in **${interaction.guild.name}** has been removed by <@${interaction.user.id}>. Case: #${p.caseNumber || 'N/A'}.` }).catch(() => {}); return 'Ban removed.'; }
     const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
     if (record.action === 'warn') {
       if (!user) throw new Error('Target user not found.');
@@ -294,10 +294,25 @@ async function executeStaffRequest(interaction, record) {
     if (record.action === 'giveroles') {
       const roleIds = (p.roleIds || []).filter(id => interaction.guild.roles.cache.has(id));
       if (!roleIds.length) throw new Error('No valid roles remain to assign.');
-      await target.roles.add(roleIds, p.reason); return 'Roles assigned.';
+      await target.roles.add(roleIds, p.reason); await notifyApproved('Role assignment'); return 'Roles assigned.';
     }
     if (record.action === 'unmute') { await target.timeout(null, p.reason); await notifyApproved('Unmute'); return 'Mute removed.'; }
     throw new Error('Unsupported disciplinary action.');
+  }
+  if (record.kind === 'disciplinary' && cfg.staffAccess?.infractionChannelId) {
+    const channel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
+    if (channel) await channel.send({ embeds: [new EmbedBuilder().setTitle(`Approved Infraction | Case #${record.caseNumber || 'N/A'}`).setColor(0xED4245)
+      .addFields(
+        { name: 'User', value: p.userId ? `<@${p.userId}>` : 'N/A', inline: true },
+        { name: 'Action', value: record.action, inline: true },
+        { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+        { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+        { name: 'Reason', value: String(p.reason || 'N/A').slice(0, 1024) },
+      ).setTimestamp()] });
+  }
+  if (record.kind === 'disciplinary' && record.caseNumber) {
+    const caseRecord = await CaseFileModel.findOne({ guildId: interaction.guildId, number: record.caseNumber });
+    if (caseRecord) { caseRecord.status = 'Resolved'; await caseRecord.save(); }
   }
   throw new Error('Unsupported approval request type.');
 }
@@ -3014,7 +3029,7 @@ client.on('interactionCreate', async (interaction) => {
         const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
         const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
         const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
-        const allowedMembers = new Set([interaction.user.id, reporter.id, reported.id]);
+        const allowedMembers = new Set([interaction.user.id]);
         const roleIds = [...(sys.accessRoleIds || []), ...(sys.createRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || [])];
         for (const roleId of roleIds) {
           const role = interaction.guild.roles.cache.get(roleId);
