@@ -930,21 +930,21 @@ function buildSetupHomeEmbed() {
     .setColor(0x5865F2)
     .setDescription('Pick a category below to configure. Every selection saves instantly.');
 }
-function buildStaffAccessSetupView(cfg) {
+function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
   const a = cfg.staffAccess || {};
+  const fields = { shrRoleIds:'SHR roles', hrRoleIds:'HR roles', approvalRoleIds:'Approval roles (SHR / SHRM)' };
   const embed = new EmbedBuilder().setTitle('🛡️ Staff Access & Approvals').setColor(0x5865F2)
-    .setDescription('Configure role IDs here. Server owner always has full access. Approval roles default to SHR when left empty.')
+    .setDescription('Configure role IDs here. The server owner always has full access. Approval roles default to SHR when left empty.')
     .addFields(
       { name: 'SHR roles', value: a.shrRoleIds?.length ? a.shrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
       { name: 'HR roles', value: a.hrRoleIds?.length ? a.hrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
-      { name: 'Approval roles (SHR / SHRM)', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
+      { name: 'Approval roles', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
       { name: 'Request channel', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
       { name: 'Infractions channel', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
     );
   return { embeds: [embed], components: [
-    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_shr').setPlaceholder('Select SHR roles').setMinValues(0).setMaxValues(25)),
-    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_hr').setPlaceholder('Select HR roles').setMinValues(0).setMaxValues(25)),
-    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__staff_approval').setPlaceholder('Select approval roles (SHR / SHRM)').setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__staff_rolefield').setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label]) => ({ value, label })))),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__staff_roles__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
@@ -953,44 +953,33 @@ function buildStaffAccessSetupView(cfg) {
 
 function buildCaseSetupView(cfg) {
   const systems = cfg.caseManagement?.systems || {};
-  const labels = { ia: 'Internal Affairs', management: 'Management', supervisor: 'Supervisor', executive: 'Executive' };
-  const rows = Object.entries(labels).map(([key, label]) => {
+  const labels = { ia:'Internal Affairs', management:'Management', supervisor:'Supervisor', executive:'Executive' };
+  const rows = Object.entries(labels).map(([key,label]) => {
     const s = systems[key] || {};
-    return { name: label, value: `Channel: ${s.channelId ? `<#${s.channelId}>` : '*not set*'}\nLog: ${s.logChannelId ? `<#${s.logChannelId}>` : '*not set*'}\nCreate/access/investigator/supervisor roles: ${(s.createRoleIds || []).length}/${(s.accessRoleIds || []).length}/${(s.investigatorRoleIds || []).length}/${(s.supervisorRoleIds || []).length}` };
+    return { name:label, value:`Channel: ${s.channelId ? `<#${s.channelId}>` : '*not set*'}\nLog: ${s.logChannelId ? `<#${s.logChannelId}>` : '*not set*'}\nRoles configured: ${(s.createRoleIds||[]).length} create, ${(s.accessRoleIds||[]).length} access` };
   });
-  const embed = new EmbedBuilder().setTitle('📁 Case Management Setup').setColor(0x5865F2)
-    .setDescription('Choose a case system to configure. Each system can use its own channel, log channel, ping roles and access roles.')
-    .addFields(rows);
-  const menu = new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case system').addOptions(
-    Object.entries(labels).map(([value, label]) => ({ label, value })),
-  );
-  return { embeds: [embed], components: [
-    new ActionRowBuilder().addComponents(menu),
+  return { embeds:[new EmbedBuilder().setTitle('📁 Case Management Setup').setColor(0x5865F2).setDescription('Choose a case system. Each system can use a separate channel and role configuration.').addFields(rows)], components:[
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case system').addOptions(Object.entries(labels).map(([value,label])=>({label,value})))),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
-  ] };
+  ]};
 }
 
-function buildCaseSystemSetupView(cfg, key) {
+function buildCaseSystemSetupView(cfg, key, selectedField = 'createRoleIds') {
   const s = cfg.caseManagement.systems[key];
-  const label = s.label || key;
-  const roleText = ids => ids?.length ? ids.map(x => `<@&${x}>`).join(' ') : '*none*';
-  const embed = new EmbedBuilder().setTitle(`📁 ${label} Setup`).setColor(0x5865F2).addFields(
-    { name: 'Case channel', value: s.channelId ? `<#${s.channelId}>` : '*not set*' },
-    { name: 'Log channel', value: s.logChannelId ? `<#${s.logChannelId}>` : '*not set*' },
-    { name: 'Ping roles', value: roleText(s.pingRoleIds) },
-    { name: 'Access roles', value: roleText(s.accessRoleIds) },
-    { name: 'Create case roles', value: roleText(s.createRoleIds) },
-    { name: 'Investigator roles', value: roleText(s.investigatorRoleIds) },
-    { name: 'Supervisor roles', value: roleText(s.supervisorRoleIds) },
+  const fields = { pingRoleIds:'Ping roles', accessRoleIds:'Access roles', createRoleIds:'Create case roles', investigatorRoleIds:'Investigator roles', supervisorRoleIds:'Supervisor roles' };
+  const roleText = ids => ids?.length ? ids.map(x=>`<@&${x}>`).join(' ') : '*none*';
+  const embed = new EmbedBuilder().setTitle(`📁 ${s.label || key} Setup`).setColor(0x5865F2).addFields(
+    {name:'Case channel',value:s.channelId?`<#${s.channelId}>`:'*not set*'},
+    {name:'Log channel',value:s.logChannelId?`<#${s.logChannelId}>`:'*not set*'},
+    ...Object.entries(fields).map(([field,label])=>({name:label,value:roleText(s[field])})),
   );
-  return { embeds: [embed], components: [
+  return { embeds:[embed], components:[
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select case channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Select log channel').addChannelTypes(ChannelType.GuildText)),
-    ...['pingRoleIds','accessRoleIds','createRoleIds','investigatorRoleIds','supervisorRoleIds'].map((field, i) => new ActionRowBuilder().addComponents(
-      new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${field}`).setPlaceholder(['Ping roles','Access roles','Create case roles','Investigator roles','Supervisor roles'][i]).setMinValues(0).setMaxValues(25),
-    )),
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`setup__case_rolefield__${key}`).setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label])=>({value,label})))),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
     new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Back').setStyle(ButtonStyle.Secondary)),
-  ] };
+  ]};
 }
 
 function buildSetupHomeComponents() {
@@ -1442,9 +1431,11 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     const [, , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
     await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
-  if (interaction.isRoleSelectMenu() && id === 'setup__staff_shr') { cfg.staffAccess.shrRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
-  if (interaction.isRoleSelectMenu() && id === 'setup__staff_hr') { cfg.staffAccess.hrRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
-  if (interaction.isRoleSelectMenu() && id === 'setup__staff_approval') { cfg.staffAccess.approvalRoleIds = interaction.values; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isStringSelectMenu() && id === 'setup__staff_rolefield') return interaction.update(buildStaffAccessSetupView(cfg, interaction.values[0]));
+  if (interaction.isRoleSelectMenu() && id.startsWith('setup__staff_roles__')) {
+    const field = id.split('__').pop(); cfg.staffAccess[field] = interaction.values;
+    await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg, field));
+  }
   if (interaction.isChannelSelectMenu() && id === 'setup__staff_request_channel') { cfg.staffAccess.requestChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
   if (interaction.isChannelSelectMenu() && id === 'setup__staff_infraction_channel') { cfg.staffAccess.infractionChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
 
