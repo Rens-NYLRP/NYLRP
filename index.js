@@ -1001,11 +1001,11 @@ function buildSetupHomeComponents() {
       new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('setup__home__staff').setLabel('Staff Access').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Case Management').setEmoji('📁').setStyle(ButtonStyle.Primary),
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup__home__welcome').setLabel('Welcome').setEmoji('👋').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__staff').setLabel('Staff Access').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Case Management').setEmoji('📁').setStyle(ButtonStyle.Primary),
     ),
   ];
 }
