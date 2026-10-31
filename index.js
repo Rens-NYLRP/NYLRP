@@ -1449,16 +1449,25 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
   if (interaction.isStringSelectMenu() && id.startsWith('setup__case_rolefield__')) return interaction.update(buildCaseSystemSetupView(cfg, id.split('__').pop(), interaction.values[0]));
   if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_channel__')) {
-    const key = id.split('__').pop(); cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
-    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+    const key = id.split('__').pop();
+    await interaction.deferUpdate();
+    cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.editReply(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_log__')) {
-    const key = id.split('__').pop(); cfg.caseManagement.systems[key].logChannelId = interaction.values[0] || null;
-    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
+    const key = id.split('__').pop();
+    await interaction.deferUpdate();
+    cfg.caseManagement.systems[key].logChannelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.editReply(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
-    const [, , , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
-    await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key, field));
+    const [, , , key, field] = id.split('__');
+    await interaction.deferUpdate();
+    cfg.caseManagement.systems[key][field] = interaction.values;
+    await saveConfig(guildId);
+    return interaction.editReply(buildCaseSystemSetupView(cfg, key, field));
   }
   if (interaction.isStringSelectMenu() && id === 'setup__staff_rolefield') return interaction.update(buildStaffAccessSetupView(cfg, interaction.values[0]));
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__staff_roles__')) {
