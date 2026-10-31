@@ -230,7 +230,7 @@ async function postStaffRequest(guild, cfg, data) {
   return record;
 }
 
-async function executeStaffRequest(interaction, record) {
+async function executeStaffRequest(interaction, record, cfg) {
   const p = record.payload;
   if (record.kind === 'promotion') {
     const target = await interaction.guild.members.fetch(p.targetUserId);
@@ -251,17 +251,8 @@ async function executeStaffRequest(interaction, record) {
     await interaction.channel.send({ embeds: [embed] });
     return 'Promotion announcement posted.';
   }
-  const user = p.userId ? await interaction.client.users.fetch(p.userId) : null;
+  const user = p.userId ? await interaction.client.users.fetch(p.userId).catch(() => null) : null;
   if (record.kind === 'disciplinary') {
-    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); if (user) await safeDM(user, { content: `A ban in **${interaction.guild.name}** has been removed by <@${interaction.user.id}>. Case: #${p.caseNumber || 'N/A'}.` }).catch(() => {}); return 'Ban removed.'; }
-    const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
-    if (record.action === 'warn') {
-      if (!user) throw new Error('Target user not found.');
-      await WarningModel.create({ guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason });
-      await safeDM(user, { content: `⚠️ Your case-related warning in **${interaction.guild.name}** has been approved by <@${interaction.user.id}>.\nReason: ${p.reason}\nCase: #${p.caseNumber || 'N/A'}` });
-      return 'Warning recorded.';
-    }
-    if (!target) throw new Error('Target must be a current server member.');
     const notifyApproved = async label => {
       if (user) await safeDM(user, { embeds: [new EmbedBuilder().setTitle('NYLRP | Case decision').setColor(0xFEE75C)
         .setDescription(`A disciplinary decision related to a staff case in **${interaction.guild.name}** has been approved.`)
@@ -271,7 +262,31 @@ async function executeStaffRequest(interaction, record) {
           { name: 'Reason', value: String(p.reason || 'Not provided').slice(0, 1024) },
           { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
         ).setFooter({ text: 'The internal case discussion and transcript are confidential and are not included in this message.' }).setTimestamp()] }).catch(() => {});
+      if (cfg.staffAccess?.infractionChannelId) {
+        const auditChannel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
+        if (auditChannel) await auditChannel.send({ embeds: [new EmbedBuilder().setTitle(`Approved Infraction | Case #${record.caseNumber || 'N/A'}`).setColor(0xED4245)
+          .addFields(
+            { name: 'User', value: p.userId ? `<@${p.userId}>` : 'N/A', inline: true },
+            { name: 'Action', value: label, inline: true },
+            { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+            { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Reason', value: String(p.reason || 'N/A').slice(0, 1024) },
+          ).setTimestamp()] });
+      }
+      if (record.caseNumber) {
+        const caseRecord = await CaseFileModel.findOne({ guildId: interaction.guildId, number: record.caseNumber });
+        if (caseRecord) { caseRecord.status = 'Resolved'; await caseRecord.save(); }
+      }
     };
+    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); await notifyApproved('Unban'); return 'Ban removed.'; }
+    const target = await interaction.guild.members.fetch(p.userId).catch(() => null);
+    if (record.action === 'warn') {
+      if (!user) throw new Error('Target user not found.');
+      await WarningModel.create({ guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason });
+      await notifyApproved('Warning');
+      return 'Warning recorded.';
+    }
+    if (!target) throw new Error('Target must be a current server member.');
     if (record.action === 'mute') { await target.timeout(p.minutes * 60000, p.reason); await notifyApproved(`Mute (${p.minutes} minutes)`); return 'Mute applied.'; }
     if (record.action === 'kick') { await target.kick(p.reason); await notifyApproved('Kick'); return 'Member kicked.'; }
     if (record.action === 'ban') { await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: (p.deleteDays || 0) * 86400 }); await notifyApproved('Ban'); return 'Member banned.'; }
@@ -298,21 +313,6 @@ async function executeStaffRequest(interaction, record) {
     }
     if (record.action === 'unmute') { await target.timeout(null, p.reason); await notifyApproved('Unmute'); return 'Mute removed.'; }
     throw new Error('Unsupported disciplinary action.');
-  }
-  if (record.kind === 'disciplinary' && cfg.staffAccess?.infractionChannelId) {
-    const channel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
-    if (channel) await channel.send({ embeds: [new EmbedBuilder().setTitle(`Approved Infraction | Case #${record.caseNumber || 'N/A'}`).setColor(0xED4245)
-      .addFields(
-        { name: 'User', value: p.userId ? `<@${p.userId}>` : 'N/A', inline: true },
-        { name: 'Action', value: record.action, inline: true },
-        { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
-        { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
-        { name: 'Reason', value: String(p.reason || 'N/A').slice(0, 1024) },
-      ).setTimestamp()] });
-  }
-  if (record.kind === 'disciplinary' && record.caseNumber) {
-    const caseRecord = await CaseFileModel.findOne({ guildId: interaction.guildId, number: record.caseNumber });
-    if (caseRecord) { caseRecord.status = 'Resolved'; await caseRecord.save(); }
   }
   throw new Error('Unsupported approval request type.');
 }
@@ -2296,7 +2296,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         try {
           record.approverId = interaction.user.id;
-          record.result = await executeStaffRequest(interaction, record);
+          record.result = await executeStaffRequest(interaction, record, cfg);
           record.status = 'executed'; record.resolvedAt = new Date(); await record.save();
           if (record.kind === 'disciplinary') {
             const cfgNow = await getConfig(guildId);
