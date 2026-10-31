@@ -1002,7 +1002,7 @@ function buildCaseSystemSetupView(cfg, key, selectedField = 'createRoleIds') {
     ...Object.entries(fields).map(([field,label])=>({name:label,value:roleText(s[field])})),
   );
   return { embeds:[embed], components:[
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select regular text or forum channel').addChannelTypes(ChannelType.GuildText, ChannelType.GuildForum)),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select a regular text channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Select log channel').addChannelTypes(ChannelType.GuildText)),
     new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`setup__case_rolefield__${key}`).setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label])=>({value,label})))),
     new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
@@ -3030,19 +3030,9 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Notes', value: '*No notes yet*' },
         ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
         const pingIds = sys.pingRoleIds || [];
-        const caseName = `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100);
-        let thread;
-        if (channel.type === ChannelType.GuildForum) {
-          const created = await channel.threads.create({
-            name: caseName,
-            autoArchiveDuration: 10080,
-            message: { content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } },
-          });
-          thread = created;
-        } else {
-          const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
-          thread = await starter.startThread({ name: caseName, autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
-        }
+        const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
+        // Regular text channels support private threads; forum/Q&A posts are public to channel members.
+        const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
         const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
         await interaction.guild.members.fetch().catch(() => {});
         const allowedMembers = new Set([interaction.user.id]);
