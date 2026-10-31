@@ -1467,8 +1467,8 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   }
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
     const parts = id.split('__');
-    const key = parts[4];
-    const field = parts[5];
+    const key = parts[3];
+    const field = parts[4];
     const validSystems = ['ia', 'management', 'supervisor', 'executive'];
     const validFields = ['pingRoleIds', 'accessRoleIds', 'createRoleIds', 'investigatorRoleIds', 'supervisorRoleIds'];
     if (!validSystems.includes(key) || !validFields.includes(field) || !cfg.caseManagement?.systems?.[key]) {
