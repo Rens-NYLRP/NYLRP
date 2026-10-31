@@ -3012,9 +3012,26 @@ client.on('interactionCreate', async (interaction) => {
         ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
         const pingIds = sys.pingRoleIds || [];
         const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
-        const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080 });
+        const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
         const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
-        await interaction.reply({ content: `✅ Case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
+        const allowedMembers = new Set([interaction.user.id, reporter.id, reported.id]);
+        const roleIds = [...(sys.accessRoleIds || []), ...(sys.createRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || [])];
+        for (const roleId of roleIds) {
+          const role = interaction.guild.roles.cache.get(roleId);
+          if (role) for (const roleMember of role.members.values()) allowedMembers.add(roleMember.id);
+        }
+        for (const userId of [...allowedMembers].slice(0, 1000)) {
+          await thread.members.add(userId).catch(error => console.warn(`Could not add ${userId} to private case thread ${thread.id}:`, error.message));
+        }
+        if (sys.logChannelId) {
+          const logChannel = interaction.guild.channels.cache.get(sys.logChannelId);
+          if (logChannel) await logChannel.send({ embeds: [new EmbedBuilder().setTitle(`Case #${number} Created`).setColor(0x5865F2).addFields(
+            {name:'System',value:sys.label,inline:true},{name:'Created by',value:`<@${interaction.user.id}>`,inline:true},
+            {name:'Reporting party',value:`<@${reporter.id}>`,inline:true},{name:'Reported party',value:`<@${reported.id}>`,inline:true},
+            {name:'Thread',value:`<#${thread.id}>`},{name:'Reason',value:reason.slice(0,1024)},
+          ).setTimestamp()] }).catch(() => {});
+        }
+        await interaction.reply({ content: `✅ Private case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
         return;
       }
       const record = await CaseFileModel.findOne({ guildId, number: caseNumber || interaction.options.getInteger('number') });
