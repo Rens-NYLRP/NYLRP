@@ -1956,7 +1956,27 @@ const commands = [
     { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
-  { name: 'promotion', description: 'Create a promotion announcement (SHR only)', options: [
+  { name: 'case-create', description: 'Create a new staff case file', options: [
+    { name: 'system', type: 3, description: 'Case system', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
+    { name: 'reporting_party', type: 6, description: 'Reporting party', required: true },
+    { name: 'reported_party', type: 6, description: 'Reported party', required: true },
+    { name: 'reason', type: 3, description: 'Reason / summary', required: true, max_length: 900 },
+  ]},
+  { name: 'case-status', description: 'Update a case status', options: [
+    { name: 'number', type: 4, description: 'Case number', required: true },
+    { name: 'status', type: 3, description: 'New status', required: true, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
+  ]},
+  { name: 'case-note', description: 'Add a note to a case', options: [{ name:'number',type:4,description:'Case number',required:true },{ name:'note',type:3,description:'Internal note',required:true,max_length:900 }]},
+  { name: 'case-close', description: 'Close a case without deleting its record', options: [{ name:'number',type:4,description:'Case number',required:true }]},
+  { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
+  { name: 'case-infraction', description: 'Propose an infraction from a case for SHR approval', options: [
+    { name:'number',type:4,description:'Case number',required:true },{ name:'user',type:6,description:'Member',required:true },
+    { name:'action',type:3,description:'Disciplinary action',required:true,choices:[{name:'Warn',value:'warn'},{name:'Mute',value:'mute'},{name:'Kick',value:'kick'},{name:'Ban',value:'ban'},{name:'Tempban',value:'tempban'},{name:'Demotion (remove role)',value:'demotion'}]},
+    { name:'reason',type:3,description:'Reason',required:true,max_length:500 },
+    { name:'duration',type:4,description:'Minutes for mute / hours for tempban',required:false,min_value:1 },
+    { name:'role',type:8,description:'Role to remove for demotion',required:false },
+  ]},
+  { name: 'promotion', description: 'Create a promotion announcement (SHR direct; HR requests approval)', options: [
     { name: 'member', type: 6, description: 'Member being promoted', required: true },
     { name: 'department', type: 3, description: 'Department', required: true, max_length: 50 },
     { name: 'current_rank', type: 8, description: 'Current rank', required: true },
@@ -2221,6 +2241,29 @@ client.on('interactionCreate', async (interaction) => {
     // ───────── BUTTONS ─────────
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      if (id.startsWith('staffreq__')) {
+        const [, action, requestId] = id.split('__');
+        if (!canApproveStaffRequest(interaction.member, cfg)) return interaction.reply({ content: '❌ Only configured SHR / SHRM approval roles can decide requests.', flags: MessageFlags.Ephemeral });
+        const record = await StaffRequestModel.findOne({ _id: requestId, guildId });
+        if (!record || record.status !== 'pending') return interaction.reply({ content: 'This request has already been handled or no longer exists.', flags: MessageFlags.Ephemeral });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (action === 'reject') {
+          record.status = 'rejected'; record.approverId = interaction.user.id; record.resolvedAt = new Date(); await record.save();
+          await interaction.message.edit({ components: [] }).catch(() => {});
+          return interaction.editReply('Request rejected.');
+        }
+        try {
+          record.approverId = interaction.user.id;
+          record.result = await executeStaffRequest(interaction, record);
+          record.status = 'executed'; record.resolvedAt = new Date(); await record.save();
+          await interaction.message.edit({ components: [] }).catch(() => {});
+          return interaction.editReply(`Approved and executed: ${record.result}`);
+        } catch (error) {
+          record.status = 'failed'; record.approverId = interaction.user.id; record.result = error.message; record.resolvedAt = new Date(); await record.save();
+          return interaction.editReply(`Approval failed: ${error.message}`);
+        }
+      }
 
       if (id.startsWith('tkt__open__')) {
         const typeId = id.replace('tkt__open__', '');
@@ -2794,9 +2837,8 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'promotion') {
-      const isSHR = member.roles.cache.some(role => !role.managed && role.name.trim().toLowerCase() === 'shr');
-      if (!isSHR) {
-        return interaction.reply({ content: '❌ Only SHR members can use the promotion command.', flags: MessageFlags.Ephemeral });
+      if (!isSHR(member, cfg) && !isHR(member, cfg)) {
+        return interaction.reply({ content: '❌ You need a configured SHR or HR role to request a promotion.', flags: MessageFlags.Ephemeral });
       }
 
       const targetUser = interaction.options.getUser('member');
@@ -2837,6 +2879,13 @@ client.on('interactionCreate', async (interaction) => {
           content: `❌ ${targetUser} does not currently have the selected **${currentRole.name}** role.`,
           flags: MessageFlags.Ephemeral,
         });
+      }
+
+      if (!isSHR(member, cfg)) {
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'promotion', action: 'promotion', requesterId: interaction.user.id, payload: {
+          targetUserId: targetUser.id, department, currentRoleId: currentRole.id, newRoleId: newRole.id, promotionType, reason,
+        } });
+        return interaction.reply({ content: `✅ Promotion request submitted for SHR approval (request ${request._id.toString().slice(-6)}).`, flags: MessageFlags.Ephemeral });
       }
 
       const embed = new EmbedBuilder()
@@ -2891,6 +2940,80 @@ client.on('interactionCreate', async (interaction) => {
         .setColor(0x5865F2)
         .setDescription(staffList.map(x => `${emoji[x.level] || '⚪'} **Level ${x.level}** — ${userDisplay(x.member.user)}`).join('\n').slice(0, 4000));
       return interaction.editReply({ embeds: [embed] });
+    }
+
+    // Case management commands
+    if (cmd.startsWith('case-')) {
+      const caseNumber = interaction.options.getInteger('number');
+      const systemKey = cmd === 'case-create' ? interaction.options.getString('system') : null;
+      if (cmd === 'case-create') {
+        const sys = cfg.caseManagement.systems[systemKey];
+        if (!sys?.channelId) return interaction.reply({ content: '❌ This case system has no channel configured in /setup → Case Management.', flags: MessageFlags.Ephemeral });
+        const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds);
+        if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
+        const channel = interaction.guild.channels.cache.get(sys.channelId);
+        if (!channel) return interaction.reply({ content: '❌ Configured case channel not found.', flags: MessageFlags.Ephemeral });
+        const next = await CaseFileModel.findOne({ guildId, system: systemKey }).sort({ number: -1 }).select('number').lean();
+        const number = (next?.number || 0) + 1;
+        const reporter = interaction.options.getUser('reporting_party');
+        const reported = interaction.options.getUser('reported_party');
+        const reason = interaction.options.getString('reason');
+        const embed = new EmbedBuilder().setTitle(`${sys.label} | Case #${number}`).setColor(0x5865F2).addFields(
+          { name: 'Reporting Party', value: `<@${reporter.id}>`, inline: true },
+          { name: 'Reported Party', value: `<@${reported.id}>`, inline: true },
+          { name: 'Reason', value: reason },
+          { name: 'Status', value: 'Open', inline: true },
+          { name: 'User Investigating', value: '*Not assigned*', inline: true },
+          { name: 'Supervisor+ Investigating', value: '*Not assigned*', inline: true },
+          { name: 'Both Sides of the Story', value: '*Pending*' },
+          { name: 'Notes', value: '*No notes yet*' },
+        ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
+        const pingIds = sys.pingRoleIds || [];
+        const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
+        const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080 });
+        const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
+        await interaction.reply({ content: `✅ Case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const record = await CaseFileModel.findOne({ guildId, number: caseNumber || interaction.options.getInteger('number') });
+      if (!record) return interaction.reply({ content: '❌ Case not found.', flags: MessageFlags.Ephemeral });
+      const sys = cfg.caseManagement.systems[record.system] || {};
+      const hasAccess = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
+      if (!hasAccess) return interaction.reply({ content: '❌ You do not have access to this case.', flags: MessageFlags.Ephemeral });
+      if (cmd === 'case-status') {
+        record.status = interaction.options.getString('status'); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`📊 Case status updated to **${record.status}** by <@${interaction.user.id}>.`);
+        return interaction.reply({ content: `✅ Case #${record.number} status: ${record.status}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-note') {
+        const note = interaction.options.getString('note');
+        record.notes.push({ authorId: interaction.user.id, text: note, createdAt: new Date() }); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`📝 **Case note by <@${interaction.user.id}>:** ${note}`);
+        return interaction.reply({ content: `✅ Note added to case #${record.number}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-close' || cmd === 'case-reopen') {
+        record.status = cmd === 'case-close' ? 'Closed' : 'Open';
+        record.closedAt = cmd === 'case-close' ? new Date() : null; await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) { await thread.send(`📁 Case ${cmd === 'case-close' ? 'closed' : 'reopened'} by <@${interaction.user.id}>. Record retained.`); if (cmd === 'case-close') await thread.setArchived(true).catch(() => {}); else await thread.setArchived(false).catch(() => {}); }
+        return interaction.reply({ content: `✅ Case #${record.number} ${cmd === 'case-close' ? 'closed' : 'reopened'}; record retained.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-infraction') {
+        const user = interaction.options.getUser('user');
+        const action = interaction.options.getString('action');
+        const reason = interaction.options.getString('reason');
+        const duration = interaction.options.getInteger('duration');
+        const role = interaction.options.getRole('role');
+        if (action === 'demotion' && !role) return interaction.reply({ content: 'A role is required for demotion.', flags: MessageFlags.Ephemeral });
+        if (['mute','tempban'].includes(action) && !duration) return interaction.reply({ content: 'A duration is required for this action.', flags: MessageFlags.Ephemeral });
+        record.status = 'Awaiting Approval'; await record.save();
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'disciplinary', action, requesterId: interaction.user.id, caseNumber: record.number, payload: { userId: user.id, reason, minutes: action === 'mute' ? duration : undefined, hours: action === 'tempban' ? duration : undefined, roleId: role?.id, caseNumber: record.number } });
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`⚖️ Proposed ${action} for <@${user.id}>; awaiting SHR approval. Request ${request._id}.`);
+        return interaction.reply({ content: `✅ Infraction proposal sent for SHR approval (request ${request._id.toString().slice(-6)}).`, flags: MessageFlags.Ephemeral });
+      }
     }
 
     // ── Moderation commands ──
