@@ -205,7 +205,7 @@ const caseFileSchema = new mongoose.Schema({
   archivedAt: { type: Date, default: null },
   nextNumberKey: { type: String, required: true },
 }, { timestamps: true });
-caseFileSchema.index({ guildId: 1, nextNumberKey: 1, number: 1 }, { unique: true });
+caseFileSchema.index({ guildId: 1, number: 1 }, { unique: true });
 const CaseFileModel = mongoose.model('CaseFile', caseFileSchema);
 
 async function postStaffRequest(guild, cfg, data) {
@@ -1454,7 +1454,7 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
-    const [, , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
+    const [, , , key, field] = id.split('__'); cfg.caseManagement.systems[key][field] = interaction.values;
     await saveConfig(guildId); return interaction.update(buildCaseSystemSetupView(cfg, key, field));
   }
   if (interaction.isStringSelectMenu() && id === 'setup__staff_rolefield') return interaction.update(buildStaffAccessSetupView(cfg, interaction.values[0]));
@@ -3010,7 +3010,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
         const channel = interaction.guild.channels.cache.get(sys.channelId);
         if (!channel) return interaction.reply({ content: '❌ Configured case channel not found.', flags: MessageFlags.Ephemeral });
-        const next = await CaseFileModel.findOne({ guildId, system: systemKey }).sort({ number: -1 }).select('number').lean();
+        const next = await CaseFileModel.findOne({ guildId }).sort({ number: -1 }).select('number').lean();
         const number = (next?.number || 0) + 1;
         const reporter = interaction.options.getUser('reporting_party');
         const reported = interaction.options.getUser('reported_party');
@@ -3029,6 +3029,7 @@ client.on('interactionCreate', async (interaction) => {
         const starter = await channel.send({ content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined, embeds: [embed], allowedMentions: { roles: pingIds } });
         const thread = await starter.startThread({ name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100), autoArchiveDuration: 10080, type: ChannelType.PrivateThread });
         const record = await CaseFileModel.create({ guildId, number, system: systemKey, channelId: channel.id, threadId: thread.id, reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}` });
+        await interaction.guild.members.fetch().catch(() => {});
         const allowedMembers = new Set([interaction.user.id]);
         const roleIds = [...(sys.accessRoleIds || []), ...(sys.createRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || [])];
         for (const roleId of roleIds) {
