@@ -1970,6 +1970,13 @@ const commands = [
     { name: 'status', type: 3, description: 'New status', required: true, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
   ]},
   { name: 'case-note', description: 'Add a note to a case', options: [{ name:'number',type:4,description:'Case number',required:true },{ name:'note',type:3,description:'Internal note',required:true,max_length:900 }]},
+  { name: 'case-investigate', description: 'Assign an investigator or supervisor to a case', options: [
+    {name:'number',type:4,description:'Case number',required:true},
+    {name:'user',type:6,description:'Staff member to assign',required:true},
+    {name:'level',type:3,description:'Investigator level',required:true,choices:[{name:'Investigator',value:'investigator'},{name:'Supervisor+',value:'supervisor'}]},
+  ]},
+  { name: 'case-story', description: 'Add both sides of the story to a case', options: [{name:'number',type:4,description:'Case number',required:true},{name:'text',type:3,description:'Statement / both sides',required:true,max_length:900}]},
+
   { name: 'case-close', description: 'Close a case without deleting its record', options: [{ name:'number',type:4,description:'Case number',required:true }]},
   { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
   { name: 'case-infraction', description: 'Propose an infraction from a case for SHR approval', options: [
@@ -3017,6 +3024,29 @@ client.on('interactionCreate', async (interaction) => {
         const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
         if (thread) await thread.send(`📝 **Case note by <@${interaction.user.id}>:** ${note}`);
         return interaction.reply({ content: `✅ Note added to case #${record.number}.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-investigate') {
+        const assigned = interaction.options.getUser('user');
+        const level = interaction.options.getString('level');
+        const allowedRoles = level === 'supervisor' ? (sys.supervisorRoleIds || []) : (sys.investigatorRoleIds || []);
+        if (!isOwner(member) && !hasAnyConfiguredRole(member, [...(sys.supervisorRoleIds || []), ...(sys.accessRoleIds || [])])) {
+          return interaction.reply({ content:'❌ Only case supervisors or configured case managers can assign investigators.', flags:MessageFlags.Ephemeral });
+        }
+        if (!hasAnyConfiguredRole(await interaction.guild.members.fetch(assigned.id).catch(()=>null), allowedRoles) && !isOwner(await interaction.guild.members.fetch(assigned.id).catch(()=>null))) {
+          return interaction.reply({ content:'❌ That member does not have a configured role for this investigator level.', flags:MessageFlags.Ephemeral });
+        }
+        const list = level === 'supervisor' ? record.supervisorIds : record.investigatorIds;
+        if (!list.includes(assigned.id)) list.push(assigned.id);
+        await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`👤 <@${assigned.id}> assigned as ${level === 'supervisor' ? 'Supervisor+' : 'Investigator'} by <@${interaction.user.id}>.`);
+        return interaction.reply({ content:`✅ <@${assigned.id}> assigned to case #${record.number}.`,flags:MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-story') {
+        record.bothSides = interaction.options.getString('text'); await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) await thread.send(`🗣️ **Both Sides of the Story — added by <@${interaction.user.id}>**\n${record.bothSides}`);
+        return interaction.reply({ content:`✅ Statement added to case #${record.number}.`,flags:MessageFlags.Ephemeral });
       }
       if (cmd === 'case-close' || cmd === 'case-reopen') {
         record.status = cmd === 'case-close' ? 'Closed' : 'Open';
