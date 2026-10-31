@@ -270,10 +270,21 @@ async function executeStaffRequest(interaction, record) {
       await TempBanModel.findOneAndUpdate({ guildId: interaction.guildId, userId: p.userId }, { guildId: interaction.guildId, userId: p.userId, moderatorId: interaction.user.id, reason: p.reason, unbanAt }, { upsert: true });
       return 'Temporary ban applied.';
     }
-    if (record.action === 'demotion') {
+    if (record.action === 'softban') {
+      await interaction.guild.members.ban(p.userId, { reason: p.reason, deleteMessageSeconds: 86400 });
+      await interaction.guild.members.unban(p.userId, 'Softban completed after SHR approval');
+      return 'Softban applied.';
+    }
+    if (record.action === 'unban') { await interaction.guild.members.unban(p.userId, p.reason); return 'Ban removed.'; }
+    if (record.action === 'demotion' || record.action === 'removerole') {
       const role = interaction.guild.roles.cache.get(p.roleId);
       if (!role || !target.roles.cache.has(role.id)) throw new Error('The role to remove is no longer assigned.');
-      await target.roles.remove(role.id, p.reason); return 'Demotion role removed.';
+      await target.roles.remove(role.id, p.reason); return 'Role removed.';
+    }
+    if (record.action === 'giveroles') {
+      const roleIds = (p.roleIds || []).filter(id => interaction.guild.roles.cache.has(id));
+      if (!roleIds.length) throw new Error('No valid roles remain to assign.');
+      await target.roles.add(roleIds, p.reason); return 'Roles assigned.';
     }
     if (record.action === 'unmute') { await target.timeout(null, p.reason); return 'Mute removed.'; }
     throw new Error('Unsupported disciplinary action.');
