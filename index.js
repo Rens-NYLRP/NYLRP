@@ -3066,9 +3066,10 @@ client.on('interactionCreate', async (interaction) => {
         const bothSides = interaction.options.getString('both-sides');
         const noteText = interaction.options.getString('notes');
         const evidence = ['evidence', 'evidence2', 'evidence3']
-          .map(name => interaction.options.getAttachment(name))
-          .filter(Boolean)
-          .map((attachment, index) => ({ name: `Evidence ${index + 1}`, url: attachment.url }));
+          .flatMap((optionName, index) => {
+            const attachment = interaction.options.getAttachment(optionName);
+            return attachment ? [{ name: `Evidence ${index + 1}`, url: attachment.url, contentType: attachment.contentType || '' }] : [];
+          });
         const fields = [
           { name: 'Reporting', value: `<@${reporter.id}>`, inline: true },
           { name: 'Reported', value: `<@${reported.id}>`, inline: true },
@@ -3077,12 +3078,12 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Supervisor', value: supervisor ? `<@${supervisor.id}>` : '*Not assigned*', inline: true },
           { name: 'Both Sides', value: bothSides || '*Not provided*' },
           { name: 'Notes', value: noteText || '*No additional notes*' },
-          ...evidence.slice(1).map(item => ({ name: item.name, value: item.url })),
+          ...evidence.map(item => ({ name: item.name, value: item.url })),
         ];
         const embed = new EmbedBuilder().setTitle(`${sys.label || systemKey} | Case #${number}`)
           .setColor(0x5865F2).addFields(fields)
           .setFooter({ text: `Created by ${interaction.user.tag || interaction.user.id}` }).setTimestamp();
-        if (evidence[0]?.url) embed.setImage(evidence[0].url);
+        if (evidence[0]?.contentType.startsWith('image/')) embed.setImage(evidence[0].url);
         const pingIds = sys.pingRoleIds || [];
         const thread = await forum.threads.create({
           name: `case-${String(number).padStart(4, '0')}-${reported.username}`.slice(0, 100),
