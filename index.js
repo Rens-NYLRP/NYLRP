@@ -2119,12 +2119,14 @@ const commands = [
     { name:'reason', type:3, description:'Final reason / decision summary', required:true, max_length:900 },
   ]},
   { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
-  { name: 'case-infraction', description: 'Propose an infraction from a case for SHR approval', options: [
-    { name:'number',type:4,description:'Case number',required:true },{ name:'user',type:6,description:'Member',required:true },
-    { name:'action',type:3,description:'Disciplinary action',required:true,choices:[{name:'Warning',value:'warn'},{name:'Verbal warn',value:'verbal_warn'},{name:'Strike',value:'strike'},{name:'Demotion',value:'demotion'},{name:'Termination',value:'termination'},{name:'Staff blacklist',value:'staff_blacklist'}]},
-    { name:'reason',type:3,description:'Reason',required:true,max_length:500 },
-    { name:'duration',type:4,description:'Minutes for mute / hours for tempban',required:false,min_value:1 },
-    { name:'role',type:8,description:'Role to remove for demotion',required:false },
+  { name: 'case-infraction', description: 'Submit a case outcome for SHR approval', options: [
+    { name:'number',type:4,description:'Case number',required:true },
+    { name:'user',type:6,description:'Staff member receiving the outcome',required:true },
+    { name:'action',type:3,description:'Disciplinary outcome',required:true,choices:[
+      {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
+      {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
+    ]},
+    { name:'reason',type:3,description:'Reason / decision summary',required:true,max_length:900 },
   ]},
   { name: 'promotion', description: 'Create a promotion announcement (SHR direct; HR requests approval)', options: [
     { name: 'member', type: 6, description: 'Member being promoted', required: true },
@@ -3324,18 +3326,24 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `✅ Case #${record.number} reopened; record retained.`, flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'case-infraction') {
-        const user = interaction.options.getUser('user');
-        const action = interaction.options.getString('action');
-        const reason = interaction.options.getString('reason');
-        const duration = interaction.options.getInteger('duration');
-        const role = interaction.options.getRole('role');
-        if (action === 'demotion' && !role) return interaction.reply({ content: 'A role is required for demotion.', flags: MessageFlags.Ephemeral });
-        if (['mute','tempban'].includes(action) && !duration) return interaction.reply({ content: 'A duration is required for this action.', flags: MessageFlags.Ephemeral });
+        if (record.status === 'Closed') return interaction.reply({ content: 'This case is already closed.', flags: MessageFlags.Ephemeral });
+        if (record.status === 'Awaiting Approval') return interaction.reply({ content: 'This case already has a pending SHR approval request.', flags: MessageFlags.Ephemeral });
+        const user = interaction.options.getUser('user', true);
+        const action = interaction.options.getString('action', true);
+        const reason = interaction.options.getString('reason', true);
+        const request = await postStaffRequest(interaction.guild, cfg, {
+          kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number,
+          payload: {
+            userId: user.id, action, reason, caseNumber: record.number,
+            notes: (record.notes || []).map(note => note.text).join('\\n').slice(0, 3000),
+            evidence: record.evidence || [], reportingPartyId: record.reportingPartyId,
+            bothSides: record.bothSides || null, caseReason: record.reason, threadId: record.threadId,
+          },
+        });
         record.status = 'Awaiting Approval'; await record.save();
-        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'disciplinary', action, requesterId: interaction.user.id, caseNumber: record.number, payload: { userId: user.id, reason, minutes: action === 'mute' ? duration : undefined, hours: action === 'tempban' ? duration : undefined, roleId: role?.id, caseNumber: record.number } });
         const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
-        if (thread) await thread.send(`⚖️ Proposed ${action} for <@${user.id}>; awaiting SHR approval. Request ${request._id}.`);
-        return interaction.reply({ content: `✅ Infraction proposal sent for SHR approval (request ${request._id.toString().slice(-6)}).`, flags: MessageFlags.Ephemeral });
+        if (thread) await thread.send(`⚖️ Proposed **${action}** for <@${user.id}>; awaiting SHR approval. Request ${request._id.toString().slice(-6)}.`);
+        return interaction.reply({ content: `✅ ${action} outcome submitted to SHR for approval. No infraction has been recorded yet.`, flags: MessageFlags.Ephemeral });
       }
     }
 
