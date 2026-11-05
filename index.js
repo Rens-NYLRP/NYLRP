@@ -2012,7 +2012,7 @@ const commands = [
     { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
     { name: 'reported', type: 6, description: 'Person being reported', required: true },
     { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
-    { name: 'case-number', type: 4, description: 'Case number (leave empty for automatic numbering)', required: false, min_value: 1 },
+    { name: 'case-number', type: 4, description: 'Case number', required: true, min_value: 1 },
     { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
     { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
     { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
@@ -3052,7 +3052,7 @@ client.on('interactionCreate', async (interaction) => {
         const reporter = interaction.options.getUser('reporting', true);
         const reported = interaction.options.getUser('reported', true);
         const reason = interaction.options.getString('reason', true);
-        const requestedNumber = interaction.options.getInteger('case-number');
+        const requestedNumber = interaction.options.getInteger('case-number', true);
         let number = requestedNumber;
         if (number !== null) {
           const duplicate = await CaseFileModel.findOne({ guildId, number }).lean();
