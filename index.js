@@ -131,6 +131,21 @@ const warningSchema = new mongoose.Schema({
 });
 const WarningModel = mongoose.model('Warning', warningSchema);
 
+const infractionSchema = new mongoose.Schema({
+  guildId: { type: String, required: true, index: true },
+  userId: { type: String, required: true, index: true },
+  caseNumber: { type: Number, required: true },
+  action: { type: String, enum: ['Warning', 'Verbal warn', 'Strike', 'Demotion', 'Termination', 'Staff blacklist'], required: true },
+  reason: { type: String, required: true },
+  notes: { type: String, default: null },
+  evidence: { type: [{ name: String, url: String }], default: [] },
+  reportingPartyId: { type: String, default: null },
+  requestedBy: { type: String, required: true },
+  approvedBy: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+const InfractionModel = mongoose.model('Infraction', infractionSchema);
+
 const modNoteSchema = new mongoose.Schema({
   guildId:   { type: String, required: true, index: true },
   userId:    { type: String, required: true, index: true },
@@ -252,6 +267,62 @@ async function executeStaffRequest(interaction, record, cfg) {
       ).setTimestamp().setFooter({ text: 'NYLRP Promotion System' });
     await interaction.channel.send({ embeds: [embed] });
     return 'Promotion announcement posted.';
+  }
+  if (record.kind === 'case_infraction') {
+    const caseRecord = await CaseFileModel.findOne({ guildId: interaction.guildId, number: record.caseNumber });
+    if (!caseRecord) throw new Error('Linked case could not be found.');
+    if (caseRecord.status !== 'Awaiting Approval') throw new Error('Case is no longer awaiting approval.');
+    const infraction = await InfractionModel.create({
+      guildId: interaction.guildId,
+      userId: p.userId,
+      caseNumber: record.caseNumber,
+      action: p.action,
+      reason: p.reason,
+      notes: p.notes || null,
+      evidence: p.evidence || [],
+      reportingPartyId: p.reportingPartyId || caseRecord.reportingPartyId,
+      requestedBy: record.requesterId,
+      approvedBy: interaction.user.id,
+    });
+    caseRecord.status = 'Closed';
+    caseRecord.closedAt = new Date();
+    await caseRecord.save();
+    const targetUser = await interaction.client.users.fetch(p.userId).catch(() => null);
+    if (targetUser) await safeDM(targetUser, { embeds: [new EmbedBuilder()
+      .setTitle('NYLRP | Staff case decision')
+      .setColor(0xED4245)
+      .setDescription(`A staff case decision has been approved in **${interaction.guild.name}**.`)
+      .addFields(
+        { name: 'Case', value: `#${record.caseNumber}`, inline: true },
+        { name: 'Outcome', value: p.action, inline: true },
+        { name: 'Reason', value: String(p.reason).slice(0, 1024) },
+        { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+      )
+      .setFooter({ text: 'The internal case discussion and evidence transcript are confidential.' })
+      .setTimestamp()] }).catch(() => {});
+    if (cfg.staffAccess?.infractionChannelId) {
+      const logChannel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
+      if (logChannel) await logChannel.send({ embeds: [new EmbedBuilder()
+        .setTitle(`NYLRP | ${p.action}`)
+        .setColor(0xED4245)
+        .addFields(
+          { name: 'Member', value: `<@${p.userId}>`, inline: true },
+          { name: 'Case number', value: `#${record.caseNumber}`, inline: true },
+          { name: 'Outcome', value: p.action, inline: true },
+          { name: 'Reason', value: String(p.reason).slice(0, 1024) },
+          { name: 'Reporting', value: p.reportingPartyId ? `<@${p.reportingPartyId}>` : 'Not specified', inline: true },
+          { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
+          { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
+          ...(p.notes ? [{ name: 'Case notes', value: String(p.notes).slice(0, 1024) }] : []),
+          ...(p.evidence || []).slice(0, 3).map((item, index) => ({ name: item.name || `Evidence ${index + 1}`, value: item.url })),
+        ).setTimestamp()] });
+    }
+    const thread = await interaction.guild.channels.fetch(caseRecord.threadId).catch(() => null);
+    if (thread) {
+      await thread.send(`✅ **Case #${record.caseNumber} approved and concluded.** Outcome: **${p.action}**. Infraction record: ${infraction._id.toString()}.`);
+      await thread.setArchived(true).catch(() => {});
+    }
+    return `Case #${record.caseNumber} approved; ${p.action} infraction recorded.`;
   }
   const user = p.userId ? await interaction.client.users.fetch(p.userId).catch(() => null) : null;
   if (record.kind === 'disciplinary') {
@@ -2039,11 +2110,18 @@ const commands = [
   ]},
   { name: 'case-story', description: 'Add both sides of the story to a case', options: [{name:'number',type:4,description:'Case number',required:true},{name:'text',type:3,description:'Statement / both sides',required:true,max_length:900}]},
 
-  { name: 'case-close', description: 'Close a case without deleting its record', options: [{ name:'number',type:4,description:'Case number',required:true }]},
+  { name: 'case-close', description: 'Submit a completed case for SHR approval and infraction recording', options: [
+    { name:'number', type:4, description:'Case number', required:true },
+    { name:'action', type:3, description:'Recommended disciplinary outcome', required:true, choices:[
+      {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
+      {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
+    ]},
+    { name:'reason', type:3, description:'Final reason / decision summary', required:true, max_length:900 },
+  ]},
   { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
   { name: 'case-infraction', description: 'Propose an infraction from a case for SHR approval', options: [
     { name:'number',type:4,description:'Case number',required:true },{ name:'user',type:6,description:'Member',required:true },
-    { name:'action',type:3,description:'Disciplinary action',required:true,choices:[{name:'Warn',value:'warn'},{name:'Mute',value:'mute'},{name:'Kick',value:'kick'},{name:'Ban',value:'ban'},{name:'Tempban',value:'tempban'},{name:'Demotion (remove role)',value:'demotion'}]},
+    { name:'action',type:3,description:'Disciplinary action',required:true,choices:[{name:'Warning',value:'warn'},{name:'Verbal warn',value:'verbal_warn'},{name:'Strike',value:'strike'},{name:'Demotion',value:'demotion'},{name:'Termination',value:'termination'},{name:'Staff blacklist',value:'staff_blacklist'}]},
     { name:'reason',type:3,description:'Reason',required:true,max_length:500 },
     { name:'duration',type:4,description:'Minutes for mute / hours for tempban',required:false,min_value:1 },
     { name:'role',type:8,description:'Role to remove for demotion',required:false },
@@ -2328,6 +2406,14 @@ client.on('interactionCreate', async (interaction) => {
         if (!record) return interaction.editReply('Another SHR member has already handled this request.');
         if (action === 'reject') {
           record.status = 'rejected'; record.approverId = interaction.user.id; record.resolvedAt = new Date(); await record.save();
+          if (record.kind === 'case_infraction' && record.caseNumber) {
+            const caseRecord = await CaseFileModel.findOne({ guildId, number: record.caseNumber });
+            if (caseRecord && caseRecord.status === 'Awaiting Approval') {
+              caseRecord.status = 'Under Investigation'; await caseRecord.save();
+              const thread = await interaction.guild.channels.fetch(caseRecord.threadId).catch(() => null);
+              if (thread) await thread.send(`❌ SHR rejected the proposed outcome for Case #${caseRecord.number}. No infraction was recorded; the case remains open for further review.`);
+            }
+          }
           await interaction.message.edit({ components: [] }).catch(() => {});
           return interaction.editReply('Request rejected.');
         }
@@ -3204,12 +3290,38 @@ client.on('interactionCreate', async (interaction) => {
         if (thread) await thread.send(`🗣️ **Both Sides of the Story — added by <@${interaction.user.id}>**\n${record.bothSides}`);
         return interaction.reply({ content:`✅ Statement added to case #${record.number}.`,flags:MessageFlags.Ephemeral });
       }
-      if (cmd === 'case-close' || cmd === 'case-reopen') {
-        record.status = cmd === 'case-close' ? 'Closed' : 'Open';
-        record.closedAt = cmd === 'case-close' ? new Date() : null; await record.save();
+      if (cmd === 'case-close') {
+        if (record.status === 'Closed') return interaction.reply({ content: 'This case is already closed.', flags: MessageFlags.Ephemeral });
+        if (record.status === 'Awaiting Approval') return interaction.reply({ content: 'This case already has a pending SHR approval request.', flags: MessageFlags.Ephemeral });
+        const action = interaction.options.getString('action', true);
+        const reason = interaction.options.getString('reason', true);
+        const request = await postStaffRequest(interaction.guild, cfg, {
+          kind: 'case_infraction',
+          action: 'case_outcome',
+          requesterId: interaction.user.id,
+          caseNumber: record.number,
+          payload: {
+            userId: record.reportedPartyId,
+            action,
+            reason,
+            notes: (record.notes || []).map(note => note.text).join('\\n').slice(0, 3000),
+            evidence: record.evidence || [],
+            reportingPartyId: record.reportingPartyId,
+            bothSides: record.bothSides || null,
+            caseReason: record.reason,
+            threadId: record.threadId,
+          },
+        });
+        record.status = 'Awaiting Approval'; await record.save();
         const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
-        if (thread) { await thread.send(`📁 Case ${cmd === 'case-close' ? 'closed' : 'reopened'} by <@${interaction.user.id}>. Record retained.`); if (cmd === 'case-close') await thread.setArchived(true).catch(() => {}); else await thread.setArchived(false).catch(() => {}); }
-        return interaction.reply({ content: `✅ Case #${record.number} ${cmd === 'case-close' ? 'closed' : 'reopened'}; record retained.`, flags: MessageFlags.Ephemeral });
+        if (thread) await thread.send(`⏳ Case #${record.number} submitted to SHR for approval. Proposed outcome: **${action}**. Request ${request._id.toString().slice(-6)}. The case will only be closed after approval.`);
+        return interaction.reply({ content: `✅ Case #${record.number} submitted to SHR for approval. Proposed outcome: **${action}**. No infraction has been recorded yet.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case-reopen') {
+        record.status = 'Open'; record.closedAt = null; await record.save();
+        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
+        if (thread) { await thread.send(`📁 Case reopened by <@${interaction.user.id}>. Record retained.`); await thread.setArchived(false).catch(() => {}); }
+        return interaction.reply({ content: `✅ Case #${record.number} reopened; record retained.`, flags: MessageFlags.Ephemeral });
       }
       if (cmd === 'case-infraction') {
         const user = interaction.options.getUser('user');
