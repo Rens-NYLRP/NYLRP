@@ -201,6 +201,7 @@ const caseFileSchema = new mongoose.Schema({
   supervisorIds: { type: [String], default: [] },
   notes: { type: [{ authorId: String, text: String, createdAt: Date }], default: [] },
   bothSides: { type: String, default: null },
+  evidence: { type: [{ name: String, url: String }], default: [] },
   createdBy: { type: String, required: true },
   closedAt: { type: Date, default: null },
   archivedAt: { type: Date, default: null },
@@ -2007,6 +2008,19 @@ const commands = [
     { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
+  { name: 'case-file', description: 'Create a numbered investigation case in this forum', options: [
+    { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
+    { name: 'reported', type: 6, description: 'Person being reported', required: true },
+    { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
+    { name: 'case-number', type: 4, description: 'Case number (leave empty for automatic numbering)', required: false, min_value: 1 },
+    { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
+    { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
+    { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
+    { name: 'notes', type: 3, description: 'Additional case notes', required: false, max_length: 900 },
+    { name: 'evidence', type: 11, description: 'First evidence image or file', required: false },
+    { name: 'evidence2', type: 11, description: 'Second evidence image or file', required: false },
+    { name: 'evidence3', type: 11, description: 'Third evidence image or file', required: false },
+  ]},
   { name: 'case-create', description: 'Create a new staff case file', options: [
     { name: 'system', type: 3, description: 'Case system', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
     { name: 'reporting_party', type: 6, description: 'Reporting party', required: true },
@@ -3024,6 +3038,81 @@ client.on('interactionCreate', async (interaction) => {
 
     // Case management commands
     if (cmd.startsWith('case-')) {
+      if (cmd === 'case-file') {
+        const forumId = interaction.channel?.isThread?.() ? interaction.channel.parentId : interaction.channelId;
+        const matchedSystem = Object.entries(cfg.caseManagement?.systems || {}).find(([, system]) => system?.channelId === forumId);
+        if (!matchedSystem) {
+          return interaction.reply({ content: '❌ Use /case-file inside the configured case Forum channel or one of its posts. Configure the Forum in /setup → Case Management.', flags: MessageFlags.Ephemeral });
+        }
+        const [systemKey, sys] = matchedSystem;
+        const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds || []);
+        if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
+        const forum = interaction.guild.channels.cache.get(forumId);
+        if (!forum || forum.type !== ChannelType.GuildForum) throw new Error('The configured case channel must be a Forum channel.');
+        const reporter = interaction.options.getUser('reporting', true);
+        const reported = interaction.options.getUser('reported', true);
+        const reason = interaction.options.getString('reason', true);
+        const requestedNumber = interaction.options.getInteger('case-number');
+        let number = requestedNumber;
+        if (number !== null) {
+          const duplicate = await CaseFileModel.findOne({ guildId, number }).lean();
+          if (duplicate) return interaction.reply({ content: `❌ Case #${number} already exists.`, flags: MessageFlags.Ephemeral });
+        } else {
+          const latest = await CaseFileModel.findOne({ guildId }).sort({ number: -1 }).select('number').lean();
+          number = (latest?.number || 0) + 1;
+        }
+        const status = interaction.options.getString('status') || 'Open';
+        const supervisor = interaction.options.getUser('supervisor');
+        const bothSides = interaction.options.getString('both-sides');
+        const noteText = interaction.options.getString('notes');
+        const evidence = ['evidence', 'evidence2', 'evidence3']
+          .map(name => interaction.options.getAttachment(name))
+          .filter(Boolean)
+          .map((attachment, index) => ({ name: `Evidence ${index + 1}`, url: attachment.url }));
+        const fields = [
+          { name: 'Reporting', value: `<@${reporter.id}>`, inline: true },
+          { name: 'Reported', value: `<@${reported.id}>`, inline: true },
+          { name: 'Reason', value: reason.slice(0, 1024) },
+          { name: 'Status', value: status, inline: true },
+          { name: 'Supervisor', value: supervisor ? `<@${supervisor.id}>` : '*Not assigned*', inline: true },
+          { name: 'Both Sides', value: bothSides || '*Not provided*' },
+          { name: 'Notes', value: noteText || '*No additional notes*' },
+          ...evidence.slice(1).map(item => ({ name: item.name, value: item.url })),
+        ];
+        const embed = new EmbedBuilder().setTitle(`${sys.label || systemKey} | Case #${number}`)
+          .setColor(0x5865F2).addFields(fields)
+          .setFooter({ text: `Created by ${interaction.user.tag || interaction.user.id}` }).setTimestamp();
+        if (evidence[0]?.url) embed.setImage(evidence[0].url);
+        const pingIds = sys.pingRoleIds || [];
+        const thread = await forum.threads.create({
+          name: `case-${String(number).padStart(4, '0')}-${reported.username}`.slice(0, 100),
+          autoArchiveDuration: 10080,
+          message: {
+            content: pingIds.map(id => `<@&${id}>`).join(' ') || undefined,
+            embeds: [embed],
+            allowedMentions: { roles: pingIds },
+          },
+        });
+        await CaseFileModel.create({
+          guildId, number, system: systemKey, channelId: forum.id, threadId: thread.id,
+          reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, status,
+          supervisorIds: supervisor ? [supervisor.id] : [], bothSides,
+          notes: noteText ? [{ authorId: interaction.user.id, text: noteText, createdAt: new Date() }] : [],
+          evidence, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}`,
+        });
+        if (sys.logChannelId) {
+          const logChannel = interaction.guild.channels.cache.get(sys.logChannelId);
+          if (logChannel) await logChannel.send({ embeds: [new EmbedBuilder().setTitle(`Case #${number} Created`).setColor(0x5865F2).addFields(
+            { name: 'System', value: sys.label || systemKey, inline: true },
+            { name: 'Created by', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Reporting', value: `<@${reporter.id}>`, inline: true },
+            { name: 'Reported', value: `<@${reported.id}>`, inline: true },
+            { name: 'Thread', value: `<#${thread.id}>` },
+            { name: 'Reason', value: reason.slice(0, 1024) },
+          ).setTimestamp()] }).catch(() => {});
+        }
+        return interaction.reply({ content: `✅ Case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
+      }
       const caseNumber = interaction.options.getInteger('number');
       const systemKey = cmd === 'case-create' ? interaction.options.getString('system') : null;
       if (cmd === 'case-create') {
