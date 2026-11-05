@@ -211,6 +211,7 @@ const caseFileSchema = new mongoose.Schema({
   reportingPartyId: { type: String, required: true },
   reportedPartyId: { type: String, required: true },
   reason: { type: String, required: true },
+  proposedPunishment: { type: String, enum: ['Warning', 'Verbal warn', 'Strike', 'Demotion', 'Termination', 'Staff blacklist'], default: null },
   status: { type: String, enum: ['Open', 'Under Investigation', 'Awaiting Approval', 'Resolved', 'Closed'], default: 'Open' },
   investigatorIds: { type: [String], default: [] },
   supervisorIds: { type: [String], default: [] },
@@ -2099,7 +2100,7 @@ const commands = [
       { name: 'evidence3', type: 11, description: 'Third evidence image or file', required: false },
     ]},
     { type: 1, name: 'close', description: 'Submit this case for SHR closure approval', options: [
-      { name: 'action', type: 3, description: 'Recommended disciplinary outcome', required: true, choices: [
+      { name: 'action', type: 3, description: 'Override proposed punishment if needed', required: false, choices: [
         {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
         {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
       ]},
@@ -3221,7 +3222,8 @@ client.on('interactionCreate', async (interaction) => {
         const canClose = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
         if (!canClose) return interaction.reply({ content: '❌ You do not have permission to close this case.', flags: MessageFlags.Ephemeral });
         if (record.status === 'Closed' || record.status === 'Awaiting Approval') return interaction.reply({ content: '❌ This case is already closed or awaiting SHR approval.', flags: MessageFlags.Ephemeral });
-        const action = interaction.options.getString('action', true);
+        const action = interaction.options.getString('action') || record.proposedPunishment;
+        if (!action) return interaction.reply({ content: '❌ This case has no proposed punishment. Select an action when closing it.', flags: MessageFlags.Ephemeral });
         const reason = interaction.options.getString('reason', true);
         const request = await postStaffRequest(interaction.guild, cfg, { kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number, payload: { userId: record.reportedPartyId, action, reason, notes: (record.notes || []).map(note => note.text).join('\\n').slice(0,3000), evidence: record.evidence || [], reportingPartyId: record.reportingPartyId, bothSides: record.bothSides || null, caseReason: record.reason, threadId: record.threadId } });
         record.status = 'Awaiting Approval'; await record.save();
