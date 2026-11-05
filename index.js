@@ -2080,11 +2080,16 @@ const commands = [
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
   { name: 'case', description: 'Open a case or submit it for closure approval', options: [
-    { type: 1, name: 'open', description: 'Open a new case', options: [
+    { type: 1, name: 'open', description: 'Open a new case in its configured Forum', options: [
+      { name: 'system', type: 3, description: 'Case system / destination Forum', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
       { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
       { name: 'reported', type: 6, description: 'Person being reported', required: true },
       { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
       { name: 'case-number', type: 4, description: 'Case number', required: true, min_value: 1 },
+      { name: 'punishment', type: 3, description: 'Proposed punishment', required: true, choices: [
+        {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
+        {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
+      ]},
       { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'}] },
       { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
       { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
@@ -3130,12 +3135,14 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'case' || cmd.startsWith('case-')) {
       const caseSubcommand = interaction.options.getSubcommand(false);
       if (cmd === 'case' && caseSubcommand === 'open') {
-        const forumId = interaction.channel?.isThread?.() ? interaction.channel.parentId : interaction.channelId;
-        const matchedSystem = Object.entries(cfg.caseManagement?.systems || {}).find(([, system]) => system?.channelId === forumId);
-        if (!matchedSystem) {
-          return interaction.reply({ content: '❌ Use /case-file inside the configured case Forum channel or one of its posts. Configure the Forum in /setup → Case Management.', flags: MessageFlags.Ephemeral });
+        // /case open can be used from any channel. The selected case system
+        // determines the destination Forum; the current channel is never used.
+        const systemKey = interaction.options.getString('system', true);
+        const sys = cfg.caseManagement?.systems?.[systemKey];
+        if (!sys?.channelId) {
+          return interaction.reply({ content: '❌ This case system has no Forum configured. Set it in /setup → Case Management.', flags: MessageFlags.Ephemeral });
         }
-        const [systemKey, sys] = matchedSystem;
+        const forumId = sys.channelId;
         const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds || []);
         if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
         const forum = interaction.guild.channels.cache.get(forumId);
@@ -3143,6 +3150,7 @@ client.on('interactionCreate', async (interaction) => {
         const reporter = interaction.options.getUser('reporting', true);
         const reported = interaction.options.getUser('reported', true);
         const reason = interaction.options.getString('reason', true);
+        const proposedPunishment = interaction.options.getString('punishment', true);
         const requestedNumber = interaction.options.getInteger('case-number', true);
         let number = requestedNumber;
         if (number !== null) {
@@ -3165,6 +3173,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Reporting', value: `<@${reporter.id}>`, inline: true },
           { name: 'Reported', value: `<@${reported.id}>`, inline: true },
           { name: 'Reason', value: reason.slice(0, 1024) },
+          { name: 'Proposed Punishment', value: proposedPunishment, inline: true },
           { name: 'Status', value: status, inline: true },
           { name: 'Supervisor', value: supervisor ? `<@${supervisor.id}>` : '*Not assigned*', inline: true },
           { name: 'Both Sides', value: bothSides || '*Not provided*' },
@@ -3187,7 +3196,7 @@ client.on('interactionCreate', async (interaction) => {
         });
         await CaseFileModel.create({
           guildId, number, system: systemKey, channelId: forum.id, threadId: thread.id,
-          reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, status,
+          reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, status, proposedPunishment,
           supervisorIds: supervisor ? [supervisor.id] : [], bothSides,
           notes: noteText ? [{ authorId: interaction.user.id, text: noteText, createdAt: new Date() }] : [],
           evidence, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}`,
