@@ -2079,18 +2079,27 @@ const commands = [
     { name: 'user', type: 6, description: 'Who? (default: yourself)', required: false },
   ]},
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
-  { name: 'case-file', description: 'Create a numbered investigation case in this forum', options: [
-    { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
-    { name: 'reported', type: 6, description: 'Person being reported', required: true },
-    { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
-    { name: 'case-number', type: 4, description: 'Case number', required: true, min_value: 1 },
-    { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
-    { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
-    { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
-    { name: 'notes', type: 3, description: 'Additional case notes', required: false, max_length: 900 },
-    { name: 'evidence', type: 11, description: 'First evidence image or file', required: false },
-    { name: 'evidence2', type: 11, description: 'Second evidence image or file', required: false },
-    { name: 'evidence3', type: 11, description: 'Third evidence image or file', required: false },
+  { name: 'case', description: 'Open a case or submit it for closure approval', options: [
+    { type: 1, name: 'open', description: 'Open a new case', options: [
+      { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
+      { name: 'reported', type: 6, description: 'Person being reported', required: true },
+      { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
+      { name: 'case-number', type: 4, description: 'Case number', required: true, min_value: 1 },
+      { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'}] },
+      { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
+      { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
+      { name: 'notes', type: 3, description: 'Additional case notes', required: false, max_length: 900 },
+      { name: 'evidence', type: 11, description: 'First evidence image or file', required: false },
+      { name: 'evidence2', type: 11, description: 'Second evidence image or file', required: false },
+      { name: 'evidence3', type: 11, description: 'Third evidence image or file', required: false },
+    ]},
+    { type: 1, name: 'close', description: 'Submit this case for SHR closure approval', options: [
+      { name: 'action', type: 3, description: 'Recommended disciplinary outcome', required: true, choices: [
+        {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
+        {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
+      ]},
+      { name: 'reason', type: 3, description: 'Final reason / decision summary', required: true, max_length: 900 },
+    ]},
   ]},
   { name: 'case-create', description: 'Create a new staff case file', options: [
     { name: 'system', type: 3, description: 'Case system', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
@@ -2110,14 +2119,7 @@ const commands = [
   ]},
   { name: 'case-story', description: 'Add both sides of the story to a case', options: [{name:'number',type:4,description:'Case number',required:true},{name:'text',type:3,description:'Statement / both sides',required:true,max_length:900}]},
 
-  { name: 'case-close', description: 'Submit a completed case for SHR approval and infraction recording', options: [
-    { name:'number', type:4, description:'Case number', required:true },
-    { name:'action', type:3, description:'Recommended disciplinary outcome', required:true, choices:[
-      {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
-      {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
-    ]},
-    { name:'reason', type:3, description:'Final reason / decision summary', required:true, max_length:900 },
-  ]},
+
   { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
   { name: 'case-infraction', description: 'Submit a case outcome for SHR approval', options: [
     { name:'number',type:4,description:'Case number',required:true },
@@ -3125,8 +3127,9 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // Case management commands
-    if (cmd.startsWith('case-')) {
-      if (cmd === 'case-file') {
+    if (cmd === 'case' || cmd.startsWith('case-')) {
+      const caseSubcommand = interaction.options.getSubcommand(false);
+      if (cmd === 'case' && caseSubcommand === 'open') {
         const forumId = interaction.channel?.isThread?.() ? interaction.channel.parentId : interaction.channelId;
         const matchedSystem = Object.entries(cfg.caseManagement?.systems || {}).find(([, system]) => system?.channelId === forumId);
         if (!matchedSystem) {
@@ -3201,6 +3204,20 @@ client.on('interactionCreate', async (interaction) => {
           ).setTimestamp()] }).catch(() => {});
         }
         return interaction.reply({ content: `✅ Case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
+      }
+      if (cmd === 'case' && caseSubcommand === 'close') {
+        const record = await CaseFileModel.findOne({ guildId, threadId: interaction.channel.id });
+        if (!record) return interaction.reply({ content: '❌ This command only works inside an active case thread.', flags: MessageFlags.Ephemeral });
+        const sys = cfg.caseManagement.systems[record.system] || {};
+        const canClose = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
+        if (!canClose) return interaction.reply({ content: '❌ You do not have permission to close this case.', flags: MessageFlags.Ephemeral });
+        if (record.status === 'Closed' || record.status === 'Awaiting Approval') return interaction.reply({ content: '❌ This case is already closed or awaiting SHR approval.', flags: MessageFlags.Ephemeral });
+        const action = interaction.options.getString('action', true);
+        const reason = interaction.options.getString('reason', true);
+        const request = await postStaffRequest(interaction.guild, cfg, { kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number, payload: { userId: record.reportedPartyId, action, reason, notes: (record.notes || []).map(note => note.text).join('\\n').slice(0,3000), evidence: record.evidence || [], reportingPartyId: record.reportingPartyId, bothSides: record.bothSides || null, caseReason: record.reason, threadId: record.threadId } });
+        record.status = 'Awaiting Approval'; await record.save();
+        await interaction.channel.send(`⏳ Case #${record.number} submitted to SHR for approval. Proposed outcome: **${action}**. Request ${request._id.toString().slice(-6)}.`);
+        return interaction.reply({ content: '✅ Case submitted to SHR. It will only close after approval.', flags: MessageFlags.Ephemeral });
       }
       const caseNumber = interaction.options.getInteger('number');
       const systemKey = cmd === 'case-create' ? interaction.options.getString('system') : null;
@@ -3292,7 +3309,10 @@ client.on('interactionCreate', async (interaction) => {
         if (thread) await thread.send(`🗣️ **Both Sides of the Story — added by <@${interaction.user.id}>**\n${record.bothSides}`);
         return interaction.reply({ content:`✅ Statement added to case #${record.number}.`,flags:MessageFlags.Ephemeral });
       }
-      if (cmd === 'case-close') {
+      if (cmd === 'case' && caseSubcommand === 'close') {
+        if (!interaction.channel?.isThread?.() || interaction.channel.id !== record.threadId) {
+          return interaction.reply({ content: '❌ Use /case close inside the matching case thread, just like closing a ticket.', flags: MessageFlags.Ephemeral });
+        }
         if (record.status === 'Closed') return interaction.reply({ content: 'This case is already closed.', flags: MessageFlags.Ephemeral });
         if (record.status === 'Awaiting Approval') return interaction.reply({ content: 'This case already has a pending SHR approval request.', flags: MessageFlags.Ephemeral });
         const action = interaction.options.getString('action', true);
