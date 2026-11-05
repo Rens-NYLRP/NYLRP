@@ -2107,35 +2107,6 @@ const commands = [
       { name: 'reason', type: 3, description: 'Final reason / decision summary', required: true, max_length: 900 },
     ]},
   ]},
-  { name: 'case-create', description: 'Create a new staff case file', options: [
-    { name: 'system', type: 3, description: 'Case system', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
-    { name: 'reporting_party', type: 6, description: 'Reporting party', required: true },
-    { name: 'reported_party', type: 6, description: 'Reported party', required: true },
-    { name: 'reason', type: 3, description: 'Reason / summary', required: true, max_length: 900 },
-  ]},
-  { name: 'case-status', description: 'Update a case status', options: [
-    { name: 'number', type: 4, description: 'Case number', required: true },
-    { name: 'status', type: 3, description: 'New status', required: true, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'},{name:'Awaiting Approval',value:'Awaiting Approval'},{name:'Resolved',value:'Resolved'},{name:'Closed',value:'Closed'}] },
-  ]},
-  { name: 'case-note', description: 'Add a note to a case', options: [{ name:'number',type:4,description:'Case number',required:true },{ name:'note',type:3,description:'Internal note',required:true,max_length:900 }]},
-  { name: 'case-investigate', description: 'Assign an investigator or supervisor to a case', options: [
-    {name:'number',type:4,description:'Case number',required:true},
-    {name:'user',type:6,description:'Staff member to assign',required:true},
-    {name:'level',type:3,description:'Investigator level',required:true,choices:[{name:'Investigator',value:'investigator'},{name:'Supervisor+',value:'supervisor'}]},
-  ]},
-  { name: 'case-story', description: 'Add both sides of the story to a case', options: [{name:'number',type:4,description:'Case number',required:true},{name:'text',type:3,description:'Statement / both sides',required:true,max_length:900}]},
-
-
-  { name: 'case-reopen', description: 'Reopen a previously closed case', options: [{ name:'number',type:4,description:'Case number',required:true }]},
-  { name: 'case-infraction', description: 'Submit a case outcome for SHR approval', options: [
-    { name:'number',type:4,description:'Case number',required:true },
-    { name:'user',type:6,description:'Staff member receiving the outcome',required:true },
-    { name:'action',type:3,description:'Disciplinary outcome',required:true,choices:[
-      {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
-      {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
-    ]},
-    { name:'reason',type:3,description:'Reason / decision summary',required:true,max_length:900 },
-  ]},
   { name: 'promotion', description: 'Create a promotion announcement (SHR direct; HR requests approval)', options: [
     { name: 'member', type: 6, description: 'Member being promoted', required: true },
     { name: 'department', type: 3, description: 'Department', required: true, max_length: 50 },
