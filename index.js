@@ -652,7 +652,7 @@ function stripKnownPrefixes(currentName, cfg) {
       if (match) { name = name.slice(match[0].length).trim(); changed = true; break; }
     }
   }
-  return name.replace(/^LOA\\s*\\|\\s*/i, '').trim();
+  return name.replace(/^LOA\s*\|\s*/i, '').trim();
 }
 async function applyNicknamePrefix(member, cfg) {
   if (member.user.bot || !member.manageable) return;
