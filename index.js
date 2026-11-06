@@ -639,28 +639,45 @@ function hasCommandClearance(member, cfg, cmd) {
   return roles.some(rid => member.roles.cache.has(rid));
 }
 
-// ── Role-based nickname prefixes (e.g. role "Rang I" → nickname "Rang I Username") ──
-function stripKnownPrefixes(currentName, cfg) {
+// ── Chain of Command rank prefixes ──
+// Imported Chain of Command order is highest → lowest.
+// Only the highest configured rank held by a member is applied.
+function stripConfiguredRankPrefixes(currentName, cfg) {
   let name = String(currentName || '').trim();
-  const prefixes = (cfg.nicknamePrefixes || []).map(p => String(p.prefix || '').trim()).filter(Boolean).sort((a, b) => b.length - a.length);
+  const prefixes = (cfg.coc?.ranks || [])
+    .map(rank => String(rank.prefix || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
   let changed = true;
   while (changed && name) {
     changed = false;
     for (const prefix of prefixes) {
-      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escaped = prefix.replace(/[.*+?^\$\{\}()|[\]\\]/g, '\\$&');
       const match = name.match(new RegExp('^' + escaped + '(?:\\s*\\|\\s*|\\s+)', 'i'));
-      if (match) { name = name.slice(match[0].length).trim(); changed = true; break; }
+      if (match) {
+        name = name.slice(match[0].length).trim();
+        changed = true;
+        break;
+      }
     }
   }
-  return name.replace(/^LOA\s*\|\s*/i, '').trim();
+  return name;
+}
+function getHighestConfiguredRank(member, cfg) {
+  return (cfg.coc?.ranks || []).find(rank =>
+    rank.roleId && rank.prefix && member.roles.cache.has(rank.roleId)
+  ) || null;
 }
 async function applyNicknamePrefix(member, cfg) {
   if (member.user.bot || !member.manageable) return;
   const currentName = member.nickname || member.user.username;
-  const cleanName = stripKnownPrefixes(currentName, cfg);
-  if (!cleanName || cleanName === currentName || cleanName.length > 32) return;
-  await member.setNickname(cleanName, 'Remove legacy rank and LOA prefixes')
-    .catch(e => console.error(`Failed to remove legacy prefix for ${member.id}:`, e.message));
+  const cleanName = stripConfiguredRankPrefixes(currentName, cfg);
+  if (!cleanName) return;
+  const highestRank = getHighestConfiguredRank(member, cfg);
+  const nextName = highestRank ? String(highestRank.prefix).trim() + ' | ' + cleanName : cleanName;
+  if (nextName === currentName || nextName.length > 32) return;
+  await member.setNickname(nextName, 'Apply highest Chain of Command rank prefix')
+    .catch(e => console.error('Failed to update rank prefix for ' + member.id + ':', e.message));
 }
 function isTrainer(member, cfg) {
   if (isAdmin(member)) return true;
@@ -1734,21 +1751,13 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     if (!pending || pending.guildId !== guildId) return interaction.reply({ content: '❌ Import expired. Start the bulk import again.', flags: MessageFlags.Ephemeral });
     pendingCocImports.delete(interaction.user.id);
     cfg.coc.ranks = pending.parsed.map(r => ({ roleId: r.roleId, name: r.name, prefix: r.prefix || '' }));
-    const importedPrefixes = [];
-    cfg.nicknamePrefixes = [];
     await saveConfig(guildId);
     await interaction.update(buildCocView(cfg));
-    const affected = new Map();
-    for (const r of importedPrefixes) {
-      const role = interaction.guild.roles.cache.get(r.roleId);
-      if (role) for (const m of role.members.values()) affected.set(m.id, m);
-    }
-    const members = [...affected.values()].slice(0, 200);
-    for (const m of members) {
-      await applyNicknamePrefix(m, cfg);
-      await new Promise(r => setTimeout(r, 250));
-    }
-    return interaction.followUp({ content: `✅ Imported ${cfg.coc.ranks.length} rank(s) and ${importedPrefixes.length} prefix(es). Synced ${members.length} current member(s).`, flags: MessageFlags.Ephemeral }).catch(() => {});
+    const prefixCount = cfg.coc.ranks.filter(rank => rank.prefix).length;
+    return interaction.followUp({
+      content: '✅ Imported ' + cfg.coc.ranks.length + ' rank(s), including ' + prefixCount + ' prefix(es). Prefixes update only when a member\'s configured rank changes.',
+      flags: MessageFlags.Ephemeral,
+    }).catch(() => {});
   }
   if (interaction.isButton() && id === 'setup__coc_publish') {
     if (!cfg.coc.channelId) return interaction.reply({ content: '❌ Set a Chain of Command channel first.', flags: MessageFlags.Ephemeral });
@@ -2323,29 +2332,6 @@ async function sweepExpiredTempBans() {
 // ════════════════════════════════════════════
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  // Remove previously applied rank/LOA nickname prefixes from existing members.
-  for (const guild of client.guilds.cache.values()) {
-    try {
-      const cfg = await getConfig(guild.id);
-      const members = await guild.members.fetch();
-      let cleaned = 0;
-      for (const member of members.values()) {
-        if (member.user.bot) continue;
-        const before = member.nickname || member.user.username;
-        const after = stripKnownPrefixes(before, cfg);
-        if (after && after !== before && after.length <= 32 && member.manageable) {
-          await member.setNickname(after, 'Remove legacy rank and LOA prefixes').catch(() => {});
-          cleaned++;
-          await new Promise(resolve => setTimeout(resolve, 250));
-        }
-      }
-      cfg.nicknamePrefixes = [];
-      await saveConfig(guild.id);
-      console.log(`Removed legacy nickname prefixes for ${cleaned} member(s) in ${guild.name}.`);
-    } catch (error) {
-      console.error(`Legacy prefix cleanup failed in ${guild.name}:`, error.message);
-    }
-  }
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -2364,18 +2350,21 @@ client.once('ready', async () => {
 // ════════════════════════════════════════════
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
   try {
-    if (oldMember.roles.cache.equals(newMember.roles.cache)) return; // only react to role changes
     const cfg = await getConfig(newMember.guild.id);
+    const configuredRankIds = (cfg.coc?.ranks || []).map(rank => rank.roleId).filter(Boolean);
+    const rankChanged = configuredRankIds.some(roleId =>
+      oldMember.roles.cache.has(roleId) !== newMember.roles.cache.has(roleId)
+    );
+    if (!rankChanged) return;
     await applyNicknamePrefix(newMember, cfg);
   } catch (e) {
-    console.error('guildMemberUpdate (nickname prefix) error:', e.message);
+    console.error('guildMemberUpdate (rank prefix) error:', e.message);
   }
 });
 
 client.on('guildMemberAdd', async (member) => {
   try {
     const cfg = await getConfig(member.guild.id);
-    await applyNicknamePrefix(member, cfg);
     await sendWelcomeMessage(member, cfg);
     if (cfg.welcome?.dmEnabled && cfg.welcome?.dmMessage) {
       await safeDM(member.user, { content: replaceWelcomePlaceholders(cfg.welcome.dmMessage, member) });
