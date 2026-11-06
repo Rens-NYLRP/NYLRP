@@ -233,15 +233,27 @@ caseFileSchema.index({ guildId: 1, number: 1 }, { unique: true });
 const CaseFileModel = mongoose.model('CaseFile', caseFileSchema);
 
 async function postStaffRequest(guild, cfg, data) {
-  const channel = cfg.staffAccess?.requestChannelId ? guild.channels.cache.get(cfg.staffAccess.requestChannelId) : null;
-  if (!channel) throw new Error('Approval channel is not configured. Set it in /setup → Staff Access.');
+  const configuredChannelId = data.kind === 'case_infraction'
+    ? cfg.staffAccess?.caseApprovalChannelId
+    : cfg.staffAccess?.requestChannelId;
+  const channel = configuredChannelId ? await guild.channels.fetch(configuredChannelId).catch(() => null) : null;
+  if (!channel || !channel.isTextBased() || !channel.send) {
+    const setting = data.kind === 'case_infraction' ? 'Case approval channel' : 'General approval channel';
+    throw new Error(setting + ' is not configured or is not a usable text channel. Set it in /setup → Staff Access & Approvals.');
+  }
   const record = await StaffRequestModel.create({ guildId: guild.id, ...data });
   const roleIds = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
   const ping = roleIds.map(id => `<@&${id}>`).join(' ');
   const payload = data.payload || {};
+  const isCaseInfraction = data.kind === 'case_infraction';
   const approvalFields = [
-    { name: 'Request type', value: String(data.kind || 'N/A'), inline: true },
-    { name: 'Action', value: String(data.action || 'N/A'), inline: true },
+    ...(isCaseInfraction ? [
+      { name: 'Case type', value: String(payload.caseType || 'Not specified'), inline: true },
+      { name: 'Infraction type', value: String(payload.action || 'Not specified'), inline: true },
+    ] : [
+      { name: 'Request type', value: String(data.kind || 'N/A'), inline: true },
+      { name: 'Action', value: String(data.action || 'N/A'), inline: true },
+    ]),
     { name: 'Requested by', value: `<@${data.requesterId}>`, inline: true },
     ...(payload.caseNumber ? [{ name: 'Case', value: `#${payload.caseNumber}`, inline: true }] : []),
     ...(payload.userId ? [{ name: 'Reported user', value: `<@${payload.userId}>`, inline: true }] : []),
@@ -1038,16 +1050,21 @@ function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
       { name: 'SHR roles', value: a.shrRoleIds?.length ? a.shrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
       { name: 'HR roles', value: a.hrRoleIds?.length ? a.hrRoleIds.map(x => `<@&${x}>`).join(' ') : '*not configured*' },
       { name: 'Approval roles', value: a.approvalRoleIds?.length ? a.approvalRoleIds.map(x => `<@&${x}>`).join(' ') : '*uses SHR roles*' },
-      { name: 'Request channel', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
-      { name: 'Infractions channel', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
-      { name: 'Change log channel', value: a.changeLogChannelId ? `<#${a.changeLogChannelId}>` : '*not set*', inline: true },
+      { name: 'General approval requests', value: a.requestChannelId ? `<#${a.requestChannelId}>` : '*not set*', inline: true },
+      { name: 'Case approval requests', value: a.caseApprovalChannelId ? `<#${a.caseApprovalChannelId}>` : '*not set*', inline: true },
+      { name: 'Infractions log', value: a.infractionChannelId ? `<#${a.infractionChannelId}>` : '*not set*', inline: true },
+      { name: 'Change log', value: a.changeLogChannelId ? `<#${a.changeLogChannelId}>` : '*not set*', inline: true },
     );
   return { embeds: [embed], components: [
     new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__staff_rolefield').setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label]) => ({ value, label })))),
     new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__staff_roles__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_request_channel').setPlaceholder('Select approvals/request channel').addChannelTypes(ChannelType.GuildText)),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_infraction_channel').setPlaceholder('Select infractions channel').addChannelTypes(ChannelType.GuildText)),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_changelog_channel').setPlaceholder('Select change log channel').addChannelTypes(ChannelType.GuildText)),
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__staff_channel_target').setPlaceholder('Choose which channel to configure').addOptions(
+      { label: 'General approval requests', value: 'requestChannelId' },
+      { label: 'Case approval requests', value: 'caseApprovalChannelId' },
+      { label: 'Infractions log', value: 'infractionChannelId' },
+      { label: 'Change log', value: 'changeLogChannelId' },
+    )),
+    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('setup__staff_channel_value').setPlaceholder('Select destination channel').addChannelTypes(ChannelType.GuildText)),
   ] };
 }
 
@@ -1669,9 +1686,19 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     const field = id.split('__').pop(); cfg.staffAccess[field] = interaction.values;
     await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg, field));
   }
-  if (interaction.isChannelSelectMenu() && id === 'setup__staff_request_channel') { cfg.staffAccess.requestChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
-  if (interaction.isChannelSelectMenu() && id === 'setup__staff_infraction_channel') { cfg.staffAccess.infractionChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
-  if (interaction.isChannelSelectMenu() && id === 'setup__staff_changelog_channel') { cfg.staffAccess.changeLogChannelId = interaction.values[0] || null; await saveConfig(guildId); return interaction.update(buildStaffAccessSetupView(cfg)); }
+  if (interaction.isStringSelectMenu() && id === 'setup__staff_channel_target') {
+    cfg.staffAccess.selectedChannelTarget = interaction.values[0] || 'requestChannelId';
+    await saveConfig(guildId);
+    return interaction.update(buildStaffAccessSetupView(cfg));
+  }
+  if (interaction.isChannelSelectMenu() && id === 'setup__staff_channel_value') {
+    const allowedTargets = ['requestChannelId', 'caseApprovalChannelId', 'infractionChannelId', 'changeLogChannelId'];
+    const target = cfg.staffAccess.selectedChannelTarget || 'requestChannelId';
+    if (!allowedTargets.includes(target)) return interaction.reply({ content: '❌ Select a valid channel setting first.', flags: MessageFlags.Ephemeral });
+    cfg.staffAccess[target] = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildStaffAccessSetupView(cfg));
+  }
 
   if (interaction.isChannelSelectMenu() && id === 'setup__welcome_channel') {
     cfg.welcome.channelId = interaction.values[0] || null;
@@ -3379,6 +3406,7 @@ client.on('interactionCreate', async (interaction) => {
           requesterId: interaction.user.id,
           caseNumber: record.number,
           payload: {
+            caseType: sys.label || record.system,
             userId: record.reportedPartyId,
             action,
             reason,
@@ -3410,6 +3438,7 @@ client.on('interactionCreate', async (interaction) => {
         const request = await postStaffRequest(interaction.guild, cfg, {
           kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number,
           payload: {
+            caseType: sys.label || record.system,
             userId: user.id, action, reason, caseNumber: record.number,
             notes: (record.notes || []).map(note => note.text).join('\\n').slice(0, 3000),
             evidence: record.evidence || [], reportingPartyId: record.reportingPartyId,
