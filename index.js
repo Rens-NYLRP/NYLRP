@@ -684,15 +684,21 @@ function getHighestConfiguredRank(member, cfg) {
   ) || null;
 }
 async function applyNicknamePrefix(member, cfg) {
-  if (member.user.bot || !member.manageable) return;
+  if (member.user.bot || !member.manageable) return 'skipped';
   const currentName = member.nickname || member.user.username;
   const cleanName = stripConfiguredRankPrefixes(currentName, cfg);
-  if (!cleanName) return;
+  if (!cleanName) return 'skipped';
   const highestRank = getHighestConfiguredRank(member, cfg);
   const nextName = highestRank ? String(highestRank.prefix).trim() + ' | ' + cleanName : cleanName;
-  if (nextName === currentName || nextName.length > 32) return;
-  await member.setNickname(nextName, 'Apply highest Chain of Command rank prefix')
-    .catch(e => console.error('Failed to update rank prefix for ' + member.id + ':', e.message));
+  if (nextName === currentName) return 'unchanged';
+  if (nextName.length > 32) return 'too_long';
+  try {
+    await member.setNickname(nextName, 'Synchronize highest Chain of Command rank prefix');
+    return 'updated';
+  } catch (e) {
+    console.error('Failed to update rank prefix for ' + member.id + ':', e.message);
+    return 'failed';
+  }
 }
 function isTrainer(member, cfg) {
   if (isAdmin(member)) return true;
@@ -2137,6 +2143,7 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
 const P = PermissionFlagsBits;
 const commands = [
   { name: 'ping', description: 'Check bot latency' },
+  { name: 'prefix-refresh', description: '[SHR] Synchronize rank prefixes for all server members' },
 
   // ── Welcome system ──
   { name: 'welcome', description: '[Admin] Configure the server welcome message', default_member_permissions: P.ManageGuild.toString(), options: [
@@ -2756,6 +2763,33 @@ client.on('interactionCreate', async (interaction) => {
 
     if (cmd === 'ping') {
       return interaction.reply({ content: `🏓 Pong! ${client.ws.ping}ms` });
+    }
+
+    if (cmd === 'prefix-refresh') {
+      if (!isSHR(member, cfg)) {
+        return interaction.reply({ content: '❌ Only the server owner or configured SHR roles can refresh all member prefixes.', flags: MessageFlags.Ephemeral });
+      }
+      const configuredRanks = cfg.coc?.ranks || [];
+      if (!configuredRanks.length) {
+        return interaction.reply({ content: '❌ No Chain of Command ranks are configured. Import them first via /setup → Chain of Command → Bulk Import.', flags: MessageFlags.Ephemeral });
+      }
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const members = await interaction.guild.members.fetch();
+      let updated = 0, unchanged = 0, skipped = 0, failed = 0, tooLong = 0;
+      const eligible = [...members.values()].filter(m => !m.user.bot);
+      await interaction.editReply({ content: `🔄 Refreshing rank prefixes for **${eligible.length}** server members. This can take a while...` });
+      for (let i = 0; i < eligible.length; i++) {
+        const result = await applyNicknamePrefix(eligible[i], cfg);
+        if (result === 'updated') updated++;
+        else if (result === 'unchanged') unchanged++;
+        else if (result === 'too_long') tooLong++;
+        else if (result === 'failed') failed++;
+        else skipped++;
+        if ((i + 1) % 15 === 0 || i === eligible.length - 1) {
+          await interaction.editReply({ content: `🔄 Prefix refresh: **${i + 1}/${eligible.length}** checked\nUpdated: **${updated}** · Already correct: **${unchanged}** · Skipped: **${skipped}** · Too long: **${tooLong}** · Failed: **${failed}**` }).catch(() => {});
+        }
+      }
+      return interaction.editReply({ content: `✅ **Prefix refresh completed**\nMembers checked: **${eligible.length}**\nUpdated: **${updated}**\nAlready correct: **${unchanged}**\nSkipped (bots or unmanageable): **${skipped}**\nSkipped (nickname over 32 characters): **${tooLong}**\nFailed: **${failed}**` });
     }
 
     if (cmd === 'setup') {
