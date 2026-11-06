@@ -644,8 +644,11 @@ function hasCommandClearance(member, cfg, cmd) {
 // Only the highest configured rank held by a member is applied.
 function stripConfiguredRankPrefixes(currentName, cfg) {
   let name = String(currentName || '').trim();
-  const prefixes = (cfg.coc?.ranks || [])
-    .map(rank => String(rank.prefix || '').trim())
+  const prefixes = [
+    ...(cfg.coc?.legacyPrefixes || []),
+    ...(cfg.coc?.ranks || []).map(rank => rank.prefix),
+  ]
+    .map(prefix => String(prefix || '').trim())
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
   let changed = true;
@@ -1393,7 +1396,7 @@ function buildCocView(cfg) {
   const embed = new EmbedBuilder()
     .setTitle('🔱 Chain of Command Setup')
     .setColor(0x5865F2)
-    .setDescription('Import your Chain of Command in bulk. Each line uses **Role Name | Prefix**. Prefix is optional.')
+    .setDescription('Import your Chain of Command in bulk, highest rank first. Each line uses **Role Name | Prefix**. Prefix is optional and is applied only when a member\'s configured rank changes.')
     .addFields(
       { name: 'Channel', value: c.channelId ? `<#${c.channelId}>` : '*not set*', inline: true },
       { name: 'Title', value: c.title || '*not set*', inline: true },
@@ -1750,6 +1753,8 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     const pending = pendingCocImports.get(interaction.user.id);
     if (!pending || pending.guildId !== guildId) return interaction.reply({ content: '❌ Import expired. Start the bulk import again.', flags: MessageFlags.Ephemeral });
     pendingCocImports.delete(interaction.user.id);
+    const previousPrefixes = (cfg.coc.ranks || []).map(rank => rank.prefix).filter(Boolean);
+    cfg.coc.legacyPrefixes = [...new Set([...(cfg.coc.legacyPrefixes || []), ...previousPrefixes])];
     cfg.coc.ranks = pending.parsed.map(r => ({ roleId: r.roleId, name: r.name, prefix: r.prefix || '' }));
     await saveConfig(guildId);
     await interaction.update(buildCocView(cfg));
