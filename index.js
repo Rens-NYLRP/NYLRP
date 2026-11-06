@@ -1572,8 +1572,8 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
 
   if (interaction.isButton() && id === 'setup__case_add') {
-    if (Object.keys(cfg.caseManagement.systems || {}).length >= 25) {
-      return interaction.reply({ content: '❌ A maximum of 25 case categories can be configured.', flags: MessageFlags.Ephemeral });
+    if (Object.keys(cfg.caseManagement.systems || {}).length >= 23) {
+      return interaction.reply({ content: '❌ A maximum of 23 case categories can be configured.', flags: MessageFlags.Ephemeral });
     }
     const modal = new ModalBuilder().setCustomId('setup__case_add_submit').setTitle('Add Case Category');
     modal.addComponents(new ActionRowBuilder().addComponents(
