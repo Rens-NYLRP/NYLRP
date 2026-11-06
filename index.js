@@ -238,13 +238,23 @@ async function postStaffRequest(guild, cfg, data) {
   const record = await StaffRequestModel.create({ guildId: guild.id, ...data });
   const roleIds = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
   const ping = roleIds.map(id => `<@&${id}>`).join(' ');
-  const embed = new EmbedBuilder().setTitle(`⏳ Approval Request #${record._id.toString().slice(-6)}`).setColor(0xFEE75C)
-    .addFields(
-      { name: 'Type', value: data.kind },
-      { name: 'Action', value: data.action },
-      { name: 'Requested by', value: `<@${data.requesterId}>` },
-      { name: 'Details', value: JSON.stringify(data.payload).slice(0, 1000) },
-    ).setTimestamp();
+  const payload = data.payload || {};
+  const approvalFields = [
+    { name: 'Request type', value: String(data.kind || 'N/A'), inline: true },
+    { name: 'Action', value: String(data.action || 'N/A'), inline: true },
+    { name: 'Requested by', value: `<@${data.requesterId}>`, inline: true },
+    ...(payload.caseNumber ? [{ name: 'Case', value: `#${payload.caseNumber}`, inline: true }] : []),
+    ...(payload.userId ? [{ name: 'Reported user', value: `<@${payload.userId}>`, inline: true }] : []),
+    ...(payload.targetUserId ? [{ name: 'Target member', value: `<@${payload.targetUserId}>`, inline: true }] : []),
+    ...(payload.reason ? [{ name: 'Reason', value: String(payload.reason).slice(0, 1024) }] : []),
+    ...(payload.department ? [{ name: 'Department', value: String(payload.department), inline: true }] : []),
+    ...(payload.currentRoleId ? [{ name: 'Current rank', value: `<@&${payload.currentRoleId}>`, inline: true }] : []),
+    ...(payload.newRoleId ? [{ name: 'New rank', value: `<@&${payload.newRoleId}>`, inline: true }] : []),
+  ];
+  const embed = new EmbedBuilder().setAuthor({ name: 'NYLRP | CASE MANAGEMENT' })
+    .setTitle(`Approval Request #${record._id.toString().slice(-6)}`).setColor(0xFEE75C)
+    .addFields(approvalFields)
+    .setFooter({ text: 'NYLRP | Internal approval workflow' }).setTimestamp();
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`staffreq__approve__${record._id}`).setLabel('Approve').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`staffreq__reject__${record._id}`).setLabel('Reject').setStyle(ButtonStyle.Danger),
@@ -3283,13 +3293,13 @@ client.on('interactionCreate', async (interaction) => {
             return attachment ? [{ name: `Evidence ${index + 1}`, url: attachment.url, contentType: attachment.contentType || '' }] : [];
           });
         const fields = [
-          { name: 'Reporting', value: `<@${reporter.id}>`, inline: true },
-          { name: 'Reported', value: `<@${reported.id}>`, inline: true },
-          { name: 'Reason', value: reason.slice(0, 1024) },
-          { name: 'Proposed Punishment', value: proposedPunishment, inline: true },
+          { name: 'Reporting Party', value: `<@${reporter.id}>`, inline: true },
+          { name: 'Reported Party', value: `<@${reported.id}>`, inline: true },
+          { name: 'Punishment', value: proposedPunishment, inline: true },
           { name: 'Status', value: status, inline: true },
           { name: 'Supervisor', value: supervisor ? `<@${supervisor.id}>` : '*Not assigned*', inline: true },
-          { name: 'Both Sides', value: bothSides || '*Not provided*' },
+          { name: 'Both Sides', value: bothSides || '*Not provided*', inline: true },
+          { name: 'Reason', value: reason.slice(0, 1024) },
           { name: 'Notes', value: noteText || '*No additional notes*' },
           ...evidence.map(item => ({ name: item.name, value: item.url })),
         ];
@@ -3298,8 +3308,8 @@ client.on('interactionCreate', async (interaction) => {
           .replace(/\{number\}/g, String(number));
         const embedColor = /^#[0-9a-fA-F]{6}$/.test(cfg.caseManagement.embedColor || '')
           ? parseInt(cfg.caseManagement.embedColor.slice(1), 16) : 0x5865F2;
-        const embed = new EmbedBuilder().setTitle(embedTitle.slice(0, 256))
-          .setColor(embedColor).addFields(fields)
+        const embed = new EmbedBuilder().setAuthor({ name: 'NYLRP | CASE MANAGEMENT' })
+          .setTitle(embedTitle.slice(0, 256)).setColor(embedColor).addFields(fields)
           .setFooter({ text: String(cfg.caseManagement.embedFooter || 'NYLRP | Case Management').slice(0, 2048) }).setTimestamp();
         const embedDescription = String(cfg.caseManagement.embedDescription || '')
           .replace(/\{category\}/g, sys.label || systemKey)
@@ -3369,14 +3379,15 @@ client.on('interactionCreate', async (interaction) => {
         const reporter = interaction.options.getUser('reporting_party');
         const reported = interaction.options.getUser('reported_party');
         const reason = interaction.options.getString('reason');
-        const embed = new EmbedBuilder().setTitle(`${sys.label} | Case #${number}`).setColor(0x5865F2).addFields(
+        const embed = new EmbedBuilder().setAuthor({ name: 'NYLRP | CASE MANAGEMENT' })
+          .setTitle(`${sys.label} | Case #${number}`).setColor(0x5865F2).addFields(
           { name: 'Reporting Party', value: `<@${reporter.id}>`, inline: true },
           { name: 'Reported Party', value: `<@${reported.id}>`, inline: true },
-          { name: 'Reason', value: reason },
           { name: 'Status', value: 'Open', inline: true },
           { name: 'User Investigating', value: '*Not assigned*', inline: true },
           { name: 'Supervisor+ Investigating', value: '*Not assigned*', inline: true },
-          { name: 'Both Sides of the Story', value: '*Pending*' },
+          { name: 'Both Sides of the Story', value: '*Pending*', inline: true },
+          { name: 'Reason', value: reason },
           { name: 'Notes', value: '*No notes yet*' },
         ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
         const pingIds = cfg.caseManagement.pingRoleId ? [cfg.caseManagement.pingRoleId] : [];
