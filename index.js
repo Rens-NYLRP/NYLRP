@@ -484,7 +484,7 @@ async function getConfig(guildId) {
         tickets: { ...defaultConfig(guildId).tickets, ...(doc.tickets || {}) },
         moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) },
         training: { ...defaultConfig(guildId).training, ...(doc.training || {}) },
-        nicknamePrefixes: [],
+        nicknamePrefixes: doc.nicknamePrefixes || [],
         welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
         coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
         staffAccess: { ...defaultConfig(guildId).staffAccess, ...(doc.staffAccess || {}) },
@@ -2323,6 +2323,29 @@ async function sweepExpiredTempBans() {
 // ════════════════════════════════════════════
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  // Remove previously applied rank/LOA nickname prefixes from existing members.
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const cfg = await getConfig(guild.id);
+      const members = await guild.members.fetch();
+      let cleaned = 0;
+      for (const member of members.values()) {
+        if (member.user.bot) continue;
+        const before = member.nickname || member.user.username;
+        const after = stripKnownPrefixes(before, cfg);
+        if (after && after !== before && after.length <= 32 && member.manageable) {
+          await member.setNickname(after, 'Remove legacy rank and LOA prefixes').catch(() => {});
+          cleaned++;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+      cfg.nicknamePrefixes = [];
+      await saveConfig(guild.id);
+      console.log(`Removed legacy nickname prefixes for ${cleaned} member(s) in ${guild.name}.`);
+    } catch (error) {
+      console.error(`Legacy prefix cleanup failed in ${guild.name}:`, error.message);
+    }
+  }
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
