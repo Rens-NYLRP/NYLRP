@@ -1619,6 +1619,7 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     const color = interaction.fields.getTextInputValue('color').trim();
     const thumbnail = interaction.fields.getTextInputValue('thumbnail').trim();
     const footer = interaction.fields.getTextInputValue('footer').trim();
+    if (!title) return interaction.reply({ content: '❌ Enter an embed title template.', flags: MessageFlags.Ephemeral });
     if (!/^#[0-9a-fA-F]{6}$/.test(color)) return interaction.reply({ content: '❌ Use a valid hex color, for example #5865F2.', flags: MessageFlags.Ephemeral });
     if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ The thumbnail must be a valid image URL.', flags: MessageFlags.Ephemeral });
     cfg.caseManagement.embedTitle = title;
