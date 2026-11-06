@@ -247,6 +247,7 @@ async function postStaffRequest(guild, cfg, data) {
     ...(payload.userId ? [{ name: 'Reported user', value: `<@${payload.userId}>`, inline: true }] : []),
     ...(payload.targetUserId ? [{ name: 'Target member', value: `<@${payload.targetUserId}>`, inline: true }] : []),
     ...(payload.reason ? [{ name: 'Reason', value: String(payload.reason).slice(0, 1024) }] : []),
+    ...(payload.notes ? [{ name: 'Notes', value: String(payload.notes).slice(0, 1024) }] : []),
     ...(payload.department ? [{ name: 'Department', value: String(payload.department), inline: true }] : []),
     ...(payload.currentRoleId ? [{ name: 'Current rank', value: `<@&${payload.currentRoleId}>`, inline: true }] : []),
     ...(payload.newRoleId ? [{ name: 'New rank', value: `<@&${payload.newRoleId}>`, inline: true }] : []),
