@@ -211,7 +211,7 @@ const StaffRequestModel = mongoose.model('StaffRequest', staffRequestSchema);
 const caseFileSchema = new mongoose.Schema({
   guildId: { type: String, required: true, index: true },
   number: { type: Number, required: true },
-  system: { type: String, enum: ['ia', 'management', 'supervisor', 'executive'], required: true },
+  system: { type: String, required: true },
   channelId: { type: String, required: true },
   threadId: { type: String, required: true, unique: true },
   reportingPartyId: { type: String, required: true },
@@ -459,12 +459,7 @@ function defaultConfig(guildId) {
       embedColor: '#5865F2',
       embedThumbnail: null,
       embedFooter: 'NYLRP | Case Management',
-      systems: {
-        ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-        management: { label: 'Management', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-        supervisor: { label: 'Supervisor', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-        executive: { label: 'Executive', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-      },
+      systems: {},
     },
   };
 }
@@ -1068,38 +1063,40 @@ function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
 function buildCaseSetupView(cfg) {
   const caseConfig = cfg.caseManagement || {};
   const systems = caseConfig.systems || {};
-  const rows = Object.entries(systems).map(([key, system]) => ({
+  const entries = Object.entries(systems);
+  const rows = entries.map(([key, system]) => ({
     name: String(system.label || key).slice(0, 256),
-    value: `Forum: ${system.channelId ? `<#${system.channelId}>` : '*not set*'}\\nAccess roles: ${(system.accessRoleIds || []).length}\\nLog: ${system.logChannelId ? `<#${system.logChannelId}>` : '*not set*'}`,
+    value: `Forum: ${system.channelId ? `<#${system.channelId}>` : '*not set*'}\nAccess roles: ${(system.accessRoleIds || []).length}\nLog: ${system.logChannelId ? `<#${system.logChannelId}>` : '*not set*'}`,
   }));
   const embed = new EmbedBuilder()
     .setTitle('Case Management Setup')
     .setColor(0x5865F2)
-    .setDescription('Configure each case category, its forum and the roles allowed to open/access it. The ping role and embed design apply to every case.')
+    .setDescription('Add your own case categories, choose a Forum and select the roles allowed to open/access each category. The ping role and embed design apply globally.')
     .addFields(
       { name: 'Global Case Ping Role', value: caseConfig.pingRoleId ? `<@&${caseConfig.pingRoleId}>` : '*Not configured*', inline: true },
       { name: 'Embed Thumbnail', value: caseConfig.embedThumbnail ? 'Configured' : '*Not configured*', inline: true },
-      ...rows,
+      ...(rows.length ? rows : [{ name: 'Categories', value: '*No categories created yet. Use Add Category to get started.*' }]),
     );
-  return {
-    embeds: [embed],
-    components: [
-      new ActionRowBuilder().addComponents(
-        new RoleSelectMenuBuilder().setCustomId('setup__case_global_ping').setPlaceholder('Select one global case ping role').setMinValues(0).setMaxValues(1),
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder().setCustomId('setup__case_global_ping').setPlaceholder('Select one global case ping role').setMinValues(0).setMaxValues(1),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('setup__case_embed').setLabel('Configure Embed Design').setStyle(ButtonStyle.Primary),
+    ),
+  ];
+  if (entries.length) {
+    components.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case category').addOptions(
+        entries.slice(0, 25).map(([value, system]) => ({ label: String(system.label || value).slice(0, 100), value })),
       ),
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('setup__case_embed').setLabel('Configure Embed Design').setStyle(ButtonStyle.Primary),
-      ),
-      new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case category').addOptions(
-          Object.entries(systems).slice(0, 25).map(([value, system]) => ({ label: String(system.label || value).slice(0, 100), value })),
-        ),
-      ),
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary),
-      ),
-    ],
-  };
+    ));
+  }
+  components.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('setup__case_add').setLabel('Add Category').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary),
+  ));
+  return { embeds: [embed], components };
 }
 
 function buildCaseSystemSetupView(cfg, key) {
@@ -1573,6 +1570,30 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__staff') return interaction.update(buildStaffAccessSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__cases') return interaction.update(buildCaseSetupView(cfg));
   if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
+
+  if (interaction.isButton() && id === 'setup__case_add') {
+    if (Object.keys(cfg.caseManagement.systems || {}).length >= 25) {
+      return interaction.reply({ content: '❌ A maximum of 25 case categories can be configured.', flags: MessageFlags.Ephemeral });
+    }
+    const modal = new ModalBuilder().setCustomId('setup__case_add_submit').setTitle('Add Case Category');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('label').setLabel('New case category name').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Internal Affairs').setRequired(true).setMaxLength(100),
+    ));
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.isModalSubmit() && id === 'setup__case_add_submit') {
+    const label = interaction.fields.getTextInputValue('label').trim();
+    if (!label) return interaction.reply({ content: '❌ Enter a category name.', flags: MessageFlags.Ephemeral });
+    const systems = cfg.caseManagement.systems || (cfg.caseManagement.systems = {});
+    const baseKey = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'category';
+    let key = baseKey;
+    let suffix = 2;
+    while (systems[key]) key = `${baseKey.slice(0, 36)}_${suffix++}`;
+    systems[key] = { label, channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] };
+    await saveConfig(guildId);
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
 
   if (interaction.isRoleSelectMenu() && id === 'setup__case_global_ping') {
     cfg.caseManagement.pingRoleId = interaction.values[0] || null;
