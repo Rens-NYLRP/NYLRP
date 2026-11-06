@@ -484,7 +484,7 @@ async function getConfig(guildId) {
         tickets: { ...defaultConfig(guildId).tickets, ...(doc.tickets || {}) },
         moderation: { ...defaultConfig(guildId).moderation, ...(doc.moderation || {}) },
         training: { ...defaultConfig(guildId).training, ...(doc.training || {}) },
-        nicknamePrefixes: doc.nicknamePrefixes || [],
+        nicknamePrefixes: [],
         welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
         coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
         staffAccess: { ...defaultConfig(guildId).staffAccess, ...(doc.staffAccess || {}) },
@@ -506,7 +506,7 @@ async function saveConfig(guildId) {
     try {
       await GuildConfigModel.findByIdAndUpdate(guildId, { $set: {
         tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training,
-        nicknamePrefixes: cfg.nicknamePrefixes, welcome: cfg.welcome, coc: cfg.coc,
+        nicknamePrefixes: [], welcome: cfg.welcome, coc: cfg.coc,
         staffAccess: cfg.staffAccess, caseManagement: cfg.caseManagement,
       } }, { upsert: true });
       return true;
@@ -642,65 +642,25 @@ function hasCommandClearance(member, cfg, cmd) {
 // ── Role-based nickname prefixes (e.g. role "Rang I" → nickname "Rang I Username") ──
 function stripKnownPrefixes(currentName, cfg) {
   let name = String(currentName || '').trim();
-
-  // LOA is a protected prefix. If present, keep it at the very front.
-  const loaMatch = name.match(/^LOA\s*\|\s*/i);
-  const hasLOA = Boolean(loaMatch);
-  if (hasLOA) {
-    name = name.slice(loaMatch[0].length).trim();
-  }
-
-  const prefixes = (cfg.nicknamePrefixes || [])
-    .map(p => String(p.prefix || '').trim())
-    .filter(Boolean)
-    .filter(p => !/^LOA$/i.test(p))
-    .sort((a, b) => b.length - a.length);
-
-  // Remove configured rank prefixes while preserving the protected LOA prefix.
+  const prefixes = (cfg.nicknamePrefixes || []).map(p => String(p.prefix || '').trim()).filter(Boolean).sort((a, b) => b.length - a.length);
   let changed = true;
   while (changed && name) {
     changed = false;
     for (const prefix of prefixes) {
-      const escaped = prefix.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+      const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const match = name.match(new RegExp('^' + escaped + '(?:\\s*\\|\\s*|\\s+)', 'i'));
-      if (match) {
-        name = name.slice(match[0].length).trim();
-        changed = true;
-        break;
-      }
+      if (match) { name = name.slice(match[0].length).trim(); changed = true; break; }
     }
   }
-
-  return hasLOA ? `LOA | ${name}` : name;
+  return name.replace(/^LOA\\s*\\|\\s*/i, '').trim();
 }
-
 async function applyNicknamePrefix(member, cfg) {
-  if (!cfg.nicknamePrefixes?.length) return;
-  if (member.user.bot) return;
-  if (!member.manageable) return;
-
-  const applicable = cfg.nicknamePrefixes
-    .filter(p => p.prefix && !/^LOA$/i.test(p.prefix) && member.roles.cache.has(p.roleId))
-    .map(p => ({ ...p, position: member.guild.roles.cache.get(p.roleId)?.position ?? -1 }))
-    .sort((a, b) => b.position - a.position);
-
+  if (member.user.bot || !member.manageable) return;
   const currentName = member.nickname || member.user.username;
-  const baseName = stripKnownPrefixes(currentName, cfg);
-  const rankPrefix = applicable.length ? applicable[0].prefix : null;
-
-  // LOA stays first; the highest rank goes between LOA and the username.
-  const hasLOA = /^LOA\s*\|/i.test(baseName);
-  const username = hasLOA ? baseName.replace(/^LOA\s*\|\s*/i, '').trim() : baseName;
-  const desiredName = hasLOA
-    ? (rankPrefix ? `LOA | ${rankPrefix} | ${username}` : `LOA | ${username}`)
-    : (rankPrefix ? `${rankPrefix} | ${username}` : username);
-
-  if (desiredName === currentName) return;
-  if (desiredName.length > 32) {
-    console.error(`❌ Nickname prefix skipped for ${member.id}: "${desiredName}" exceeds Discord's 32-character limit.`);
-    return;
-  }
-  await member.setNickname(desiredName, 'Automatic role-based nickname prefix').catch(e => console.error(`❌ Failed to set nickname prefix for ${member.id}:`, e.message));
+  const cleanName = stripKnownPrefixes(currentName, cfg);
+  if (!cleanName || cleanName === currentName || cleanName.length > 32) return;
+  await member.setNickname(cleanName, 'Remove legacy rank and LOA prefixes')
+    .catch(e => console.error(`Failed to remove legacy prefix for ${member.id}:`, e.message));
 }
 function isTrainer(member, cfg) {
   if (isAdmin(member)) return true;
@@ -1150,7 +1110,7 @@ function buildSetupHomeComponents() {
       new ButtonBuilder().setCustomId('setup__home__tickets').setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__moderation').setLabel('Moderation').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__training').setLabel('Training').setEmoji('🎓').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('setup__home__prefixes').setLabel('Nickname Prefixes').setEmoji('🏷️').setStyle(ButtonStyle.Primary),
+      
       new ButtonBuilder().setCustomId('setup__home__coc').setLabel('Chain of Command').setEmoji('🔱').setStyle(ButtonStyle.Primary),
     ),
     new ActionRowBuilder().addComponents(
@@ -1774,9 +1734,8 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     if (!pending || pending.guildId !== guildId) return interaction.reply({ content: '❌ Import expired. Start the bulk import again.', flags: MessageFlags.Ephemeral });
     pendingCocImports.delete(interaction.user.id);
     cfg.coc.ranks = pending.parsed.map(r => ({ roleId: r.roleId, name: r.name, prefix: r.prefix || '' }));
-    const importedPrefixes = cfg.coc.ranks.filter(r => r.prefix).map(r => ({ roleId: r.roleId, prefix: r.prefix }));
-    const importedRoleIds = new Set(cfg.coc.ranks.map(r => r.roleId));
-    cfg.nicknamePrefixes = (cfg.nicknamePrefixes || []).filter(p => !importedRoleIds.has(p.roleId)).concat(importedPrefixes);
+    const importedPrefixes = [];
+    cfg.nicknamePrefixes = [];
     await saveConfig(guildId);
     await interaction.update(buildCocView(cfg));
     const affected = new Map();
@@ -2251,8 +2210,6 @@ const commands = [
     { name: 'reason', type: 3, description: 'Reason for the promotion', required: true, max_length: 500 },
   ]},
 
-  { name: 'syncprefixes', description: '[Admin] Re-apply all configured nickname prefixes to every member', default_member_permissions: P.ManageGuild.toString() },
-  { name: 'seedrankprefixes', description: '[Admin] Auto-configure prefixes for the standard rank hierarchy by matching role names', default_member_permissions: P.ManageGuild.toString() },
   { name: 'warn', description: 'Warn a user', options: [
     { name: 'user', type: 6, description: 'Who?', required: true }, { name: 'reason', type: 3, description: 'Reason', required: true },
   ]},
@@ -2760,72 +2717,6 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'setup') {
       if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
       return interaction.reply({ embeds: [buildSetupHomeEmbed()], components: buildSetupHomeComponents(), flags: MessageFlags.Ephemeral });
-    }
-
-    if (cmd === 'syncprefixes') {
-      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
-      if (!cfg.nicknamePrefixes.length) return interaction.reply({ content: 'No nickname prefixes are configured yet. Set them up via **/setup → Nickname Prefixes**.', flags: MessageFlags.Ephemeral });
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const guildMembers = await interaction.guild.members.fetch().catch(() => new Map());
-      let synced = 0;
-      for (const m of guildMembers.values()) {
-        if (m.user.bot) continue;
-        const hasAnyPrefixRole = cfg.nicknamePrefixes.some(p => m.roles.cache.has(p.roleId));
-        const currentName = m.nickname || m.user.username;
-        const wouldStrip = stripKnownPrefixes(currentName, cfg) !== currentName;
-        if (!hasAnyPrefixRole && !wouldStrip) continue;
-        await applyNicknamePrefix(m, cfg);
-        synced++;
-        await new Promise(r => setTimeout(r, 250));
-      }
-      return interaction.editReply({ content: `✅ Synced nicknames for ${synced} member(s).` });
-    }
-
-    if (cmd === 'seedrankprefixes') {
-      if (!isAdmin(member)) return interaction.reply({ content: '❌ Manage Server permission required.', flags: MessageFlags.Ephemeral });
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-
-      const matched = [];
-      const notFound = [];
-      const matchedRoleIds = [];
-      for (const abbr of STANDARD_RANK_PREFIXES) {
-        const role = interaction.guild.roles.cache.find(r => r.name.trim().toLowerCase() === abbr.toLowerCase());
-        if (!role) { notFound.push(abbr); continue; }
-        const existing = cfg.nicknamePrefixes.find(p => p.roleId === role.id);
-        if (existing) existing.prefix = abbr;
-        else cfg.nicknamePrefixes.push({ roleId: role.id, prefix: abbr });
-        matched.push(`\`${abbr}\` → <@&${role.id}>`);
-        matchedRoleIds.push(role.id);
-      }
-
-      if (!matched.length) {
-        return interaction.editReply({ content: `❌ None of the standard rank roles (${STANDARD_RANK_PREFIXES.join(', ')}) were found by exact name in this server. Make sure your role names match exactly, or configure them manually via **/setup → Nickname Prefixes**.` });
-      }
-
-      await saveConfig(guildId);
-
-      // Retroactively apply to every current holder of a matched role (deduped, capped + throttled).
-      const affectedMembers = new Map();
-      for (const roleId of matchedRoleIds) {
-        const role = interaction.guild.roles.cache.get(roleId);
-        if (!role) continue;
-        for (const m of role.members.values()) affectedMembers.set(m.id, m);
-      }
-      const members = [...affectedMembers.values()].slice(0, 200);
-      for (const m of members) {
-        await applyNicknamePrefix(m, cfg);
-        await new Promise(r => setTimeout(r, 250));
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle('🏷️ Rank Prefixes Seeded')
-        .setColor(0x57F287)
-        .addFields({ name: `✅ Matched (${matched.length})`, value: matched.join('\n').slice(0, 1024) });
-      if (notFound.length) {
-        embed.addFields({ name: `⚠️ No role found for (${notFound.length})`, value: `\`${notFound.join('`, `')}\`\nCreate/rename these roles to match exactly, or add them manually via **/setup → Nickname Prefixes**.`.slice(0, 1024) });
-      }
-      embed.setFooter({ text: `Synced nicknames for ${members.length} current member(s).` });
-      return interaction.editReply({ embeds: [embed] });
     }
 
     // ── Ticket setup ──
