@@ -2,6 +2,7 @@ name: Syntax check
 on:
   push:
     branches:
+      - main
       - feature-case-management-approval-workflows
   workflow_dispatch:
 jobs:
