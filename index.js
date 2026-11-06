@@ -96,6 +96,12 @@ const guildConfigSchema = new mongoose.Schema({
     changeLogChannelId: { type: String, default: null },
   },
   caseManagement: {
+    pingRoleId: { type: String, default: null },
+    embedTitle: { type: String, default: '{category} | Case #{number}' },
+    embedDescription: { type: String, default: '' },
+    embedColor: { type: String, default: '#5865F2' },
+    embedThumbnail: { type: String, default: null },
+    embedFooter: { type: String, default: 'NYLRP | Case Management' },
     systems: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
 }, { strict: false, timestamps: true });
@@ -446,12 +452,20 @@ function defaultConfig(guildId) {
     },
     coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
     staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null, changeLogChannelId: null },
-    caseManagement: { systems: {
-      ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-      management: { label: 'Management', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-      supervisor: { label: 'Supervisor', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-      executive: { label: 'Executive', channelId: null, logChannelId: null, pingRoleIds: [], accessRoleIds: [], createRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
-    } },
+    caseManagement: {
+      pingRoleId: null,
+      embedTitle: '{category} | Case #{number}',
+      embedDescription: '',
+      embedColor: '#5865F2',
+      embedThumbnail: null,
+      embedFooter: 'NYLRP | Case Management',
+      systems: {
+        ia: { label: 'Internal Affairs', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+        management: { label: 'Management', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+        supervisor: { label: 'Supervisor', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+        executive: { label: 'Executive', channelId: null, logChannelId: null, accessRoleIds: [], investigatorRoleIds: [], supervisorRoleIds: [] },
+      },
+    },
   };
 }
 
@@ -1052,38 +1066,74 @@ function buildStaffAccessSetupView(cfg, selectedField = 'shrRoleIds') {
 }
 
 function buildCaseSetupView(cfg) {
-  const systems = cfg.caseManagement?.systems || {};
-  const labels = { ia:'Internal Affairs', management:'Management', supervisor:'Supervisor', executive:'Executive' };
-  const rows = Object.entries(labels).map(([key,label]) => {
-    const s = systems[key] || {};
-    return { name:label, value:`Channel: ${s.channelId ? `<#${s.channelId}>` : '*not set*'}\nLog: ${s.logChannelId ? `<#${s.logChannelId}>` : '*not set*'}\nRoles configured: ${(s.createRoleIds||[]).length} create, ${(s.accessRoleIds||[]).length} access` };
-  });
-  return { embeds:[new EmbedBuilder().setTitle('📁 Case Management Setup').setColor(0x5865F2).setDescription('Choose a case system. Each system can use a separate channel and role configuration.').addFields(rows)], components:[
-    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case system').addOptions(Object.entries(labels).map(([value,label])=>({label,value})))),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
-  ]};
+  const caseConfig = cfg.caseManagement || {};
+  const systems = caseConfig.systems || {};
+  const rows = Object.entries(systems).map(([key, system]) => ({
+    name: String(system.label || key).slice(0, 256),
+    value: `Forum: ${system.channelId ? `<#${system.channelId}>` : '*not set*'}\\nAccess roles: ${(system.accessRoleIds || []).length}\\nLog: ${system.logChannelId ? `<#${system.logChannelId}>` : '*not set*'}`,
+  }));
+  const embed = new EmbedBuilder()
+    .setTitle('Case Management Setup')
+    .setColor(0x5865F2)
+    .setDescription('Configure each case category, its forum and the roles allowed to open/access it. The ping role and embed design apply to every case.')
+    .addFields(
+      { name: 'Global Case Ping Role', value: caseConfig.pingRoleId ? `<@&${caseConfig.pingRoleId}>` : '*Not configured*', inline: true },
+      { name: 'Embed Thumbnail', value: caseConfig.embedThumbnail ? 'Configured' : '*Not configured*', inline: true },
+      ...rows,
+    );
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId('setup__case_global_ping').setPlaceholder('Select one global case ping role').setMinValues(0).setMaxValues(1),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('setup__case_embed').setLabel('Configure Embed Design').setStyle(ButtonStyle.Primary),
+      ),
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('setup__case_system').setPlaceholder('Choose a case category').addOptions(
+          Object.entries(systems).slice(0, 25).map(([value, system]) => ({ label: String(system.label || value).slice(0, 100), value })),
+        ),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
 }
 
-function buildCaseSystemSetupView(cfg, key, selectedField = 'createRoleIds') {
-  const validSystems = ['ia', 'management', 'supervisor', 'executive'];
-  if (!validSystems.includes(key) || !cfg.caseManagement?.systems?.[key]) {
-    throw new Error(`Invalid case system key: ${key}`);
-  }
-  const s = cfg.caseManagement.systems[key];
-  const fields = { pingRoleIds:'Ping roles', accessRoleIds:'Access roles', createRoleIds:'Create case roles', investigatorRoleIds:'Investigator roles', supervisorRoleIds:'Supervisor roles' };
-  const roleText = ids => ids?.length ? ids.map(x=>`<@&${x}>`).join(' ') : '*none*';
-  const embed = new EmbedBuilder().setTitle(`📁 ${s.label || key} Setup`).setColor(0x5865F2).addFields(
-    {name:'Case channel',value:s.channelId?`<#${s.channelId}>`:'*not set*'},
-    {name:'Log channel',value:s.logChannelId?`<#${s.logChannelId}>`:'*not set*'},
-    ...Object.entries(fields).map(([field,label])=>({name:label,value:roleText(s[field])})),
-  );
-  return { embeds:[embed], components:[
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select a Q&A / Forum channel').addChannelTypes(ChannelType.GuildForum)),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Select log channel').addChannelTypes(ChannelType.GuildText)),
-    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`setup__case_rolefield__${key}`).setPlaceholder('Choose role group').addOptions(Object.entries(fields).map(([value,label])=>({value,label})))),
-    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}__${selectedField}`).setPlaceholder(fields[selectedField]).setMinValues(0).setMaxValues(25)),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Back').setStyle(ButtonStyle.Secondary)),
-  ]};
+function buildCaseSystemSetupView(cfg, key) {
+  const systems = cfg.caseManagement?.systems || {};
+  const system = systems[key];
+  if (!system) throw new Error(`Invalid case category: ${key}`);
+  const roles = system.accessRoleIds || [];
+  const embed = new EmbedBuilder()
+    .setTitle(`${system.label || key} — Case Setup`)
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'Category name', value: system.label || key },
+      { name: 'Forum channel', value: system.channelId ? `<#${system.channelId}>` : '*Not configured*', inline: true },
+      { name: 'Access roles', value: roles.length ? roles.map(id => `<@&${id}>`).join(' ') : '*No roles selected — nobody can open cases*' },
+      { name: 'Log channel', value: system.logChannelId ? `<#${system.logChannelId}>` : '*Not configured*', inline: true },
+    );
+  return {
+    embeds: [embed],
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder().setCustomId(`setup__case_channel__${key}`).setPlaceholder('Select the destination Forum').addChannelTypes(ChannelType.GuildForum),
+      ),
+      new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}`).setPlaceholder('Select roles allowed to open/access cases').setMinValues(0).setMaxValues(25),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Optional: select a log channel').addChannelTypes(ChannelType.GuildText),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`setup__case_label__${key}`).setLabel('Rename Category').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Back').setStyle(ButtonStyle.Secondary),
+      ),
+    ],
+  };
 }
 
 function buildSetupHomeComponents() {
@@ -1523,34 +1573,83 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__staff') return interaction.update(buildStaffAccessSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__cases') return interaction.update(buildCaseSetupView(cfg));
   if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
-  if (interaction.isStringSelectMenu() && id.startsWith('setup__case_rolefield__')) return interaction.update(buildCaseSystemSetupView(cfg, id.split('__').pop(), interaction.values[0]));
+
+  if (interaction.isRoleSelectMenu() && id === 'setup__case_global_ping') {
+    cfg.caseManagement.pingRoleId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildCaseSetupView(cfg));
+  }
+
+  if (interaction.isButton() && id === 'setup__case_embed') {
+    const modal = new ModalBuilder().setCustomId('setup__case_embed_submit').setTitle('Case Embed Design');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('Title template ({category}, {number})').setStyle(TextInputStyle.Short).setValue(cfg.caseManagement.embedTitle || '{category} | Case #{number}').setRequired(true).setMaxLength(256)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('Embed description (optional)').setStyle(TextInputStyle.Paragraph).setValue(cfg.caseManagement.embedDescription || '').setRequired(false).setMaxLength(1000)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('color').setLabel('Embed color (hex, e.g. #5865F2)').setStyle(TextInputStyle.Short).setValue(cfg.caseManagement.embedColor || '#5865F2').setRequired(true).setMaxLength(7)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('thumbnail').setLabel('Top-right thumbnail URL (optional)').setStyle(TextInputStyle.Short).setValue(cfg.caseManagement.embedThumbnail || '').setRequired(false).setMaxLength(500)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('footer').setLabel('Embed footer text').setStyle(TextInputStyle.Short).setValue(cfg.caseManagement.embedFooter || 'NYLRP | Case Management').setRequired(false).setMaxLength(2048)),
+    );
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.isModalSubmit() && id === 'setup__case_embed_submit') {
+    const title = interaction.fields.getTextInputValue('title').trim();
+    const description = interaction.fields.getTextInputValue('description').trim();
+    const color = interaction.fields.getTextInputValue('color').trim();
+    const thumbnail = interaction.fields.getTextInputValue('thumbnail').trim();
+    const footer = interaction.fields.getTextInputValue('footer').trim();
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) return interaction.reply({ content: '❌ Use a valid hex color, for example #5865F2.', flags: MessageFlags.Ephemeral });
+    if (thumbnail && !isValidUrl(thumbnail)) return interaction.reply({ content: '❌ The thumbnail must be a valid image URL.', flags: MessageFlags.Ephemeral });
+    cfg.caseManagement.embedTitle = title;
+    cfg.caseManagement.embedDescription = description;
+    cfg.caseManagement.embedColor = color;
+    cfg.caseManagement.embedThumbnail = thumbnail || null;
+    cfg.caseManagement.embedFooter = footer || 'NYLRP | Case Management';
+    await saveConfig(guildId);
+    return interaction.update(buildCaseSetupView(cfg));
+  }
+
+  if (interaction.isButton() && id.startsWith('setup__case_label__')) {
+    const key = id.split('__').pop();
+    const system = cfg.caseManagement?.systems?.[key];
+    if (!system) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
+    const modal = new ModalBuilder().setCustomId(`setup__case_label_submit__${key}`).setTitle('Rename Case Category');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('label').setLabel('Category name').setStyle(TextInputStyle.Short).setValue(system.label || key).setRequired(true).setMaxLength(100),
+    ));
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.isModalSubmit() && id.startsWith('setup__case_label_submit__')) {
+    const key = id.split('__').pop();
+    const system = cfg.caseManagement?.systems?.[key];
+    const label = interaction.fields.getTextInputValue('label').trim();
+    if (!system || !label) return interaction.reply({ content: '❌ Enter a valid category name.', flags: MessageFlags.Ephemeral });
+    system.label = label;
+    await saveConfig(guildId);
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+
   if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_channel__')) {
     const key = id.split('__').pop();
-    await interaction.deferUpdate();
+    if (!cfg.caseManagement?.systems?.[key]) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
     cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
     await saveConfig(guildId);
-    return interaction.editReply(buildCaseSystemSetupView(cfg, key));
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_log__')) {
     const key = id.split('__').pop();
-    await interaction.deferUpdate();
+    if (!cfg.caseManagement?.systems?.[key]) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
     cfg.caseManagement.systems[key].logChannelId = interaction.values[0] || null;
     await saveConfig(guildId);
-    return interaction.editReply(buildCaseSystemSetupView(cfg, key));
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__case_roles__')) {
-    const parts = id.split('__');
-    const key = parts[3];
-    const field = parts[4];
-    const validSystems = ['ia', 'management', 'supervisor', 'executive'];
-    const validFields = ['pingRoleIds', 'accessRoleIds', 'createRoleIds', 'investigatorRoleIds', 'supervisorRoleIds'];
-    if (!validSystems.includes(key) || !validFields.includes(field) || !cfg.caseManagement?.systems?.[key]) {
-      return interaction.reply({ content: 'Invalid case role selection. Please reopen /setup → Case Management and try again.', flags: MessageFlags.Ephemeral });
-    }
-    await interaction.deferUpdate();
-    cfg.caseManagement.systems[key][field] = interaction.values;
+    const key = id.split('__').pop();
+    if (!cfg.caseManagement?.systems?.[key]) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
+    cfg.caseManagement.systems[key].accessRoleIds = interaction.values;
     await saveConfig(guildId);
-    return interaction.editReply(buildCaseSystemSetupView(cfg, key, field));
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
   if (interaction.isStringSelectMenu() && id === 'setup__staff_rolefield') return interaction.update(buildStaffAccessSetupView(cfg, interaction.values[0]));
   if (interaction.isRoleSelectMenu() && id.startsWith('setup__staff_roles__')) {
@@ -2082,7 +2181,7 @@ const commands = [
   { name: 'staff', description: 'List all configured staff members and their clearance level', default_member_permissions: P.ModerateMembers.toString() },
   { name: 'case', description: 'Open a case or submit it for closure approval', options: [
     { type: 1, name: 'open', description: 'Open a new case in its configured Forum', options: [
-      { name: 'system', type: 3, description: 'Case system / destination Forum', required: true, choices: [{name:'Internal Affairs',value:'ia'},{name:'Management',value:'management'},{name:'Supervisor',value:'supervisor'},{name:'Executive',value:'executive'}] },
+      { name: 'system', type: 3, description: 'Configured case category', required: true, autocomplete: true },
       { name: 'reporting', type: 6, description: 'Person submitting the report', required: true },
       { name: 'reported', type: 6, description: 'Person being reported', required: true },
       { name: 'reason', type: 3, description: 'Reason for the case', required: true, max_length: 900 },
@@ -2328,6 +2427,22 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     const guildId = interaction.guild.id;
+
+    if (interaction.isAutocomplete()) {
+      if (interaction.commandName !== 'case' || interaction.options.getSubcommand(false) !== 'open') {
+        return interaction.respond([]);
+      }
+      const focused = interaction.options.getFocused(true);
+      if (focused.name !== 'system') return interaction.respond([]);
+      const autocompleteConfig = await getConfig(guildId);
+      const search = String(focused.value || '').toLowerCase();
+      const choices = Object.entries(autocompleteConfig.caseManagement?.systems || {})
+        .filter(([, system]) => system?.channelId && system?.label)
+        .filter(([key, system]) => !search || String(system.label).toLowerCase().includes(search) || key.includes(search))
+        .slice(0, 25)
+        .map(([key, system]) => ({ name: String(system.label).slice(0, 100), value: key }));
+      return interaction.respond(choices);
+    }
 
     // Handle the CoC import modal before loading configuration so the interaction
     // is acknowledged immediately and cannot expire while MongoDB is responding.
@@ -3115,10 +3230,14 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: '❌ This case system has no Forum configured. Set it in /setup → Case Management.', flags: MessageFlags.Ephemeral });
         }
         const forumId = sys.channelId;
-        const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds || []);
-        if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
-        const forum = interaction.guild.channels.cache.get(forumId);
+        const allowed = hasAnyConfiguredRole(member, sys.accessRoleIds || []);
+        if (!allowed) return interaction.reply({ content: '❌ You do not have an access role configured for this case category.', flags: MessageFlags.Ephemeral });
+        const forum = await interaction.guild.channels.fetch(forumId).catch(() => null);
         if (!forum || forum.type !== ChannelType.GuildForum) throw new Error('The configured case channel must be a Forum channel.');
+        const forumPermissions = forum.permissionsFor(member);
+        if (!forumPermissions?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+          return interaction.reply({ content: '❌ Your Discord permissions do not allow you to create a post in this Forum.', flags: MessageFlags.Ephemeral });
+        }
         const reporter = interaction.options.getUser('reporting', true);
         const reported = interaction.options.getUser('reported', true);
         const reason = interaction.options.getString('reason', true);
@@ -3152,11 +3271,24 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Notes', value: noteText || '*No additional notes*' },
           ...evidence.map(item => ({ name: item.name, value: item.url })),
         ];
-        const embed = new EmbedBuilder().setTitle(`${sys.label || systemKey} | Case #${number}`)
-          .setColor(0x5865F2).addFields(fields)
-          .setFooter({ text: `Created by ${interaction.user.tag || interaction.user.id}` }).setTimestamp();
+        const embedTitle = String(cfg.caseManagement.embedTitle || '{category} | Case #{number}')
+          .replace(/\{category\}/g, sys.label || systemKey)
+          .replace(/\{number\}/g, String(number));
+        const embedColor = /^#[0-9a-fA-F]{6}$/.test(cfg.caseManagement.embedColor || '')
+          ? parseInt(cfg.caseManagement.embedColor.slice(1), 16) : 0x5865F2;
+        const embed = new EmbedBuilder().setTitle(embedTitle.slice(0, 256))
+          .setColor(embedColor).addFields(fields)
+          .setFooter({ text: String(cfg.caseManagement.embedFooter || 'NYLRP | Case Management').slice(0, 2048) }).setTimestamp();
+        const embedDescription = String(cfg.caseManagement.embedDescription || '')
+          .replace(/\{category\}/g, sys.label || systemKey)
+          .replace(/\{number\}/g, String(number))
+          .replace(/\{reporter\}/g, `<@${reporter.id}>`)
+          .replace(/\{reported\}/g, `<@${reported.id}>`)
+          .replace(/\{reason\}/g, reason);
+        if (embedDescription) embed.setDescription(embedDescription.slice(0, 4096));
+        if (cfg.caseManagement.embedThumbnail && isValidUrl(cfg.caseManagement.embedThumbnail)) embed.setThumbnail(cfg.caseManagement.embedThumbnail);
         if (evidence[0]?.contentType.startsWith('image/')) embed.setImage(evidence[0].url);
-        const pingIds = sys.pingRoleIds || [];
+        const pingIds = cfg.caseManagement.pingRoleId ? [cfg.caseManagement.pingRoleId] : [];
         const thread = await forum.threads.create({
           name: `case-${String(number).padStart(4, '0')}-${reported.username}`.slice(0, 100),
           autoArchiveDuration: 10080,
@@ -3190,7 +3322,7 @@ client.on('interactionCreate', async (interaction) => {
         const record = await CaseFileModel.findOne({ guildId, threadId: interaction.channel.id });
         if (!record) return interaction.reply({ content: '❌ This command only works inside an active case thread.', flags: MessageFlags.Ephemeral });
         const sys = cfg.caseManagement.systems[record.system] || {};
-        const canClose = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
+        const canClose = hasAnyConfiguredRole(member, sys.accessRoleIds || []) || record.createdBy === interaction.user.id;
         if (!canClose) return interaction.reply({ content: '❌ You do not have permission to close this case.', flags: MessageFlags.Ephemeral });
         if (record.status === 'Closed' || record.status === 'Awaiting Approval') return interaction.reply({ content: '❌ This case is already closed or awaiting SHR approval.', flags: MessageFlags.Ephemeral });
         const action = interaction.options.getString('action', true);
@@ -3206,7 +3338,7 @@ client.on('interactionCreate', async (interaction) => {
       if (cmd === 'case-create') {
         const sys = cfg.caseManagement.systems[systemKey];
         if (!sys?.channelId) return interaction.reply({ content: '❌ This case system has no channel configured in /setup → Case Management.', flags: MessageFlags.Ephemeral });
-        const allowed = isOwner(member) || hasAnyConfiguredRole(member, sys.createRoleIds);
+        const allowed = hasAnyConfiguredRole(member, sys.accessRoleIds || []);
         if (!allowed) return interaction.reply({ content: '❌ You are not allowed to create cases in this system.', flags: MessageFlags.Ephemeral });
         const channel = interaction.guild.channels.cache.get(sys.channelId);
         if (!channel) return interaction.reply({ content: '❌ Configured case channel not found.', flags: MessageFlags.Ephemeral });
@@ -3225,7 +3357,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Both Sides of the Story', value: '*Pending*' },
           { name: 'Notes', value: '*No notes yet*' },
         ).setFooter({ text: `Created by ${interaction.user.id}` }).setTimestamp();
-        const pingIds = sys.pingRoleIds || [];
+        const pingIds = cfg.caseManagement.pingRoleId ? [cfg.caseManagement.pingRoleId] : [];
         if (channel.type !== ChannelType.GuildForum) {
           throw new Error('The configured case channel must be a Q&A / Forum channel.');
         }
@@ -3253,7 +3385,7 @@ client.on('interactionCreate', async (interaction) => {
       const record = await CaseFileModel.findOne({ guildId, number: caseNumber || interaction.options.getInteger('number') });
       if (!record) return interaction.reply({ content: '❌ Case not found.', flags: MessageFlags.Ephemeral });
       const sys = cfg.caseManagement.systems[record.system] || {};
-      const hasAccess = isOwner(member) || hasAnyConfiguredRole(member, [...(sys.accessRoleIds || []), ...(sys.investigatorRoleIds || []), ...(sys.supervisorRoleIds || []), ...(sys.createRoleIds || [])]) || record.createdBy === interaction.user.id;
+      const hasAccess = hasAnyConfiguredRole(member, sys.accessRoleIds || []) || record.createdBy === interaction.user.id;
       if (!hasAccess) return interaction.reply({ content: '❌ You do not have access to this case.', flags: MessageFlags.Ephemeral });
       if (cmd === 'case-status') {
         record.status = interaction.options.getString('status'); await record.save();
@@ -3271,8 +3403,8 @@ client.on('interactionCreate', async (interaction) => {
       if (cmd === 'case-investigate') {
         const assigned = interaction.options.getUser('user');
         const level = interaction.options.getString('level');
-        const allowedRoles = level === 'supervisor' ? (sys.supervisorRoleIds || []) : (sys.investigatorRoleIds || []);
-        if (!isOwner(member) && !hasAnyConfiguredRole(member, [...(sys.supervisorRoleIds || []), ...(sys.accessRoleIds || [])])) {
+        const allowedRoles = sys.accessRoleIds || [];
+        if (!hasAnyConfiguredRole(member, sys.accessRoleIds || [])) {
           return interaction.reply({ content:'❌ Only case supervisors or configured case managers can assign investigators.', flags:MessageFlags.Ephemeral });
         }
         if (!hasAnyConfiguredRole(await interaction.guild.members.fetch(assigned.id).catch(()=>null), allowedRoles) && !isOwner(await interaction.guild.members.fetch(assigned.id).catch(()=>null))) {
