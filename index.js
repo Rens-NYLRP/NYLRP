@@ -19,6 +19,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildPresences,
   ],
   partials: [Partials.Channel],
 });
@@ -94,6 +95,12 @@ const guildConfigSchema = new mongoose.Schema({
     requestChannelId: { type: String, default: null },
     infractionChannelId: { type: String, default: null },
     changeLogChannelId: { type: String, default: null },
+  },
+  counters: {
+    enabled: { type: Boolean, default: false },
+    categoryId: { type: String, default: null },
+    channelIds: { type: mongoose.Schema.Types.Mixed, default: {} },
+    staffRoleIds: { type: [String], default: [] },
   },
   caseManagement: {
     pingRoleId: { type: String, default: null },
@@ -442,6 +449,7 @@ mongoose.connection.on('reconnected', () => { console.log('✅ MongoDB reconnect
 // GUILD CONFIG CACHE
 // ════════════════════════════════════════════
 const configCache = new Map();
+const counterRefreshTimers = new Map();
 // Bridges the two-step "select roles, then set a prefix" flow (a modal can't carry an arbitrary list
 // of role IDs in its customId due to Discord's 100-char limit), keyed by the staff member's user ID.
 const pendingPrefixRoleSelections = new Map();
@@ -475,6 +483,7 @@ function defaultConfig(guildId) {
     },
     coc: { channelId: null, messageId: null, title: '🔱 Chain of Command', ranks: [] },
     staffAccess: { shrRoleIds: [], hrRoleIds: [], approvalRoleIds: [], requestChannelId: null, infractionChannelId: null, changeLogChannelId: null },
+    counters: { enabled: false, categoryId: null, channelIds: {}, staffRoleIds: [] },
     caseManagement: {
       pingRoleId: null,
       embedTitle: '{category} | Case #{number}',
@@ -500,6 +509,7 @@ async function getConfig(guildId) {
         welcome: { ...defaultConfig(guildId).welcome, ...(doc.welcome || {}) },
         coc: { ...defaultConfig(guildId).coc, ...(doc.coc || {}), ranks: doc.coc?.ranks || [] },
         staffAccess: { ...defaultConfig(guildId).staffAccess, ...(doc.staffAccess || {}) },
+        counters: { ...defaultConfig(guildId).counters, ...(doc.counters || {}), channelIds: { ...defaultConfig(guildId).counters.channelIds, ...(doc.counters?.channelIds || {}) } },
         caseManagement: { ...defaultConfig(guildId).caseManagement, ...(doc.caseManagement || {}), systems: { ...defaultConfig(guildId).caseManagement.systems, ...(doc.caseManagement?.systems || {}) } },
       }
                   : defaultConfig(guildId);
@@ -519,7 +529,7 @@ async function saveConfig(guildId) {
       await GuildConfigModel.findByIdAndUpdate(guildId, { $set: {
         tickets: cfg.tickets, moderation: cfg.moderation, training: cfg.training,
         nicknamePrefixes: [], welcome: cfg.welcome, coc: cfg.coc,
-        staffAccess: cfg.staffAccess, caseManagement: cfg.caseManagement,
+        staffAccess: cfg.staffAccess, counters: cfg.counters, caseManagement: cfg.caseManagement,
       } }, { upsert: true });
       return true;
     } catch (e) {
@@ -700,6 +710,52 @@ async function applyNicknamePrefix(member, cfg) {
     return 'failed';
   }
 }
+async function refreshServerCounters(guild, cfg, createMissing = false) {
+  const settings = cfg.counters || (cfg.counters = { enabled: false, categoryId: null, channelIds: {}, staffRoleIds: [] });
+  if (!settings.enabled && !createMissing) return 'Counters are not enabled.';
+  settings.channelIds ||= {};
+  let category = settings.categoryId ? guild.channels.cache.get(settings.categoryId) : null;
+  if (!category && createMissing) {
+    category = await guild.channels.create({ name: 'NYLRP | SERVER STATS', type: ChannelType.GuildCategory });
+    settings.categoryId = category.id;
+  }
+  if (!category) return 'Counter category is missing. Open /setup → Counters and create it again.';
+  const members = [...guild.members.cache.values()];
+  const counts = {
+    members: guild.memberCount,
+    online: [...guild.presences.cache.values()].filter(p => p.status && p.status !== 'offline').length,
+    staff: members.filter(m => !m.user.bot && m.roles.cache.some(role => (settings.staffRoleIds || []).includes(role.id))).length,
+    bots: members.filter(m => m.user.bot).length,
+    boosts: guild.premiumSubscriptionCount || 0,
+  };
+  const labels = { members: '👥 Members', online: '🟢 Online', staff: '🛡️ Staff', bots: '🤖 Bots', boosts: '🚀 Boosts' };
+  for (const [key, label] of Object.entries(labels)) {
+    let channel = settings.channelIds[key] ? guild.channels.cache.get(settings.channelIds[key]) : null;
+    if (!channel && createMissing) {
+      channel = await guild.channels.create({ name: `${label}: ${counts[key]}`, type: ChannelType.GuildVoice, parent: category.id,
+        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.Connect] }] });
+      settings.channelIds[key] = channel.id;
+    }
+    if (channel && channel.name !== `${label}: ${counts[key]}`) await channel.setName(`${label}: ${counts[key]}`).catch(() => {});
+  }
+  settings.enabled = true;
+  await saveConfig(guild.id);
+  return `✅ Server counters ${createMissing ? 'created/refreshed' : 'updated'} successfully.`;
+}
+
+function scheduleCounterRefresh(guild) {
+  const previous = counterRefreshTimers.get(guild.id);
+  if (previous) clearTimeout(previous);
+  const timer = setTimeout(async () => {
+    counterRefreshTimers.delete(guild.id);
+    try {
+      const cfg = await getConfig(guild.id);
+      if (cfg.counters?.enabled) await refreshServerCounters(guild, cfg, false);
+    } catch (e) { console.error('Counter refresh error:', e.message); }
+  }, 12000);
+  counterRefreshTimers.set(guild.id, timer);
+}
+
 function isTrainer(member, cfg) {
   if (isAdmin(member)) return true;
   if (!cfg.training.trainerRoles.length) return false;
@@ -1147,6 +1203,24 @@ function buildCaseSystemSetupView(cfg, key) {
   };
 }
 
+function buildCountersSetupView(cfg) {
+  const counter = cfg.counters || {};
+  const channelIds = counter.channelIds || {};
+  const embed = new EmbedBuilder().setTitle('📊 Server Counters').setColor(0x5865F2)
+    .setDescription('Create a dedicated category with live voice-channel counters. The bot updates the values automatically when members join, leave, change status, or receive staff roles.')
+    .addFields(
+      { name: 'Status', value: counter.enabled ? 'Enabled' : 'Not created yet', inline: true },
+      { name: 'Category', value: counter.categoryId ? `<#${counter.categoryId}>` : '*Will be created automatically*', inline: true },
+      { name: 'Counter channels', value: Object.keys(channelIds).length ? Object.entries(channelIds).map(([key, id]) => `${key}: <#${id}>`).join('\\n') : '*Not created yet*' },
+      { name: 'Staff roles', value: counter.staffRoleIds?.length ? counter.staffRoleIds.map(id => `<@&${id}>`).join(' ') : '*No staff roles selected*' },
+    );
+  return { embeds: [embed], components: [
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__counter_create').setLabel(counter.enabled ? 'Refresh Counters' : 'Create Counters').setStyle(ButtonStyle.Success)),
+    new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('setup__counter_staffroles').setPlaceholder('Select roles counted as staff').setMinValues(0).setMaxValues(25)),
+    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+  ] };
+}
+
 function buildSetupHomeComponents() {
   return [
     new ActionRowBuilder().addComponents(
@@ -1160,6 +1234,7 @@ function buildSetupHomeComponents() {
       new ButtonBuilder().setCustomId('setup__home__welcome').setLabel('Welcome').setEmoji('👋').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__staff').setLabel('Staff Access').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('setup__home__cases').setLabel('Case Management').setEmoji('📁').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__home__counters').setLabel('Counters').setEmoji('📊').setStyle(ButtonStyle.Primary),
     ),
   ];
 }
@@ -1583,6 +1658,19 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
   if (interaction.isButton() && id === 'setup__home__welcome') return interaction.update(buildWelcomeSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__staff') return interaction.update(buildStaffAccessSetupView(cfg));
   if (interaction.isButton() && id === 'setup__home__cases') return interaction.update(buildCaseSetupView(cfg));
+  if (interaction.isButton() && id === 'setup__home__counters') return interaction.update(buildCountersSetupView(cfg));
+  if (interaction.isRoleSelectMenu() && id === 'setup__counter_staffroles') {
+    cfg.counters.staffRoleIds = interaction.values;
+    await saveConfig(guildId);
+    if (cfg.counters.enabled) await refreshServerCounters(interaction.guild, cfg, false);
+    return interaction.update(buildCountersSetupView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__counter_create') {
+    await interaction.deferUpdate();
+    const result = await refreshServerCounters(interaction.guild, cfg, true);
+    await interaction.editReply({ ...buildCountersSetupView(cfg), content: result });
+    return;
+  }
   if (interaction.isStringSelectMenu() && id === 'setup__case_system') return interaction.update(buildCaseSystemSetupView(cfg, interaction.values[0]));
 
   if (interaction.isButton() && id === 'setup__case_add') {
@@ -2371,6 +2459,15 @@ async function sweepExpiredTempBans() {
 // ════════════════════════════════════════════
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const cfg = await getConfig(guild.id);
+      if (cfg.counters?.enabled) {
+        await guild.members.fetch().catch(() => {});
+        await refreshServerCounters(guild, cfg, false);
+      }
+    } catch (e) { console.error('Initial counter sync failed:', e.message); }
+  }
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -2388,6 +2485,7 @@ client.once('ready', async () => {
 // ROLE-BASED NICKNAME PREFIXES
 // ════════════════════════════════════════════
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  scheduleCounterRefresh(newMember.guild);
   try {
     const cfg = await getConfig(newMember.guild.id);
     const configuredRankIds = (cfg.coc?.ranks || []).map(rank => rank.roleId).filter(Boolean);
@@ -2402,6 +2500,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 });
 
 client.on('guildMemberAdd', async (member) => {
+  scheduleCounterRefresh(member.guild);
   try {
     const cfg = await getConfig(member.guild.id);
     await sendWelcomeMessage(member, cfg);
@@ -2411,6 +2510,11 @@ client.on('guildMemberAdd', async (member) => {
   } catch (e) {
     console.error('guildMemberAdd (welcome/prefix) error:', e.message);
   }
+});
+
+client.on('guildMemberRemove', member => scheduleCounterRefresh(member.guild));
+client.on('presenceUpdate', (_oldPresence, newPresence) => {
+  if (newPresence?.guild) scheduleCounterRefresh(newPresence.guild);
 });
 
 // ════════════════════════════════════════════
