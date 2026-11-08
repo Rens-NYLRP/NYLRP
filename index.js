@@ -720,6 +720,7 @@ async function refreshServerCounters(guild, cfg, createMissing = false) {
     settings.categoryId = category.id;
   }
   if (!category) return 'Counter category is missing. Open /setup → Counters and create it again.';
+  if (createMissing) await guild.members.fetch().catch(() => {});
   const members = [...guild.members.cache.values()];
   const counts = {
     members: guild.memberCount,
