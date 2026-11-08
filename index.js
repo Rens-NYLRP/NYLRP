@@ -1513,10 +1513,10 @@ function buildCocView(cfg) {
       new ButtonBuilder().setCustomId('setup__coc_add_rank').setLabel('Add Rank').setEmoji('➕').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('setup__coc_publish').setLabel('Publish / Update').setEmoji('📤').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('setup__coc_title').setLabel('Edit Title').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
       new RoleSelectMenuBuilder().setCustomId('setup__coc_edit_prefix').setPlaceholder('Select a configured rank to edit its prefix').setMinValues(1).setMaxValues(1),
-      new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
     ),
   ];
   return { embeds: [embed], components };
