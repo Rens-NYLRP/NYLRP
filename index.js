@@ -1510,8 +1510,12 @@ function buildCocView(cfg) {
     ),
     new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('setup__coc_import').setLabel('Bulk Import').setEmoji('📥').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('setup__coc_add_rank').setLabel('Add Rank').setEmoji('➕').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('setup__coc_publish').setLabel('Publish / Update').setEmoji('📤').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('setup__coc_title').setLabel('Edit Title').setEmoji('✏️').setStyle(ButtonStyle.Secondary),
+    ),
+    new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder().setCustomId('setup__coc_edit_prefix').setPlaceholder('Select a configured rank to edit its prefix').setMinValues(1).setMaxValues(1),
       new ButtonBuilder().setCustomId('setup__home').setLabel('Back').setEmoji('⬅️').setStyle(ButtonStyle.Secondary),
     ),
   ];
@@ -1856,6 +1860,61 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     cfg.coc.channelId = interaction.values[0] || null;
     await saveConfig(guildId);
     return interaction.update(buildCocView(cfg));
+  }
+  if (interaction.isButton() && id === 'setup__coc_add_rank') {
+    const modal = new ModalBuilder().setCustomId('setup__coc_add_rank_submit').setTitle('Add Rank / Prefix');
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('role').setLabel('Exact server role name').setStyle(TextInputStyle.Short).setPlaceholder('e.g. Deputy Commissioner').setRequired(true).setMaxLength(100)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('prefix').setLabel('Nickname prefix (optional)').setStyle(TextInputStyle.Short).setPlaceholder('e.g. DCP').setRequired(false).setMaxLength(20)),
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('position').setLabel('Position in hierarchy (1 = highest)').setStyle(TextInputStyle.Short).setPlaceholder(String((cfg.coc.ranks || []).length + 1)).setRequired(false).setMaxLength(3)),
+    );
+    return interaction.showModal(modal);
+  }
+  if (interaction.isRoleSelectMenu() && id === 'setup__coc_edit_prefix') {
+    const roleId = interaction.values[0];
+    const rank = (cfg.coc.ranks || []).find(item => item.roleId === roleId);
+    if (!rank) return interaction.reply({ content: 'That role is not in the Chain of Command. Add it as a rank first.', flags: MessageFlags.Ephemeral });
+    const modal = new ModalBuilder().setCustomId('setup__coc_edit_prefix_submit').setTitle('Edit Rank Prefix');
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId('prefix').setLabel('Nickname prefix (leave blank to remove)').setStyle(TextInputStyle.Short).setValue(rank.prefix || '').setRequired(false).setMaxLength(20),
+    ));
+    pendingPrefixRoleSelections.set(interaction.user.id, [roleId]);
+    return interaction.showModal(modal);
+  }
+  if (interaction.isModalSubmit() && id === 'setup__coc_add_rank_submit') {
+    const roleName = interaction.fields.getTextInputValue('role').trim();
+    const prefix = (interaction.fields.getTextInputValue('prefix') || '').trim();
+    const positionRaw = (interaction.fields.getTextInputValue('position') || '').trim();
+    const role = resolveCocRole(interaction.guild, roleName);
+    if (!role) return interaction.reply({ content: 'Role not found. Enter the exact name of an existing server role.', flags: MessageFlags.Ephemeral });
+    cfg.coc.ranks ||= [];
+    const existingIndex = cfg.coc.ranks.findIndex(item => item.roleId === role.id);
+    const rank = { roleId: role.id, name: role.name, prefix: prefix.slice(0, 20) };
+    if (existingIndex >= 0) cfg.coc.ranks.splice(existingIndex, 1);
+    const position = positionRaw ? Number(positionRaw) : cfg.coc.ranks.length + 1;
+    if (!Number.isInteger(position) || position < 1 || position > cfg.coc.ranks.length + 1) {
+      return interaction.reply({ content: 'Position must be a whole number between 1 and ' + (cfg.coc.ranks.length + 1) + '.', flags: MessageFlags.Ephemeral });
+    }
+    cfg.coc.ranks.splice(position - 1, 0, rank);
+    await saveConfig(guildId);
+    await interaction.update(buildCocView(cfg));
+    const members = [...role.members.values()].slice(0, 200);
+    for (const member of members) { await applyNicknamePrefix(member, cfg); await new Promise(resolve => setTimeout(resolve, 250)); }
+    return interaction.followUp({ content: 'Rank saved at position ' + position + '. Prefix ' + (prefix ? ('`' + prefix + '`') : 'removed') + '. Synced ' + members.length + ' current member(s).', flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+  if (interaction.isModalSubmit() && id === 'setup__coc_edit_prefix_submit') {
+    const roleId = pendingPrefixRoleSelections.get(interaction.user.id)?.[0];
+    pendingPrefixRoleSelections.delete(interaction.user.id);
+    if (!roleId) return interaction.reply({ content: 'Your selection expired. Select the rank again.', flags: MessageFlags.Ephemeral });
+    const rank = (cfg.coc.ranks || []).find(item => item.roleId === roleId);
+    if (!rank) return interaction.reply({ content: 'That rank no longer exists.', flags: MessageFlags.Ephemeral });
+    rank.prefix = (interaction.fields.getTextInputValue('prefix') || '').trim().slice(0, 20);
+    await saveConfig(guildId);
+    await interaction.update(buildCocView(cfg));
+    const role = interaction.guild.roles.cache.get(roleId);
+    const members = role ? [...role.members.values()].slice(0, 200) : [];
+    for (const member of members) { await applyNicknamePrefix(member, cfg); await new Promise(resolve => setTimeout(resolve, 250)); }
+    return interaction.followUp({ content: 'Prefix updated for <@&' + roleId + '>. Synced ' + members.length + ' current member(s).', flags: MessageFlags.Ephemeral }).catch(() => {});
   }
   if (interaction.isButton() && id === 'setup__coc_title') {
     const modal = new ModalBuilder().setCustomId('setup__coc_title_submit').setTitle('Chain of Command Title');
