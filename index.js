@@ -19,7 +19,6 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
-    GatewayIntentBits.GuildPresences,
   ],
   partials: [Partials.Channel],
 });
@@ -722,14 +721,18 @@ async function refreshServerCounters(guild, cfg, createMissing = false) {
   if (!category) return 'Counter category is missing. Open /setup → Counters and create it again.';
   if (createMissing) await guild.members.fetch().catch(() => {});
   const members = [...guild.members.cache.values()];
+  if (settings.channelIds.online) {
+    const oldOnlineChannel = guild.channels.cache.get(settings.channelIds.online);
+    if (oldOnlineChannel) await oldOnlineChannel.delete('Online member counter removed from server counters').catch(() => {});
+    delete settings.channelIds.online;
+  }
   const counts = {
     members: guild.memberCount,
-    online: [...guild.presences.cache.values()].filter(p => p.status && p.status !== 'offline').length,
     staff: members.filter(m => !m.user.bot && m.roles.cache.some(role => (settings.staffRoleIds || []).includes(role.id))).length,
     bots: members.filter(m => m.user.bot).length,
     boosts: guild.premiumSubscriptionCount || 0,
   };
-  const labels = { members: '👥 Members', online: '🟢 Online', staff: '🛡️ Staff', bots: '🤖 Bots', boosts: '🚀 Boosts' };
+  const labels = { members: '👥 Members', staff: '🛡️ Staff', bots: '🤖 Bots', boosts: '🚀 Boosts' };
   for (const [key, label] of Object.entries(labels)) {
     let channel = settings.channelIds[key] ? guild.channels.cache.get(settings.channelIds[key]) : null;
     if (!channel && createMissing) {
@@ -1208,7 +1211,7 @@ function buildCountersSetupView(cfg) {
   const counter = cfg.counters || {};
   const channelIds = counter.channelIds || {};
   const embed = new EmbedBuilder().setTitle('📊 Server Counters').setColor(0x5865F2)
-    .setDescription('Create a dedicated category with live voice-channel counters. The bot updates the values automatically when members join, leave, change status, or receive staff roles.')
+    .setDescription('Create a dedicated category with live voice-channel counters. The bot updates the values automatically when members join, leave, or receive staff roles.')
     .addFields(
       { name: 'Status', value: counter.enabled ? 'Enabled' : 'Not created yet', inline: true },
       { name: 'Category', value: counter.categoryId ? `<#${counter.categoryId}>` : '*Will be created automatically*', inline: true },
@@ -2514,9 +2517,6 @@ client.on('guildMemberAdd', async (member) => {
 });
 
 client.on('guildMemberRemove', member => scheduleCounterRefresh(member.guild));
-client.on('presenceUpdate', (_oldPresence, newPresence) => {
-  if (newPresence?.guild) scheduleCounterRefresh(newPresence.guild);
-});
 
 // ════════════════════════════════════════════
 // INTERACTIONS
