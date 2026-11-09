@@ -239,13 +239,14 @@ caseFileSchema.index({ guildId: 1, number: 1 }, { unique: true });
 const CaseFileModel = mongoose.model('CaseFile', caseFileSchema);
 
 async function postStaffRequest(guild, cfg, data) {
+  const caseSystem = data.kind === 'case_infraction' ? cfg.caseManagement?.systems?.[data.systemKey] : null;
   const configuredChannelId = data.kind === 'case_infraction'
-    ? cfg.staffAccess?.caseApprovalChannelId
+    ? caseSystem?.approvalChannelId
     : cfg.staffAccess?.requestChannelId;
   const channel = configuredChannelId ? await guild.channels.fetch(configuredChannelId).catch(() => null) : null;
   if (!channel || !channel.isTextBased() || !channel.send) {
-    const setting = data.kind === 'case_infraction' ? 'Case approval channel' : 'General approval channel';
-    throw new Error(setting + ' is not configured or is not a usable text channel. Set it in /setup → Staff Access & Approvals.');
+    const setting = data.kind === 'case_infraction' ? `Approval channel for ${caseSystem?.label || data.systemKey || 'this case level'}` : 'General approval channel';
+    throw new Error(setting + ' is not configured or is not a usable text channel. Set it in /setup → Case Management.');
   }
   const record = await StaffRequestModel.create({ guildId: guild.id, ...data });
   const roleIds = cfg.staffAccess?.approvalRoleIds?.length ? cfg.staffAccess.approvalRoleIds : (cfg.staffAccess?.shrRoleIds || []);
@@ -337,7 +338,7 @@ async function executeStaffRequest(interaction, record, cfg) {
       .setFooter({ text: 'The internal case discussion and evidence transcript are confidential.' })
       .setTimestamp()] }).catch(() => {});
     if (cfg.staffAccess?.infractionChannelId) {
-      const logChannel = interaction.guild.channels.cache.get(cfg.staffAccess.infractionChannelId);
+      const logChannel = await interaction.guild.channels.fetch(cfg.staffAccess.infractionChannelId).catch(() => null);
       if (logChannel) await logChannel.send({ embeds: [new EmbedBuilder()
         .setTitle(`NYLRP | ${p.action}`)
         .setColor(0xED4245)
@@ -350,7 +351,6 @@ async function executeStaffRequest(interaction, record, cfg) {
           { name: 'Requested by', value: `<@${record.requesterId}>`, inline: true },
           { name: 'Approved by', value: `<@${interaction.user.id}>`, inline: true },
           ...(p.notes ? [{ name: 'Case notes', value: String(p.notes).slice(0, 1024) }] : []),
-          ...(p.evidence || []).slice(0, 3).map((item, index) => ({ name: item.name || `Evidence ${index + 1}`, value: item.url })),
         ).setTimestamp()] });
     }
     const thread = await interaction.guild.channels.fetch(caseRecord.threadId).catch(() => null);
@@ -1140,7 +1140,7 @@ function buildCaseSetupView(cfg) {
   const entries = Object.entries(systems);
   const rows = entries.map(([key, system]) => ({
     name: String(system.label || key).slice(0, 256),
-    value: `Forum: ${system.channelId ? `<#${system.channelId}>` : '*not set*'}\nAccess roles: ${(system.accessRoleIds || []).length}\nLog: ${system.logChannelId ? `<#${system.logChannelId}>` : '*not set*'}`,
+    value: `Forum: ${system.channelId ? `<#${system.channelId}>` : '*not set*'}\nApproval: ${system.approvalChannelId ? `<#${system.approvalChannelId}>` : '*not set*'}\nAccess roles: ${(system.accessRoleIds || []).length}\nLog: ${system.logChannelId ? `<#${system.logChannelId}>` : '*not set*'}`,
   }));
   const embed = new EmbedBuilder()
     .setTitle('Case Management Setup')
@@ -1185,6 +1185,7 @@ function buildCaseSystemSetupView(cfg, key) {
       { name: 'Category name', value: system.label || key },
       { name: 'Forum channel', value: system.channelId ? `<#${system.channelId}>` : '*Not configured*', inline: true },
       { name: 'Access roles', value: roles.length ? roles.map(id => `<@&${id}>`).join(' ') : '*No roles selected — nobody can open cases*' },
+      { name: 'Approval channel', value: system.approvalChannelId ? `<#${system.approvalChannelId}>` : '*Not configured*', inline: true },
       { name: 'Log channel', value: system.logChannelId ? `<#${system.logChannelId}>` : '*Not configured*', inline: true },
     );
   return {
@@ -1195,6 +1196,9 @@ function buildCaseSystemSetupView(cfg, key) {
       ),
       new ActionRowBuilder().addComponents(
         new RoleSelectMenuBuilder().setCustomId(`setup__case_roles__${key}`).setPlaceholder('Select roles allowed to open/access cases').setMinValues(0).setMaxValues(25),
+      ),
+      new ActionRowBuilder().addComponents(
+        new ChannelSelectMenuBuilder().setCustomId(`setup__case_approval__${key}`).setPlaceholder('Select this level’s approval channel').addChannelTypes(ChannelType.GuildText),
       ),
       new ActionRowBuilder().addComponents(
         new ChannelSelectMenuBuilder().setCustomId(`setup__case_log__${key}`).setPlaceholder('Optional: select a log channel').addChannelTypes(ChannelType.GuildText),
@@ -1766,6 +1770,13 @@ async function handleSetupInteraction(interaction, cfg, guildId) {
     const key = id.split('__').pop();
     if (!cfg.caseManagement?.systems?.[key]) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
     cfg.caseManagement.systems[key].channelId = interaction.values[0] || null;
+    await saveConfig(guildId);
+    return interaction.update(buildCaseSystemSetupView(cfg, key));
+  }
+  if (interaction.isChannelSelectMenu() && id.startsWith('setup__case_approval__')) {
+    const key = id.split('__').pop();
+    if (!cfg.caseManagement?.systems?.[key]) return interaction.reply({ content: '❌ Case category not found.', flags: MessageFlags.Ephemeral });
+    cfg.caseManagement.systems[key].approvalChannelId = interaction.values[0] || null;
     await saveConfig(guildId);
     return interaction.update(buildCaseSystemSetupView(cfg, key));
   }
@@ -2381,9 +2392,7 @@ const commands = [
         {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
         {name:'Demotion',value:'Demotion'},{name:'Termination',value:'Termination'},{name:'Staff blacklist',value:'Staff blacklist'}
       ]},
-      { name: 'status', type: 3, description: 'Initial case status', required: false, choices: [{name:'Open',value:'Open'},{name:'Under Investigation',value:'Under Investigation'}] },
-      { name: 'supervisor', type: 6, description: 'Assigned supervisor', required: false },
-      { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
+            { name: 'both-sides', type: 3, description: 'Both sides of the story', required: false, max_length: 900 },
       { name: 'notes', type: 3, description: 'Additional case notes', required: false, max_length: 900 },
       { name: 'evidence', type: 11, description: 'First evidence image or file', required: false },
       { name: 'evidence2', type: 11, description: 'Second evidence image or file', required: false },
@@ -3417,9 +3426,7 @@ client.on('interactionCreate', async (interaction) => {
           const latest = await CaseFileModel.findOne({ guildId }).sort({ number: -1 }).select('number').lean();
           number = (latest?.number || 0) + 1;
         }
-        const status = interaction.options.getString('status') || 'Open';
-        const supervisor = interaction.options.getUser('supervisor');
-        const bothSides = interaction.options.getString('both-sides');
+                const bothSides = interaction.options.getString('both-sides');
         const noteText = interaction.options.getString('notes');
         const evidence = ['evidence', 'evidence2', 'evidence3']
           .flatMap((optionName, index) => {
@@ -3430,8 +3437,6 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Reporting Party', value: `<@${reporter.id}>`, inline: true },
           { name: 'Reported Party', value: `<@${reported.id}>`, inline: true },
           { name: 'Punishment', value: proposedPunishment, inline: true },
-          { name: 'Status', value: status, inline: true },
-          { name: 'Supervisor', value: supervisor ? `<@${supervisor.id}>` : '*Not assigned*', inline: true },
           { name: 'Both Sides', value: bothSides || '*Not provided*', inline: true },
           { name: 'Reason', value: reason.slice(0, 1024) },
           { name: 'Notes', value: noteText || '*No additional notes*' },
@@ -3466,8 +3471,8 @@ client.on('interactionCreate', async (interaction) => {
         });
         await CaseFileModel.create({
           guildId, number, system: systemKey, channelId: forum.id, threadId: thread.id,
-          reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, status, proposedPunishment,
-          supervisorIds: supervisor ? [supervisor.id] : [], bothSides,
+          reportingPartyId: reporter.id, reportedPartyId: reported.id, reason, proposedPunishment,
+          bothSides,
           notes: noteText ? [{ authorId: interaction.user.id, text: noteText, createdAt: new Date() }] : [],
           evidence, createdBy: interaction.user.id, nextNumberKey: `${guildId}:${systemKey}`,
         });
@@ -3554,12 +3559,6 @@ client.on('interactionCreate', async (interaction) => {
       const sys = cfg.caseManagement.systems[record.system] || {};
       const hasAccess = hasAnyConfiguredRole(member, sys.accessRoleIds || []) || record.createdBy === interaction.user.id;
       if (!hasAccess) return interaction.reply({ content: '❌ You do not have access to this case.', flags: MessageFlags.Ephemeral });
-      if (cmd === 'case-status') {
-        record.status = interaction.options.getString('status'); await record.save();
-        const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
-        if (thread) await thread.send(`📊 Case status updated to **${record.status}** by <@${interaction.user.id}>.`);
-        return interaction.reply({ content: `✅ Case #${record.number} status: ${record.status}.`, flags: MessageFlags.Ephemeral });
-      }
       if (cmd === 'case-note') {
         const note = interaction.options.getString('note');
         record.notes.push({ authorId: interaction.user.id, text: note, createdAt: new Date() }); await record.save();
@@ -3577,11 +3576,12 @@ client.on('interactionCreate', async (interaction) => {
         if (!hasAnyConfiguredRole(await interaction.guild.members.fetch(assigned.id).catch(()=>null), allowedRoles) && !isOwner(await interaction.guild.members.fetch(assigned.id).catch(()=>null))) {
           return interaction.reply({ content:'❌ That member does not have a configured role for this investigator level.', flags:MessageFlags.Ephemeral });
         }
-        const list = level === 'supervisor' ? record.supervisorIds : record.investigatorIds;
+        if (level === 'supervisor') return interaction.reply({ content: '❌ Supervisor assignment is disabled. Assign investigators only.', flags: MessageFlags.Ephemeral });
+        const list = record.investigatorIds;
         if (!list.includes(assigned.id)) list.push(assigned.id);
         await record.save();
         const thread = await interaction.guild.channels.fetch(record.threadId).catch(() => null);
-        if (thread) await thread.send(`👤 <@${assigned.id}> assigned as ${level === 'supervisor' ? 'Supervisor+' : 'Investigator'} by <@${interaction.user.id}>.`);
+        if (thread) await thread.send(`👤 <@${assigned.id}> assigned as Investigator by <@${interaction.user.id}>.`);
         return interaction.reply({ content:`✅ <@${assigned.id}> assigned to case #${record.number}.`,flags:MessageFlags.Ephemeral });
       }
       if (cmd === 'case-story') {
@@ -3603,6 +3603,7 @@ client.on('interactionCreate', async (interaction) => {
           action: 'case_outcome',
           requesterId: interaction.user.id,
           caseNumber: record.number,
+          systemKey: record.system,
           payload: {
             caseType: sys.label || record.system,
             userId: record.reportedPartyId,
@@ -3634,7 +3635,7 @@ client.on('interactionCreate', async (interaction) => {
         const action = interaction.options.getString('action', true);
         const reason = interaction.options.getString('reason', true);
         const request = await postStaffRequest(interaction.guild, cfg, {
-          kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number,
+          kind: 'case_infraction', action: 'case_outcome', requesterId: interaction.user.id, caseNumber: record.number, systemKey: record.system,
           payload: {
             caseType: sys.label || record.system,
             userId: user.id, action, reason, caseNumber: record.number,
