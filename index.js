@@ -2398,9 +2398,6 @@ const commands = [
       { name: 'evidence2', type: 11, description: 'Second evidence image or file', required: false },
       { name: 'evidence3', type: 11, description: 'Third evidence image or file', required: false },
     ]},
-    { type: 1, name: 'claim', description: 'Claim a case as its next-level Chain of Command supervisor', options: [
-      { name: 'number', type: 4, description: 'Case number', required: true, min_value: 1 },
-    ]},
     { type: 1, name: 'close', description: 'Submit this case for SHR closure approval', options: [
       { name: 'action', type: 3, description: 'Required final punishment for SHR approval', required: true, choices: [
         {name:'Warning',value:'Warning'},{name:'Verbal warn',value:'Verbal warn'},{name:'Strike',value:'Strike'},
@@ -2704,6 +2701,32 @@ client.on('interactionCreate', async (interaction) => {
     // ───────── BUTTONS ─────────
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      if (id.startsWith('caseclaim__')) {
+        const caseNumber = Number(id.slice('caseclaim__'.length));
+        const record = await CaseFileModel.findOne({ guildId, number: caseNumber });
+        if (!record) return interaction.reply({ content: '❌ Case not found.', flags: MessageFlags.Ephemeral });
+        if (!interaction.channel?.isThread?.() || interaction.channel.id !== record.threadId) {
+          return interaction.reply({ content: '❌ This button can only be used inside its case Forum thread.', flags: MessageFlags.Ephemeral });
+        }
+        if (['Closed', 'Resolved'].includes(record.status)) {
+          return interaction.reply({ content: '❌ This case is already closed.', flags: MessageFlags.Ephemeral });
+        }
+        const ranks = cfg.coc?.ranks || [];
+        const opener = await interaction.guild.members.fetch(record.createdBy).catch(() => null);
+        const openerRankIndex = opener ? ranks.findIndex(rank => rank.roleId && opener.roles.cache.has(rank.roleId)) : -1;
+        const claimantRankIndex = ranks.findIndex(rank => rank.roleId && interaction.member.roles.cache.has(rank.roleId));
+        if (openerRankIndex < 0 || claimantRankIndex !== openerRankIndex - 1) {
+          return interaction.reply({ content: '❌ Only the Chain of Command team exactly one level above the case opener can claim this case.', flags: MessageFlags.Ephemeral });
+        }
+        if (record.supervisorIds.includes(interaction.user.id)) {
+          return interaction.reply({ content: 'You have already claimed supervisor responsibility for this case.', flags: MessageFlags.Ephemeral });
+        }
+        record.supervisorIds.push(interaction.user.id);
+        await record.save();
+        await interaction.channel.send({ content: `🛡️ **Case supervisor claimed**\\n<@${interaction.user.id}> has claimed supervisor responsibility for Case #${record.number}.` });
+        return interaction.reply({ content: `✅ You claimed supervisor responsibility for Case #${record.number}.`, flags: MessageFlags.Ephemeral });
+      }
 
       if (id.startsWith('staffreq__')) {
         const [, action, requestId] = id.split('__');
@@ -3492,28 +3515,6 @@ client.on('interactionCreate', async (interaction) => {
         }
         return interaction.reply({ content: `✅ Case #${number} created: <#${thread.id}>.`, flags: MessageFlags.Ephemeral });
       }
-      if (cmd === 'case' && caseSubcommand === 'claim') {
-        const record = await CaseFileModel.findOne({ guildId, number: interaction.options.getInteger('number', true) });
-        if (!record) return interaction.reply({ content: '❌ Case not found.', flags: MessageFlags.Ephemeral });
-        if (!interaction.channel?.isThread?.() || interaction.channel.id !== record.threadId) {
-          return interaction.reply({ content: '❌ Claim the case from inside its Forum thread.', flags: MessageFlags.Ephemeral });
-        }
-        if (record.status === 'Closed') return interaction.reply({ content: '❌ This case is already closed.', flags: MessageFlags.Ephemeral });
-        const ranks = cfg.coc?.ranks || [];
-        const opener = await interaction.guild.members.fetch(record.createdBy).catch(() => null);
-        const openerRankIndex = opener ? ranks.findIndex(rank => rank.roleId && opener.roles.cache.has(rank.roleId)) : -1;
-        const claimantRankIndex = ranks.findIndex(rank => rank.roleId && member.roles.cache.has(rank.roleId));
-        if (openerRankIndex < 0 || claimantRankIndex !== openerRankIndex - 1) {
-          return interaction.reply({ content: '❌ Only the Chain of Command team exactly one level above the case opener can claim this case. Check the configured CoC order in /setup.', flags: MessageFlags.Ephemeral });
-        }
-        if (record.supervisorIds.includes(interaction.user.id)) {
-          return interaction.reply({ content: 'You have already claimed supervisor responsibility for this case.', flags: MessageFlags.Ephemeral });
-        }
-        record.supervisorIds.push(interaction.user.id);
-        await record.save();
-        await interaction.channel.send({ content: `🛡️ **Case supervisor claimed**\n<@${interaction.user.id}> has claimed supervisor responsibility. Their CoC level is one team above the case opener.` });
-        return interaction.reply({ content: `✅ You claimed supervisor responsibility for case #${record.number}.`, flags: MessageFlags.Ephemeral });
-      }
       if (cmd === 'case' && caseSubcommand === 'close') {
         const record = await CaseFileModel.findOne({ guildId, threadId: interaction.channel.id });
         if (!record) return interaction.reply({ content: '❌ This command only works inside an active case thread.', flags: MessageFlags.Ephemeral });
@@ -3558,12 +3559,16 @@ client.on('interactionCreate', async (interaction) => {
         if (channel.type !== ChannelType.GuildForum) {
           throw new Error('The configured case channel must be a Q&A / Forum channel.');
         }
+        const claimRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`caseclaim__${number}`).setLabel('Claim Supervisor').setEmoji('🛡️').setStyle(ButtonStyle.Primary),
+        );
         const thread = await channel.threads.create({
           name: `case-${String(number).padStart(4,'0')}-${reported.username}`.slice(0, 100),
           autoArchiveDuration: 10080,
           message: {
             content: pingIds.map(x => `<@&${x}>`).join(' ') || undefined,
             embeds: [embed],
+            components: [claimRow],
             allowedMentions: { roles: pingIds },
           },
         });
